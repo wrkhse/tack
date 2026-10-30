@@ -1,16 +1,11 @@
-# Workhorse
+# Workhorse: tack
 
-Workhorse is an open protocol for durable, sandboxed agent infrastructure.
+This branch holds `@workhorse/tack`, an SDK for writing a coding-agent plugin once and running it in OpenCode, Pi, Claude Code and Codex. It is independent of the rest of Workhorse.
 
-Projects live under the [`wrkhse`](https://github.com/wrkhse) GitHub organization.
+Status: design and research only. Nothing is built. Start at [`spike/unagent/README.md`](spike/unagent/README.md).
 
-## Projects
+Other branches:
 
-- [`daemon/`](daemon/) — a shared capability daemon and framework for modular MCP servers.
-
-## Archive
-
-Earlier versions of Workhorse live on their own branches:
-
-- [`legacy`](https://github.com/StevenJPx2/workhorse/tree/legacy): the command-line and terminal UI tool.
-- [`fleet-v0`](https://github.com/StevenJPx2/workhorse/tree/fleet-v0): the autonomous coding fleet on Cloudflare.
+- `main`: the high-level overview of Workhorse.
+- `daemon-v0`: everything before this split (daemon, spikes, uniform-stack proposal).
+- `legacy`, `fleet-v0`: earlier versions.
