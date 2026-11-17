@@ -171,16 +171,19 @@ const isToolBearing = (request: ChatRequest): boolean => (request.tools ?? []).l
 
 /**
  * A compaction request is the one whose last message carries the configured
- * marker. Every other request is classified by its tools and
- * roles: a title request has no tools, a finished turn carries a tool result,
- * and anything else gets one tool call.
+ * marker, compared without case because each agent words its own summary
+ * prompt. Every other request is classified by its tools and roles: a title
+ * request has no tools, a finished turn carries a tool result, and anything
+ * else gets one tool call.
  */
-const isCompactionRequest = (request: ChatRequest, marker: string): boolean => {
+export const isCompactionRequest = (request: ChatRequest, marker: string): boolean => {
   const last = request.messages[request.messages.length - 1];
 
   if (last === undefined) return false;
 
-  return JSON.stringify(last.content ?? "").includes(marker);
+  return JSON.stringify(last.content ?? "")
+    .toLowerCase()
+    .includes(marker.toLowerCase());
 };
 
 const turnFor = (state: ModelState, request: ChatRequest, tool: ShellTool): Turn => {

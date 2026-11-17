@@ -9,7 +9,7 @@ import { runCommand } from "./run.ts";
 import { sandbox, writeText } from "./sandbox.ts";
 
 /** A Pi extension loaded with -e is one file. */
-const PLUGIN_FILE = "plugin.js";
+export const PLUGIN_FILE = "plugin.js";
 
 /** Both scripted model ids, so `setModel` has a real target. */
 const MODELS = [
@@ -35,11 +35,21 @@ const modelsJson = (baseUrl: string) => ({
   },
 });
 
-const writeModels = (dir: string, baseUrl: string): Effect.Effect<void> =>
-  writeText(
-    join(dir, "pi-agent", "models.json"),
-    JSON.stringify(modelsJson(baseUrl), null, 2) + "\n",
-  );
+/** A scripted failure must end a turn; a retry would hide it behind a later answer. */
+const settingsJson = () => ({ retry: { enabled: false } });
+
+/** Writes the sandboxed Pi models file that serves both scripted ids, and its settings. */
+export const writePiConfig = (dir: string, baseUrl: string): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    yield* writeText(
+      join(dir, "pi-agent", "models.json"),
+      JSON.stringify(modelsJson(baseUrl), null, 2) + "\n",
+    );
+    yield* writeText(
+      join(dir, "pi-agent", "settings.json"),
+      JSON.stringify(settingsJson(), null, 2) + "\n",
+    );
+  });
 
 const extensionArgs = (bundles: ReadonlyArray<string>): ReadonlyArray<string> =>
   bundles.flatMap((bundle) => ["-e", bundle]);
@@ -76,7 +86,7 @@ export const runPiScenario = (scenario: Scenario): Effect.Effect<AgentRun, never
       box.pi.env,
     );
 
-    yield* writeModels(box.dir, model.baseUrl);
+    yield* writePiConfig(box.dir, model.baseUrl);
 
     const command = yield* runCommand({
       bin: box.pi.bin,

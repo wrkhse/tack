@@ -13,7 +13,7 @@ const MAX_BUFFERED_LINES = 10_000;
 const MAX_STDERR_BYTES = 8 * 1024;
 
 /** How long the finalizer waits after SIGTERM before it sends SIGKILL. */
-const KILL_GRACE = "5 seconds";
+const KILL_GRACE_MS = 5_000;
 
 const LF = 0x0a;
 
@@ -30,6 +30,11 @@ export interface DuplexSpec {
    * stderr. The scope finalizer still terminates a child that overruns it.
    */
   readonly timeoutMs: number;
+  /**
+   * How long the scope finalizer waits after SIGTERM before it sends SIGKILL.
+   * Default 5 seconds; a test that proves the escalation shortens it.
+   */
+  readonly graceMs?: number;
 }
 
 /**
@@ -239,7 +244,11 @@ const waitForExit = (state: ChildState, spec: DuplexSpec): Effect.Effect<number>
  * Asks the child to stop, then kills it. A child that ignores SIGTERM gets
  * SIGKILL after the grace; the second grace bounds teardown even then.
  */
-const terminate = (child: PipedChild, exit: Deferred.Deferred<number>): Effect.Effect<void> =>
+const terminate = (
+  child: PipedChild,
+  exit: Deferred.Deferred<number>,
+  graceMs: number,
+): Effect.Effect<void> =>
   Effect.suspend(() => {
     if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) {
       return Effect.void;
@@ -248,20 +257,25 @@ const terminate = (child: PipedChild, exit: Deferred.Deferred<number>): Effect.E
     child.kill("SIGTERM");
 
     return Deferred.await(exit).pipe(
-      Effect.timeoutOption(KILL_GRACE),
+      Effect.timeoutOption(graceMs),
       Effect.flatMap((stopped) => {
         if (Option.isSome(stopped)) return Effect.void;
 
         child.kill("SIGKILL");
 
-        return Deferred.await(exit).pipe(Effect.timeoutOption(KILL_GRACE), Effect.asVoid);
+        return Deferred.await(exit).pipe(Effect.timeoutOption(graceMs), Effect.asVoid);
       }),
     );
   });
 
 /** Terminates the child, then detaches every listener from it. */
-const shutdown = (child: PipedChild, state: ChildState, watchers: Watchers): Effect.Effect<void> =>
-  terminate(child, state.exit).pipe(
+const shutdown = (
+  child: PipedChild,
+  state: ChildState,
+  watchers: Watchers,
+  graceMs: number,
+): Effect.Effect<void> =>
+  terminate(child, state.exit, graceMs).pipe(
     Effect.ensuring(
       Effect.sync(() => {
         child.stdout.off("data", watchers.onStdout);
@@ -299,7 +313,7 @@ export const duplexChild = (spec: DuplexSpec): Effect.Effect<Duplex, never, Scop
     };
 
     const child = yield* Effect.acquireRelease(start(spec), (started) =>
-      shutdown(started, state, watchers),
+      shutdown(started, state, watchers, spec.graceMs ?? KILL_GRACE_MS),
     );
 
     child.stdout.on("data", watchers.onStdout);

@@ -25,12 +25,13 @@ const IGNORES_SIGTERM = [
 ].join("\n");
 
 /** The test runner's own node-compatible binary, run as a fake child. */
-const spec = (script: string): DuplexSpec => ({
+const spec = (script: string, graceMs = 5_000): DuplexSpec => ({
   bin: process.execPath,
   args: ["-e", script],
   cwd: process.cwd(),
   env: {},
   timeoutMs: 30_000,
+  graceMs,
 });
 
 it.live("writes lines and completes when stdin closes", () =>
@@ -82,7 +83,7 @@ it.live(
 
       const captured = yield* Effect.scoped(
         Effect.gen(function* () {
-          const child = yield* duplexChild(spec(IGNORES_SIGTERM));
+          const child = yield* duplexChild(spec(IGNORES_SIGTERM, 200));
 
           yield* child.lines.pipe(Stream.runHead);
 
@@ -94,7 +95,10 @@ it.live(
       const after = yield* Clock.currentTimeMillis;
 
       expect(code).toBe(-1);
-      expect(after - before).toBeGreaterThanOrEqual(4_500);
+      // The 200 ms grace proves the escalation; a run on the 5 s default would
+      // take seconds longer than this bound allows.
+      expect(after - before).toBeGreaterThanOrEqual(150);
+      expect(after - before).toBeLessThan(4_000);
     }),
   15_000,
 );

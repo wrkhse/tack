@@ -20,7 +20,18 @@ export type PluginName =
   | "safe-push"
   | "signed-push"
   | "push-note"
-  | "observe";
+  | "observe"
+  | "append-wake"
+  | "append-outside"
+  | "append-now"
+  | "append-next"
+  | "permission-deny"
+  | "idle-note"
+  | "finished-note"
+  | "lifecycle-note"
+  | "interrupt-action"
+  | "model-switch"
+  | "compact-action";
 
 /** What one CLI run left behind. */
 export interface AgentRun {
@@ -86,7 +97,7 @@ const tail = (text: string): string =>
   text.length > TAIL_CHARS ? "..." + text.slice(-TAIL_CHARS) : text;
 
 /** The exit code and both output tails, for the message of a failed assertion. */
-const describeRun = (evidence: Evidence): string =>
+export const describeRun = (evidence: Evidence): string =>
   [
     "agent: " + evidence.agent,
     "exit code: " + evidence.command.exitCode,
@@ -104,12 +115,21 @@ const loadedNames = (names: ReadonlyArray<string>): ReadonlyArray<string> =>
 const listed = (names: ReadonlyArray<string>): string =>
   names.length === 0 ? "none" : names.join(", ");
 
+/** A run's loaded names, however the run was driven. */
+export interface LoadedEvidence {
+  readonly loaded: ReadonlyArray<string>;
+}
+
 /**
  * Asserts that the run loaded exactly the scenario's plugins: a plugin that
  * silently failed to load leaves its assertion about absence resting on
- * nothing.
+ * nothing. `details` names what the run saw when the sets differ.
  */
-export const assertLoaded = (evidence: Evidence, plugins: ReadonlyArray<PluginName>): void => {
+export const assertLoaded = (
+  evidence: LoadedEvidence,
+  plugins: ReadonlyArray<PluginName>,
+  details: string,
+): void => {
   const expected = loadedNames(plugins);
   const loaded = loadedNames(evidence.loaded);
 
@@ -119,13 +139,13 @@ export const assertLoaded = (evidence: Evidence, plugins: ReadonlyArray<PluginNa
     "\nplugins that loaded: " +
     listed(loaded) +
     "\n" +
-    describeRun(evidence);
+    details;
 
   assert.deepEqual(loaded, expected, message);
 };
 
 /** The content of every message with one role, stringified into one searchable string. */
-const textFor = (requests: ReadonlyArray<ChatRequest>, role: string): string =>
+export const textFor = (requests: ReadonlyArray<ChatRequest>, role: string): string =>
   requests
     .flatMap((request) => request.messages)
     .flatMap((message) => (message.role === role ? [JSON.stringify(message.content)] : []))

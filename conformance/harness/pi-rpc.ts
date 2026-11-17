@@ -80,6 +80,8 @@ export interface PiRpc {
   readonly awaitEvent: (match: EventMatch, timeoutMs?: number) => Effect.Effect<PiEvent>;
   /** Closes stdin, which is Pi's orderly shutdown request. */
   readonly end: () => Effect.Effect<void>;
+  /** The exit code; fails if the child outlives its bounded lifetime. */
+  readonly exited: Effect.Effect<number>;
 }
 
 /** How to start Pi in RPC mode. */
@@ -354,5 +356,6 @@ export const piRpc = (spec: PiRpcSpec): Effect.Effect<PiRpc, never, Scope.Scope>
       events: Stream.fromQueue(events).pipe(Stream.filter((event) => event.id === undefined)),
       awaitEvent: (match, timeoutMs = DEFAULT_WAIT_MS) => awaitEvent(state, match, timeoutMs),
       end: child.end,
+      exited: child.exited,
     };
   });
