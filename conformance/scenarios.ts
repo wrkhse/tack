@@ -1,0 +1,226 @@
+import assert from "node:assert/strict";
+import { join } from "node:path";
+
+import { Effect, Schema } from "effect";
+
+import { recorded } from "./harness/recorder.ts";
+import type { CommandResult } from "./harness/run.ts";
+import { readOptionalText, type Sandbox } from "./harness/sandbox.ts";
+import type { ChatRequest, StandIn } from "./model/stand-in.ts";
+
+/** The agent a scenario ran against. */
+export type AgentName = "opencode" | "pi";
+
+/** Every tack plugin the suite loads, by file name. */
+export type PluginName =
+  | "deny-push"
+  | "throws"
+  | "safe-push"
+  | "signed-push"
+  | "push-note"
+  | "observe";
+
+/** What one CLI run left behind. */
+export interface AgentRun {
+  readonly command: CommandResult;
+  readonly recorded: ReadonlyArray<string>;
+  readonly requests: ReadonlyArray<ChatRequest>;
+  readonly observedText: string | null;
+}
+
+/** One CLI run plus the agent that made it. */
+export interface Evidence extends AgentRun {
+  readonly agent: AgentName;
+}
+
+/** Reads what a finished CLI run left in its sandbox: the log, the requests, the observed file. */
+export const collectEvidence = (
+  box: Sandbox,
+  model: StandIn,
+  command: CommandResult,
+): Effect.Effect<AgentRun> =>
+  Effect.gen(function* () {
+    const requests = yield* model.requests;
+    const recorderLines = yield* recorded(box.recorderFile);
+    const observedText = yield* readOptionalText(join(box.projectDir, "tack-observed.json"));
+
+    return { command, recorded: recorderLines, requests, observedText };
+  });
+
+/** One row of the conformance table: what loads, and what must be true after. */
+export interface Scenario {
+  readonly name: string;
+  readonly plugins: ReadonlyArray<PluginName>;
+  readonly check: (evidence: Evidence) => void;
+}
+
+const DENY_REASON = "tack-conformance: push denied";
+const FAILURE_REASON = "tack-conformance: boom";
+const NOTE = "tack-conformance-note: dry runs only.";
+const REWRITTEN = "push origin main --dry-run";
+const REWRITTEN_SIGNED = "push origin main --dry-run --signed";
+const OBSERVED_COMMAND = "git push origin main --dry-run";
+
+const TAIL_CHARS = 4000;
+
+const ObservedSchema = Schema.Struct({
+  command: Schema.String,
+  output: Schema.String,
+  isError: Schema.Boolean,
+});
+
+const tail = (text: string): string =>
+  text.length > TAIL_CHARS ? "..." + text.slice(-TAIL_CHARS) : text;
+
+/** The exit code and both output tails, for the message of a failed assertion. */
+const describeRun = (evidence: Evidence): string =>
+  [
+    "agent: " + evidence.agent,
+    "exit code: " + evidence.command.exitCode,
+    "stdout tail:",
+    tail(evidence.command.stdout),
+    "stderr tail:",
+    tail(evidence.command.stderr),
+  ].join("\n");
+
+/** The content of every message with one role, stringified into one searchable string. */
+const textFor = (requests: ReadonlyArray<ChatRequest>, role: string): string =>
+  requests
+    .flatMap((request) => request.messages)
+    .flatMap((message) => (message.role === role ? [JSON.stringify(message.content)] : []))
+    .join("\n");
+
+const observed = (text: string) => Schema.decodeUnknownSync(ObservedSchema)(JSON.parse(text));
+
+const deny: Scenario = {
+  name: "deny",
+  plugins: ["deny-push"],
+  check: (evidence) => {
+    const details = describeRun(evidence);
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.deepEqual(evidence.recorded, [], "a denied push must not reach git\n" + details);
+    assert.ok(
+      textFor(evidence.requests, "tool").includes(DENY_REASON),
+      "the model must receive the deny reason\n" + details,
+    );
+  },
+};
+
+const failClosed: Scenario = {
+  name: "fail closed",
+  plugins: ["throws"],
+  check: (evidence) => {
+    const details = describeRun(evidence);
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.deepEqual(evidence.recorded, [], "a failed guard must not reach git\n" + details);
+    assert.ok(
+      textFor(evidence.requests, "tool").includes(FAILURE_REASON),
+      "the model must receive the failure reason\n" + details,
+    );
+  },
+};
+
+const rewrite: Scenario = {
+  name: "rewrite",
+  plugins: ["safe-push"],
+  check: (evidence) => {
+    const details = describeRun(evidence);
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.deepEqual(evidence.recorded, [REWRITTEN], "the rewrite must reach git\n" + details);
+  },
+};
+
+const combine: Scenario = {
+  name: "combine",
+  plugins: ["safe-push", "signed-push"],
+  check: (evidence) => {
+    const details = describeRun(evidence);
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.deepEqual(
+      evidence.recorded,
+      [REWRITTEN_SIGNED],
+      "both rewrites must reach git\n" + details,
+    );
+  },
+};
+
+const combineReversed: Scenario = {
+  name: "combine reversed",
+  plugins: ["signed-push", "safe-push"],
+  check: (evidence) => {
+    const details = describeRun(evidence);
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.deepEqual(
+      evidence.recorded,
+      [REWRITTEN_SIGNED],
+      "both rewrites must reach git in either load order\n" + details,
+    );
+  },
+};
+
+const append: Scenario = {
+  name: "append",
+  plugins: ["push-note"],
+  check: (evidence) => {
+    const details = describeRun(evidence);
+    const firstWithTools = evidence.requests.find((request) => (request.tools ?? []).length > 0);
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.ok(
+      firstWithTools !== undefined,
+      "the model must receive a request with tools\n" + details,
+    );
+    assert.ok(
+      textFor([firstWithTools], "user").includes(NOTE),
+      "the prompt must carry the appended note\n" + details,
+    );
+  },
+};
+
+const after: Scenario = {
+  name: "after",
+  plugins: ["safe-push", "observe"],
+  check: (evidence) => {
+    const details = describeRun(evidence);
+    const text = evidence.observedText;
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.ok(text !== null, "observe must write tack-observed.json\n" + details);
+
+    const result = observed(text);
+
+    assert.equal(
+      result.command,
+      OBSERVED_COMMAND,
+      "observe must see the rewritten command\n" + details,
+    );
+    assert.ok(result.output.includes("recorded"), "observe must see the tool output\n" + details);
+    assert.equal(result.isError, false, "the run must not be an error\n" + details);
+  },
+};
+
+/** The conformance table: every scenario in both agents. */
+export const scenarios: ReadonlyArray<Scenario> = [
+  deny,
+  failClosed,
+  rewrite,
+  combine,
+  combineReversed,
+  append,
+  after,
+];
+
+const VERSION_PATTERN = /(\d+\.\d+\.\d+)/;
+
+/** Asserts that a CLI reports the version its package is pinned to. */
+export const assertVersion = (label: string, output: string, pin: string): void => {
+  const match = VERSION_PATTERN.exec(output);
+
+  assert.ok(match !== null, label + " printed no version: " + output);
+  assert.equal(match[1], pin, label + " does not match the pinned " + pin + ": " + output);
+};

@@ -1,0 +1,78 @@
+import { dirname, join } from "node:path";
+
+import { Effect, type Scope } from "effect";
+
+import { standInModel } from "../model/stand-in.ts";
+import { collectEvidence, type AgentRun, type Scenario } from "../scenarios.ts";
+import { bundleScenarioPlugins } from "./bundle.ts";
+import { runCommand } from "./run.ts";
+import { sandbox, writeText } from "./sandbox.ts";
+
+/** An OpenCode plugin is a directory whose entry file is index.js. */
+const PLUGIN_FILE = "index.js";
+
+const projectConfig = (pluginDirectories: ReadonlyArray<string>, baseUrl: string) => ({
+  $schema: "https://opencode.ai/config.json",
+  model: "fake/scripted",
+  update: "disable",
+  providers: {
+    fake: {
+      name: "Fake",
+      package: "@opencode/ai/providers/openai-compatible",
+      settings: { baseURL: baseUrl, apiKey: "test" },
+      models: {
+        scripted: {
+          capabilities: { tools: true, input: ["text"], output: ["text"] },
+          limit: { context: 32768, output: 4096 },
+        },
+      },
+    },
+  },
+  permissions: [{ action: "shell", resource: "*", effect: "allow" }],
+  plugins: pluginDirectories,
+});
+
+const writeConfig = (
+  dir: string,
+  pluginDirectories: ReadonlyArray<string>,
+  baseUrl: string,
+): Effect.Effect<void> =>
+  writeText(
+    join(dir, "xdg", "config", "opencode", "opencode.json"),
+    JSON.stringify(projectConfig(pluginDirectories, baseUrl), null, 2) + "\n",
+  );
+
+/**
+ * Runs one scenario in the real OpenCode CLI: a fresh sandbox, the scripted
+ * model, one bundle per plugin, and one standalone run in a fresh project.
+ */
+export const runOpenCodeScenario = (
+  scenario: Scenario,
+): Effect.Effect<AgentRun, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const box = yield* sandbox;
+    const model = yield* standInModel("shell");
+
+    const bundles = yield* bundleScenarioPlugins(
+      box.dir,
+      scenario.plugins,
+      "opencode",
+      PLUGIN_FILE,
+      box.opencode.env,
+    );
+
+    yield* writeConfig(
+      box.dir,
+      bundles.map((bundle) => dirname(bundle)),
+      model.baseUrl,
+    );
+
+    const command = yield* runCommand({
+      bin: box.opencode.bin,
+      args: ["run", "--standalone", "--format", "json", "-m", "fake/scripted", "push it"],
+      cwd: box.projectDir,
+      env: box.opencode.env,
+    });
+
+    return yield* collectEvidence(box, model, command);
+  });
