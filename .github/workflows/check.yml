@@ -51,11 +51,29 @@ jobs:
           run-install: false
       - run: bun install --frozen-lockfile
       - name: Verify the pinned install
-        # An out-of-band install changes the lockfile or manifest; a postinstall
-        # that did not run leaves a tiny stub instead of the real CLI.
+        # An out-of-band install changes the lockfile or manifest. @opencode/cli's
+        # postinstall links the binary of the installed platform package; a
+        # fallback install fetches its own copy instead, which leaves the
+        # lockfile untouched and the bytes unequal.
         run: |
           git diff --exit-code -- bun.lock package.json
 
-          test -x node_modules/.bin/opencode
-          test "$(wc -c < node_modules/.bin/opencode)" -gt 1024
+          platform=(node_modules/@opencode/cli-*/bin/opencode)
+
+          if [ "${#platform[@]}" -ne 1 ] || [ ! -f "${platform[0]}" ]; then
+            echo "expected one platform binary, found: ${platform[*]}" >&2
+            exit 1
+          fi
+
+          if [ ! -e node_modules/.bin/opencode ]; then
+            echo "the suite's entry point, node_modules/.bin/opencode, is missing" >&2
+            exit 1
+          fi
+
+          installed="$(readlink -f node_modules/.bin/opencode)"
+
+          if ! cmp -s "$installed" "${platform[0]}"; then
+            echo "the suite would run $installed, not the platform package's ${platform[0]}" >&2
+            exit 1
+          fi
       - run: bun run conformance:${{ matrix.agent }}
