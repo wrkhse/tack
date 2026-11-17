@@ -40,9 +40,10 @@ The stand-in model answers four ways. A request without tools is a title
 request, so it gets the text `title`. A request that carries a tool result gets
 `done`, which ends the turn. Every other request gets one tool call, the agent's
 own shell tool with `git push origin main`. A marked request answers with the
-summary text instead, which is how the compaction row proves its call. Pi's
-sandbox disables retries, so the scripted error the `finished error` row arms
-ends its turn rather than being retried into a later success.
+summary text instead, which is how the compaction row proves its call. A sticky
+error answers every tool-bearing request with the SSE error until the run ends,
+so a retry cannot rescue the turn; Pi's sandbox disables retries, and OpenCode
+spends its own retry budget before it reports the failure.
 
 ## The long-lived modes
 
@@ -213,8 +214,8 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 | t2 idle             | `idle-note`                   | one idle, then Pi's aborted and no more               |
 | t2 finished done    | `finished-note`               | every request ends `done`                             |
 | t2 finished aborted | `finished-note`               | the interrupt ends `aborted` last                     |
-| t2 finished error   | `finished-note`               | the scripted failure ends `error` last                |
-| t2 lifecycle        | `lifecycle-note`              | created; Pi ends, the OpenCode delete has no location |
+| t2 finished error   | `finished-note`               | the sticky failure ends `error`; no retry rescues it  |
+| t2 lifecycle        | `lifecycle-note`              | created; Pi ends, OpenCode's locationless delete ends |
 | t2 interrupt        | `interrupt-action`            | accepted, and the turn settles interrupted            |
 | t2 model            | `model-switch`                | accepted; Pi records `scripted-2`                     |
 | t2 compact          | `compact-action`              | accepted, and a compaction request arrives            |

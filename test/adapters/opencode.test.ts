@@ -900,6 +900,48 @@ it.effect("ignores an event with no location and warns once per process", () =>
   }),
 );
 
+it.effect("attributes a locationless event to a session it has already reported", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: (event) => {
+        seen.push(`created:${event.resumed}`);
+      },
+
+      sessionEnded: (event) => {
+        seen.push(`ended:${event.reason}`);
+      },
+
+      responseFinished: (event) => {
+        seen.push(`finished:${event.reason}`);
+      },
+    }));
+
+    const fake = fakeContext("/work/attributed");
+
+    fake.events.push(
+      {
+        type: "session.created",
+        location: { directory: "/work/attributed" },
+        data: { sessionID: "s1" },
+      },
+      { type: "session.step.ended", data: { sessionID: "s1" } },
+      { type: "session.deleted", data: { sessionID: "s1" } },
+    );
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    expect(seen).toEqual(["created:false", "finished:done", "ended:closed"]);
+
+    yield* release(cleanup);
+  }),
+);
+
 it.effect("reports idle through the experimental hook", () =>
   Effect.gen(function* () {
     const seen: string[] = [];

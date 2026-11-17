@@ -206,9 +206,11 @@ function isHere(found: EventLocation, location: oc.Location.Info): boolean {
 let warnedNoLocation = false;
 
 /**
- * Ignores an event with no location, warning once per process. A stream
- * without a location cannot be scoped, so another location's session may have
- * produced the event, and none of this scope's plugins may see it.
+ * Ignores a locationless event for a session this registration has not
+ * reported, warning once per process. A stream without a location cannot be
+ * scoped, so another location's session may have produced the event; one for a
+ * session this registration has already reported can only be that session's,
+ * so the caller attributes it to this scope.
  */
 function ignoreNoLocation(): Promise<void> {
   if (warnedNoLocation) {
@@ -280,15 +282,15 @@ function reportsFor(
       return Promise.resolve();
     }
 
-    if (found.location === undefined) {
-      return ignoreNoLocation();
-    }
+    const { sessionID } = found.data;
 
-    if (!isHere(found.location, context.location)) {
+    if (found.location !== undefined && !isHere(found.location, context.location)) {
       return Promise.resolve();
     }
 
-    const { sessionID } = found.data;
+    if (found.location === undefined && !seen.has(sessionID)) {
+      return ignoreNoLocation();
+    }
 
     if (found.type === "session.created") {
       return seen.has(sessionID) ? Promise.resolve() : created(sessionID, false);

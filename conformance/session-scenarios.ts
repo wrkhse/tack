@@ -63,6 +63,12 @@ const MID_TURN_MS = 2_000;
  */
 const SLOW_TURN_MS = MAX_POST_TOOL_DELAY_MS;
 
+/**
+ * How long OpenCode's retry budget may run: ten retries at 2, 4 and 8 s, then
+ * 10 s each, about 84 s, and its jitter can take that to about 101 s.
+ */
+const ERROR_SETTLE_MS = 120_000;
+
 /** Matches a request the way the conformance table describes one. */
 const hasText = (request: ChatRequest, text: string): boolean =>
   JSON.stringify(request.messages).includes(text);
@@ -139,6 +145,7 @@ const waitForObservation = (
   name: string,
   accepts: (observation: MarkerObservation) => boolean,
   what: string,
+  timeoutMs?: number,
 ): Effect.Effect<void> =>
   waitForEvidence(
     what,
@@ -148,6 +155,7 @@ const waitForObservation = (
         seen: describeObservations(observations, driver.signals(), driver.trail()),
       })),
     ),
+    timeoutMs,
   );
 
 /**
@@ -217,10 +225,16 @@ const frameLocated = (frame: Schema.Json): boolean =>
 const assertFinished = (evidence: SessionEvidence, reason: "aborted" | "error"): void => {
   const details = describeSession(evidence);
   const finished = observationsOf(evidence, "finished-note");
+  const reasons = finished.map((observation) => String(observation["reason"]));
 
   assert.ok(
     finished.some((observation) => observation["reason"] === reason),
-    "a request must be reported " + reason + "\n" + details,
+    "a request must be reported " +
+      reason +
+      "\nreported reasons: " +
+      listed(reasons) +
+      "\n" +
+      details,
   );
 };
 
@@ -483,11 +497,11 @@ const finishedAborted: SessionScenario = {
 const finishedError: SessionScenario = {
   name: "t2 finished error",
   plugins: ["finished-note"],
-  standIn: { failNext: true },
+  standIn: { failMode: "always" },
   run: (driver) =>
     Effect.gen(function* () {
       yield* driver.prompt(PUSH);
-      yield* driver.settle();
+      yield* driver.settle(ERROR_SETTLE_MS);
       yield* waitForObservation(
         driver,
         "finished-note",
@@ -507,6 +521,12 @@ const lifecycle: SessionScenario = {
     Effect.gen(function* () {
       yield* driver.waitMarker("lifecycle-note");
       yield* driver.endSession();
+      yield* waitForObservation(
+        driver,
+        "lifecycle-note",
+        (observation) => observation["event"] === "ended",
+        "the deleted session reported ended",
+      );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
@@ -539,16 +559,13 @@ const lifecycle: SessionScenario = {
     );
     assert.ok(
       deletes.every((frame) => !frameLocated(frame)),
-      "OpenCode 2.3.0 publishes the delete without a location, so tack cannot attribute it " +
-        "to this scope; a located delete means the plugin may report the end and this row " +
-        "must expect one\n" +
+      "OpenCode 2.3.0 publishes the delete without a location, so the adapter must attribute " +
+        "it to the session it already reported; a located delete means the adapter no longer " +
+        "needs that rule\n" +
         details,
     );
-    assert.equal(
-      ended.length,
-      0,
-      "a delete with no location is ignored, so the plugin must report no ended\n" + details,
-    );
+    assert.equal(ended.length, 1, "one session must be reported ended\n" + details);
+    assert.equal(ended[0]?.["reason"], "closed", "the delete must report closed\n" + details);
   },
 };
 

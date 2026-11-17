@@ -57,8 +57,8 @@ export class MarkerTimeout extends Schema.TaggedError<
 export interface Driver {
   /** Sends one prompt. It returns when the agent admits the prompt. */
   readonly prompt: (text: string) => Effect.Effect<void>;
-  /** Waits for the turn to end, whichever way it ended. */
-  readonly settle: () => Effect.Effect<void>;
+  /** Waits for the turn to end, whichever way it ended; `timeoutMs` overrides the bound. */
+  readonly settle: (timeoutMs?: number) => Effect.Effect<void>;
   /** Stops the running turn and waits for it to end. */
   readonly interrupt: () => Effect.Effect<void>;
   /** DELETE on OpenCode, stdin close on Pi. */
@@ -185,15 +185,16 @@ const gaveUp = (what: string, timeoutMs: number, seen: string): Effect.Effect<vo
   );
 
 /** Takes the next turn's terminal signal, bounded so a silent agent fails the run. */
-export const nextSignal = (signals: Queue.Queue<SettledSignal>): Effect.Effect<SettledSignal> =>
+export const nextSignal = (
+  signals: Queue.Queue<SettledSignal>,
+  timeoutMs = SETTLE_TIMEOUT_MS,
+): Effect.Effect<SettledSignal> =>
   Queue.take(signals).pipe(
     Effect.timeoutOrElse({
-      duration: SETTLE_TIMEOUT_MS,
+      duration: timeoutMs,
       orElse: () =>
         Effect.die(
-          new Error(
-            "tack-conformance: no terminal turn signal within " + SETTLE_TIMEOUT_MS + " ms",
-          ),
+          new Error("tack-conformance: no terminal turn signal within " + timeoutMs + " ms"),
         ),
     }),
   );

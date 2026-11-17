@@ -34,13 +34,18 @@ const DEFAULT_COMPACTION_MARKER = "tack-conformance: summarize this session";
 /** The short text a compaction request is answered with. */
 const SCRIPTED_SUMMARY = "summary";
 
-/** The message in the SSE error that `failNext` answers with. */
+/** The message in the SSE error a scripted failure answers with. */
 const SCRIPTED_ERROR = "tack-conformance: scripted request failure";
 
 /** How the stand-in answers, and how long it waits before doing so. */
 export interface StandInOptions {
-  /** Fails the next tool-bearing request with an SSE error. */
-  readonly failNext?: boolean;
+  /**
+   * Fails tool-bearing requests with an SSE error. `next` fails one, so the
+   * agent's retry can succeed; `always` fails each until `failNext(false)`
+   * clears it or the run ends, so a retry cannot rescue the turn. The run is
+   * bounded by `MAX_REQUESTS`; absent arms nothing.
+   */
+  readonly failMode?: "next" | "always";
   /**
    * The text that marks a compaction request. A scenario puts it in the text
    * its plugin's `session.compact()` triggers, so the model can tell that
@@ -60,14 +65,16 @@ export interface StandIn {
   readonly baseUrl: string;
   /** Every request body the server parsed, in arrival order. */
   readonly requests: Effect.Effect<ReadonlyArray<ChatRequest>>;
-  /** Arms an SSE error for the next tool-bearing request. */
-  readonly failNext: Effect.Effect<void>;
+  /** Arms the failure mode, or clears it with `false`. */
+  readonly failNext: (armed?: boolean) => Effect.Effect<void>;
 }
 
 interface ModelState {
   handled: number;
   toolTurns: number;
-  failNext: boolean;
+  /** Whether a tool-bearing request fails now; `failMode` says one or every one. */
+  failing: boolean;
+  readonly failMode: "next" | "always";
   readonly compactionMarker: string;
   readonly postToolDelayMs: number;
   readonly requests: Array<ChatRequest>;
@@ -189,8 +196,8 @@ export const isCompactionRequest = (request: ChatRequest, marker: string): boole
 };
 
 const turnFor = (state: ModelState, request: ChatRequest, tool: ShellTool): Turn => {
-  if (isToolBearing(request) && state.failNext) {
-    state.failNext = false;
+  if (isToolBearing(request) && state.failing) {
+    if (state.failMode === "next") state.failing = false;
 
     return { lines: errorTurn(), delayMs: 0 };
   }
@@ -359,9 +366,10 @@ const stopServer = (server: Server): Effect.Effect<void> =>
 const standIn = (state: ModelState, port: number): StandIn => ({
   baseUrl: "http://127.0.0.1:" + port + "/v1",
   requests: Effect.sync(() => [...state.requests]),
-  failNext: Effect.sync(() => {
-    state.failNext = true;
-  }),
+  failNext: (armed = true) =>
+    Effect.sync(() => {
+      state.failing = armed;
+    }),
 });
 
 /**
@@ -376,7 +384,8 @@ export const standInModel = (
     const state: ModelState = {
       handled: 0,
       toolTurns: 0,
-      failNext: options.failNext ?? false,
+      failing: options.failMode !== undefined,
+      failMode: options.failMode ?? "next",
       compactionMarker: options.compactionMarker ?? DEFAULT_COMPACTION_MARKER,
       postToolDelayMs: boundedDelay(options.postToolDelayMs),
       requests: [],

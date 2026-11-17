@@ -156,7 +156,7 @@ const driverFor = (input: PiDriverInput): Driver => {
   return {
     ...evidenceOf(input),
     prompt: (text) => request({ type: "prompt", message: text }).pipe(Effect.flatMap(refused)),
-    settle: () => nextSignal(input.signals).pipe(Effect.asVoid),
+    settle: (timeoutMs) => nextSignal(input.signals, timeoutMs).pipe(Effect.asVoid),
     interrupt: () =>
       request({ type: "abort" }).pipe(
         Effect.flatMap(refused),

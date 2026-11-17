@@ -138,9 +138,10 @@ const waitForTurn = (
   sessionID: string,
   before: number | undefined,
   witness: Witness,
+  timeoutMs = SETTLE_TIMEOUT_MS,
 ): Effect.Effect<SessionOutcome> =>
   Effect.gen(function* () {
-    const attempts = Math.max(1, Math.ceil(SETTLE_TIMEOUT_MS / TURN_POLL_MS));
+    const attempts = Math.max(1, Math.ceil(timeoutMs / TURN_POLL_MS));
     let seen: SessionTurn | undefined;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -159,7 +160,7 @@ const waitForTurn = (
         "tack-conformance: the turn on session " +
           sessionID +
           " did not end within " +
-          SETTLE_TIMEOUT_MS +
+          timeoutMs +
           " ms" +
           "\nlast read: outcome " +
           shownValue(seen?.outcome) +
@@ -219,11 +220,13 @@ interface OpenCodeDriverInput {
 const driverFor = (input: OpenCodeDriverInput): Driver => {
   let before: number | undefined;
 
-  const settle = (): Effect.Effect<void> =>
-    Effect.flatMap(waitForTurn(input.server, input.sessionID, before, input.witness), (outcome) =>
-      Effect.sync(() => {
-        input.settled.push(signalOf(outcome));
-      }),
+  const settle = (timeoutMs?: number): Effect.Effect<void> =>
+    Effect.flatMap(
+      waitForTurn(input.server, input.sessionID, before, input.witness, timeoutMs),
+      (outcome) =>
+        Effect.sync(() => {
+          input.settled.push(signalOf(outcome));
+        }),
     );
 
   return {

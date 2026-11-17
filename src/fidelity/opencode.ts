@@ -77,12 +77,12 @@ export const opencodeFidelity: Fidelity = {
     },
     "event.sessionCreated": {
       fidelity: "native",
-      how: "`session.created` through `ctx.event.subscribe`, filtered by `event.location` because the event stream is not location-scoped; an event with no location is ignored. The adapter subscribes at load, and a session already open when the plugin loaded gets no `session.created`, so its first event reports `sessionCreated` with `resumed: true`, then the event",
+      how: "`session.created` through `ctx.event.subscribe`, filtered by `event.location` because the event stream is not location-scoped; an event with no location is ignored unless this scope already reported its session. The adapter subscribes at load, and a session already open when the plugin loaded gets no `session.created`, so its first event reports `sessionCreated` with `resumed: true`, then the event",
       source: source("packages/schema/src/session-event.ts#L39-L57"),
     },
     "event.sessionEnded": {
-      fidelity: "unsupported",
-      how: "`session.deleted` and `session.archived` arrive through `ctx.event.subscribe`, and the adapter reports `closed` for either after filtering on `event.location`, because the stream is not location-scoped. OpenCode publishes the delete from `Session.remove` with only `{ sessionID }`: the route carries no session-location middleware, where `session.prompt` does (API → Session → `session.remove`), and an event takes a location only from the ambient one. A delete therefore has no location, tack ignores it, and a session ended with `DELETE /api/session/{id}` reports no end. A disconnect never ends the handle",
+      fidelity: "native",
+      how: "`session.deleted` and `session.archived` arrive through `ctx.event.subscribe`, and the adapter reports `closed` for either after filtering on `event.location`, because the stream is not location-scoped. OpenCode publishes the delete from `Session.remove` with only `{ sessionID }`: the route carries no session-location middleware, where `session.prompt` does (API → Session → `session.remove`), and an event takes a location only from the ambient one. A delete therefore has no location; the adapter attributes a locationless event to a session it already reported in this scope, since no other location can hold that session, and still ignores one for an unseen session with a single warning. A disconnect never ends the handle",
       source: source("packages/schema/src/session-event.ts#L133-L137"),
     },
     "event.sessionIdle": {
