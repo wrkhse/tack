@@ -67,7 +67,9 @@ OpenCode runs through its server session: `opencode serve` on a private
 loopback port with a private password, a session created over
 `POST /api/session` after the plugin is listed, prompts over
 `POST /api/session/{id}/prompt`, and `DELETE /api/session/{id}` to end it. The
-driver waits on `session.execution.succeeded`, `interrupted` or `failed`.
+driver reads `GET /api/session/{id}` until `outcome` and `time.idle` say the
+prompted turn has finished, and keeps a few of the server's own event frames so
+a wait that runs out prints them.
 
 Pi runs in RPC mode: `pi --mode rpc --no-session` with each plugin on `-e`. RPC
 mode forwards the agent's session events only, so readiness is one `get_state`
@@ -76,10 +78,10 @@ answer rather than a `session_start` record. The driver writes `prompt` and
 session, which reports `session_shutdown` reason `quit` to the plugins.
 
 Both drivers expose the same `Driver` to a row: `prompt`, `settle`,
-`interrupt`, `endSession`, `waitMarker`, `events`, and the three reads a
-check's evidence comes from: `requests`, `observations` and `signals`. A
-row's steps and its check never name a harness event, except where the table
-says the two agents report one differently.
+`interrupt`, `endSession`, `waitMarker`, `events`, `trail`, and the three
+reads a check's evidence comes from: `requests`, `observations` and
+`signals`. A row's steps and its check never name a harness event, except
+where the table says the two agents report one differently.
 
 ## The marker channel
 
@@ -94,8 +96,9 @@ the turn signals each settle saw.
 A row waits for the evidence it asserts instead of pausing for it: a request
 the stand-in must have received, or an observation a plugin must have written,
 is polled every 100 ms for up to 25 seconds. A run too slow to reach it fails
-with the request count and the last message, or with the observations and the
-turn signals it saw, rather than passing or failing on a fixed sleep.
+with the request count and the last message, or with the observations, the turn
+signals and the stream frames it saw, rather than passing or failing on a fixed
+sleep.
 
 The marker is how a row proves what a plugin saw rather than what the harness
 returned: the permission row can prove Pi never called the hook, and the idle
@@ -191,30 +194,30 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 
 ## Scenarios
 
-| Scenario            | Plugins                       | Passes when                                |
-| ------------------- | ----------------------------- | ------------------------------------------ |
-| deny                | `deny-push`                   | nothing recorded; reason returned          |
-| deny after          | `deny-push`, `observe`        | the same, and `toolAfter` never ran        |
-| fail closed         | `throws`                      | nothing recorded; error returned           |
-| opt out             | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded |
-| rewrite             | `safe-push`                   | `push origin main --dry-run`               |
-| combine             | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded          |
-| combine reversed    | `signed-push`, `safe-push`    | the same, in the other load order          |
-| append              | `push-note`                   | the note is in the first prompt            |
-| after               | `safe-push`, `observe`        | the observed command and output            |
-| t2 wake             | `append-wake`                 | a tool-bearing request carries the text    |
-| t2 outside hook     | `append-outside`              | the timer's text lands in a request        |
-| t2 now              | `append-now`                  | a running turn's next step carries it      |
-| t2 next             | `append-next`                 | absent first, present in a later request   |
-| t2 permission       | `permission-deny`             | OpenCode denies; Pi never asks             |
-| t2 idle             | `idle-note`                   | one idle, then Pi's aborted and no more    |
-| t2 finished done    | `finished-note`               | every request ends `done`                  |
-| t2 finished aborted | `finished-note`               | the interrupt ends `aborted` last          |
-| t2 finished error   | `finished-note`               | the scripted failure ends `error` last     |
-| t2 lifecycle        | `lifecycle-note`              | created, then ended with the right reason  |
-| t2 interrupt        | `interrupt-action`            | accepted, and the turn settles interrupted |
-| t2 model            | `model-switch`                | accepted; Pi records `scripted-2`          |
-| t2 compact          | `compact-action`              | accepted, and a compaction request arrives |
+| Scenario            | Plugins                       | Passes when                                           |
+| ------------------- | ----------------------------- | ----------------------------------------------------- |
+| deny                | `deny-push`                   | nothing recorded; reason returned                     |
+| deny after          | `deny-push`, `observe`        | the same, and `toolAfter` never ran                   |
+| fail closed         | `throws`                      | nothing recorded; error returned                      |
+| opt out             | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded            |
+| rewrite             | `safe-push`                   | `push origin main --dry-run`                          |
+| combine             | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded                     |
+| combine reversed    | `signed-push`, `safe-push`    | the same, in the other load order                     |
+| append              | `push-note`                   | the note is in the first prompt                       |
+| after               | `safe-push`, `observe`        | the observed command and output                       |
+| t2 wake             | `append-wake`                 | a tool-bearing request carries the text               |
+| t2 outside hook     | `append-outside`              | the timer's text lands in a request                   |
+| t2 now              | `append-now`                  | a running turn's next step carries it                 |
+| t2 next             | `append-next`                 | absent first, present in a later request              |
+| t2 permission       | `permission-deny`             | OpenCode denies; Pi never asks                        |
+| t2 idle             | `idle-note`                   | one idle, then Pi's aborted and no more               |
+| t2 finished done    | `finished-note`               | every request ends `done`                             |
+| t2 finished aborted | `finished-note`               | the interrupt ends `aborted` last                     |
+| t2 finished error   | `finished-note`               | the scripted failure ends `error` last                |
+| t2 lifecycle        | `lifecycle-note`              | created; Pi ends, the OpenCode delete has no location |
+| t2 interrupt        | `interrupt-action`            | accepted, and the turn settles interrupted            |
+| t2 model            | `model-switch`                | accepted; Pi records `scripted-2`                     |
+| t2 compact          | `compact-action`              | accepted, and a compaction request arrives            |
 
 ## Layout
 

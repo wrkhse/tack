@@ -1,31 +1,51 @@
-import { Effect, Predicate, Queue, Schema, Stream, type Scope } from "effect";
+import { Effect, Predicate, Schema, Stream, type Scope } from "effect";
 
 import type { StandIn } from "../model/stand-in.ts";
 import type { SessionScenario } from "../session-scenarios.ts";
 import {
   collectSessionRun,
   evidenceOf,
-  nextSignal,
+  SETTLE_TIMEOUT_MS,
+  TRAIL_LIMIT,
+  waitForEvidence,
   waitForMarker,
   type Driver,
   type MarkerTimeout,
   type SessionRun,
   type SettledSignal,
 } from "./driver.ts";
-import { opencodeServer, type OpenCodeServer } from "./opencode-server.ts";
+import {
+  opencodeServer,
+  type OpenCodeServer,
+  type SessionOutcome,
+  type SessionTurn,
+} from "./opencode-server.ts";
 import { prepareOpenCode } from "./opencode.ts";
 
-/** The most terminal signals one run may queue before the collector waits. */
-const SIGNAL_CAPACITY = 64;
-
-/** The events that end one execution, whichever way it ended. */
-const TERMINAL_TYPES = [
+/** The events a session's turns, its start and its end are told through. */
+const WITNESS_TYPES = [
+  "session.created",
+  "session.deleted",
+  "session.archived",
+  "session.execution.started",
   "session.execution.succeeded",
-  "session.execution.interrupted",
   "session.execution.failed",
+  "session.execution.interrupted",
 ] as const;
 
-/** Reads one top-level string field from an OpenCode event. */
+/** How often a wait for a turn to end reads the session again. */
+const TURN_POLL_MS = 100;
+
+/** How long the delete's own event may take to arrive. */
+const DELETE_TIMEOUT_MS = 10_000;
+
+/** The most of one frame a failure message quotes. */
+const MAX_QUOTED_CHARS = 400;
+
+const excerpt = (text: string): string =>
+  text.length > MAX_QUOTED_CHARS ? text.slice(0, MAX_QUOTED_CHARS) + "..." : text;
+
+/** Reads one top-level string field from an event. */
 const stringField = (event: Schema.Json, key: string): string | null => {
   if (!Predicate.isObject(event)) return null;
 
@@ -34,55 +54,199 @@ const stringField = (event: Schema.Json, key: string): string | null => {
   return Predicate.isString(value) ? value : null;
 };
 
-/** An interruption is the aborted turn, carried the way Pi carries it. */
-const signalOf = (kind: string): SettledSignal => ({
-  kind,
-  aborted: kind === "session.execution.interrupted",
-});
+/** Reads one string field from an event's `data`, where a session's own fields live. */
+const dataField = (event: Schema.Json, key: string): string | null => {
+  if (!Predicate.isObject(event)) return null;
 
-/** Records each of one session's terminal executions, in order. */
-const trackExecutions = (
+  const data = event["data"];
+
+  if (data === undefined || !Predicate.isObject(data)) return null;
+
+  const value = data[key];
+
+  return Predicate.isString(value) ? value : null;
+};
+
+/** Keeps the newest frames, dropping the oldest. */
+const remember = (frames: Array<Schema.Json>, event: Schema.Json): void => {
+  frames.push(event);
+
+  if (frames.length > TRAIL_LIMIT) frames.shift();
+};
+
+/** A value a failure message shows, or the word for its absence. */
+const shownValue = (value: number | string | undefined): string =>
+  value === undefined ? "none" : String(value);
+
+/** The frames a failure message prints, one per line. */
+const shownFrames = (frames: ReadonlyArray<Schema.Json>): string =>
+  frames.length === 0 ? "none" : frames.map((frame) => excerpt(JSON.stringify(frame))).join("\n");
+
+/** What the event stream showed: this session's frames, and the latest of any session. */
+interface Witness {
+  readonly frames: () => ReadonlyArray<Schema.Json>;
+  readonly recent: () => ReadonlyArray<Schema.Json>;
+}
+
+/**
+ * Records what the server's event stream says about one session. The stream is
+ * this driver's diagnostic channel: a wait that runs out prints the frames it
+ * saw, so a missing signal names the server's answer instead of silence.
+ */
+const trackEvents = (
   server: OpenCodeServer,
   sessionID: string,
-  signals: Queue.Queue<SettledSignal>,
-  settled: Array<SettledSignal>,
+  mine: Array<Schema.Json>,
+  recent: Array<Schema.Json>,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.forkScoped(
-    server.events([...TERMINAL_TYPES]).pipe(
-      Stream.filter((event) => stringField(event, "sessionID") === sessionID),
+    server.events([...WITNESS_TYPES]).pipe(
       Stream.runForEach((event) =>
-        Effect.gen(function* () {
-          const signal = signalOf(stringField(event, "type") ?? "unknown");
+        Effect.sync(() => {
+          remember(recent, event);
 
-          settled.push(signal);
-          yield* Queue.offer(signals, signal);
+          if (dataField(event, "sessionID") === sessionID) remember(mine, event);
         }),
       ),
     ),
   ).pipe(Effect.asVoid);
 
+/**
+ * The outcome the session reports once the turn that began after `before` has
+ * ended. The end this driver already saw left `idle` at `before`, so only a
+ * later end counts; while an execution runs, `idle` still holds the previous
+ * one's end, so a `busy` later than `idle` says the turn is still running.
+ */
+const finishedOutcome = (
+  before: number | undefined,
+  turn: SessionTurn,
+): SessionOutcome | undefined => {
+  const { outcome, time } = turn;
+
+  if (outcome === undefined || time.idle === undefined) return undefined;
+
+  if (time.busy !== undefined && time.idle < time.busy) return undefined;
+
+  if (before !== undefined && time.idle <= before) return undefined;
+
+  return outcome;
+};
+
+/** Waits for the turn to end, then names how it ended. */
+const waitForTurn = (
+  server: OpenCodeServer,
+  sessionID: string,
+  before: number | undefined,
+  witness: Witness,
+): Effect.Effect<SessionOutcome> =>
+  Effect.gen(function* () {
+    const attempts = Math.max(1, Math.ceil(SETTLE_TIMEOUT_MS / TURN_POLL_MS));
+    let seen: SessionTurn | undefined;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const turn = yield* server.session(sessionID);
+      const outcome = finishedOutcome(before, turn);
+
+      if (outcome !== undefined) return outcome;
+
+      seen = turn;
+
+      yield* Effect.sleep(TURN_POLL_MS);
+    }
+
+    return yield* Effect.die(
+      new Error(
+        "tack-conformance: the turn on session " +
+          sessionID +
+          " did not end within " +
+          SETTLE_TIMEOUT_MS +
+          " ms" +
+          "\nlast read: outcome " +
+          shownValue(seen?.outcome) +
+          ", busy " +
+          shownValue(seen?.time.busy) +
+          ", idle " +
+          shownValue(seen?.time.idle) +
+          ", after " +
+          shownValue(before) +
+          "\nframes for this session:\n" +
+          shownFrames(witness.frames()) +
+          "\nlast frames on the stream:\n" +
+          shownFrames(witness.recent()),
+      ),
+    );
+  });
+
+/** Waits for the server's own `session.deleted` frame for this session. */
+const waitForDeleted = (witness: Witness): Effect.Effect<void> =>
+  waitForEvidence(
+    "the server's session.deleted frame",
+    Effect.sync(() => {
+      const frames = witness.frames();
+
+      return {
+        ready: frames.some((frame) => stringField(frame, "type") === "session.deleted"),
+        seen:
+          "frames for this session:\n" +
+          shownFrames(frames) +
+          "\nlast frames on the stream:\n" +
+          shownFrames(witness.recent()),
+      };
+    }),
+    DELETE_TIMEOUT_MS,
+  );
+
+/** One turn's end: the terminal event the session's outcome names, and its abort. */
+const signalOf = (outcome: SessionOutcome): SettledSignal => ({
+  kind: "session.execution." + outcome,
+  aborted: outcome === "interrupted",
+});
+
 interface OpenCodeDriverInput {
   readonly server: OpenCodeServer;
   readonly sessionID: string;
   readonly projectDir: string;
-  readonly signals: Queue.Queue<SettledSignal>;
   readonly model: StandIn;
-  readonly settled: ReadonlyArray<SettledSignal>;
+  readonly settled: Array<SettledSignal>;
+  readonly witness: Witness;
 }
 
-/** One server session's driver; every action is the client's own call. */
-const driverFor = (input: OpenCodeDriverInput): Driver => ({
-  ...evidenceOf(input),
-  prompt: (text) => input.server.prompt(input.sessionID, text),
-  settle: () => nextSignal(input.signals).pipe(Effect.asVoid),
-  interrupt: () =>
-    input.server
-      .interrupt(input.sessionID)
-      .pipe(Effect.andThen(nextSignal(input.signals)), Effect.asVoid),
-  endSession: () => input.server.deleteSession(input.sessionID),
-  waitMarker: (name, timeoutMs) => waitForMarker(input.projectDir, name, timeoutMs),
-  events: (types) => input.server.events(types),
-});
+/**
+ * One server session's driver; every action is the client's own call. A turn
+ * is followed through the session's own record, so a turn that never ends is a
+ * session that never reported one, not a missed stream event.
+ */
+const driverFor = (input: OpenCodeDriverInput): Driver => {
+  let before: number | undefined;
+
+  const settle = (): Effect.Effect<void> =>
+    Effect.flatMap(waitForTurn(input.server, input.sessionID, before, input.witness), (outcome) =>
+      Effect.sync(() => {
+        input.settled.push(signalOf(outcome));
+      }),
+    );
+
+  return {
+    ...evidenceOf(input),
+    prompt: (text) =>
+      Effect.gen(function* () {
+        const turn = yield* input.server.session(input.sessionID);
+
+        yield* input.server.prompt(input.sessionID, text);
+
+        before = turn.time.idle;
+      }),
+    settle,
+    interrupt: () => input.server.interrupt(input.sessionID).pipe(Effect.andThen(settle())),
+    endSession: () =>
+      input.server
+        .deleteSession(input.sessionID)
+        .pipe(Effect.andThen(waitForDeleted(input.witness))),
+    waitMarker: (name, timeoutMs) => waitForMarker(input.projectDir, name, timeoutMs),
+    events: (types) => input.server.events(types),
+    trail: () => input.witness.frames(),
+  };
+};
 
 /**
  * Runs one scenario against a private OpenCode server: the scripted model, one
@@ -100,21 +264,24 @@ export const runOpenCodeSessionScenario = (
     yield* server.awaitPlugin(box.projectDir);
 
     const created = yield* server.createSession({ directory: box.projectDir });
-    const signals = yield* Queue.bounded<SettledSignal>(SIGNAL_CAPACITY);
     const settled: Array<SettledSignal> = [];
+    const mine: Array<Schema.Json> = [];
+    const recent: Array<Schema.Json> = [];
 
-    yield* trackExecutions(server, created.id, signals, settled);
+    yield* trackEvents(server, created.id, mine, recent);
+
+    const witness: Witness = { frames: () => [...mine], recent: () => [...recent] };
 
     const driver = driverFor({
       server,
       sessionID: created.id,
       projectDir: box.projectDir,
-      signals,
       model,
       settled,
+      witness,
     });
 
     yield* scenario.run(driver).pipe(Effect.ensuring(server.stop()));
 
-    return yield* collectSessionRun(box, model, settled);
+    return yield* collectSessionRun(box, model, settled, witness.frames());
   });

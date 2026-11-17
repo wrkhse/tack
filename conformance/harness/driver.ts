@@ -19,7 +19,10 @@ const EVIDENCE_TIMEOUT_MS = 25_000;
 const EVIDENCE_POLL_MS = 100;
 
 /** How long a turn, started by a prompt or stopped by an interrupt, may take. */
-const SETTLE_TIMEOUT_MS = 30_000;
+export const SETTLE_TIMEOUT_MS = 30_000;
+
+/** How many of an agent's own events a driver keeps for a failure message. */
+export const TRAIL_LIMIT = 5;
 
 /** How a turn ended, named by the harness signal that reported it. */
 export interface SettledSignal {
@@ -70,6 +73,11 @@ export interface Driver {
   readonly signals: () => ReadonlyArray<SettledSignal>;
   /** Streams the agent's own events of the given types; empty takes every type. */
   readonly events: (types: ReadonlyArray<string>) => Stream.Stream<Schema.Json>;
+  /**
+   * The last few events the agent's own stream showed of this session, for a
+   * wait that has to say what it saw instead of reporting silence.
+   */
+  readonly trail: () => ReadonlyArray<Schema.Json>;
 }
 
 /** Reads one plugin's observations as they stand; empty before it records the first. */
@@ -112,6 +120,8 @@ export interface SessionRun {
   readonly markers: ReadonlyMap<string, string>;
   /** The harness signals that ended each turn the driver waited on, in order. */
   readonly settled: ReadonlyArray<SettledSignal>;
+  /** The last events the agent's own stream showed of the session, in order. */
+  readonly trail: ReadonlyArray<Schema.Json>;
 }
 
 /** Waits for one plugin's marker file, polling until the bound runs out. */
@@ -193,6 +203,7 @@ export const collectSessionRun = (
   box: Sandbox,
   model: StandIn,
   settled: ReadonlyArray<SettledSignal>,
+  trail: ReadonlyArray<Schema.Json>,
 ): Effect.Effect<SessionRun> =>
   Effect.gen(function* () {
     const requests = yield* model.requests;
@@ -206,5 +217,6 @@ export const collectSessionRun = (
       loaded: loadedText === null ? [] : parseLoaded(loadedText),
       markers,
       settled,
+      trail,
     };
   });

@@ -81,8 +81,8 @@ export const opencodeFidelity: Fidelity = {
       source: source("packages/schema/src/session-event.ts#L39-L57"),
     },
     "event.sessionEnded": {
-      fidelity: "native",
-      how: "`session.deleted` and `session.archived` through `ctx.event.subscribe`, also filtered by `event.location`; both report `closed`. A session persists after the client stops working with it, so deletion or archival ends the handle; a disconnect does not",
+      fidelity: "unsupported",
+      how: "`session.deleted` and `session.archived` arrive through `ctx.event.subscribe`, and the adapter reports `closed` for either after filtering on `event.location`, because the stream is not location-scoped. OpenCode publishes the delete from `Session.remove` with only `{ sessionID }`: the route carries no session-location middleware, where `session.prompt` does (API → Session → `session.remove`), and an event takes a location only from the ambient one. A delete therefore has no location, tack ignores it, and a session ended with `DELETE /api/session/{id}` reports no end. A disconnect never ends the handle",
       source: source("packages/schema/src/session-event.ts#L133-L137"),
     },
     "event.sessionIdle": {

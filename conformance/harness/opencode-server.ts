@@ -70,10 +70,8 @@ export interface OpenCodeServer {
   readonly interrupt: (sessionID: string) => Effect.Effect<void>;
   /** Deletes the session, which is what emits `session.deleted`. */
   readonly deleteSession: (sessionID: string) => Effect.Effect<void>;
-  /** Reads the session, whose outcome is the poll fallback for completion. */
-  readonly session: (sessionID: string) => Effect.Effect<{
-    readonly outcome?: SessionOutcome;
-  }>;
+  /** Reads the session's own record of its last turn: its outcome and when it ran. */
+  readonly session: (sessionID: string) => Effect.Effect<SessionTurn>;
   /**
    * Streams the server's events of the given types; an empty list takes every
    * event. The stream ends when the server closes the connection.
@@ -118,8 +116,21 @@ const InfoSchema = Schema.Struct({ version: Schema.String });
 const CreatedSchema = Schema.Struct({ data: Schema.Struct({ id: Schema.String }) });
 
 const SessionSchema = Schema.Struct({
-  data: Schema.Struct({ outcome: Schema.optional(SessionOutcomeSchema) }),
+  data: Schema.Struct({
+    outcome: Schema.optional(SessionOutcomeSchema),
+    time: Schema.Struct({
+      busy: Schema.optional(Schema.Finite),
+      idle: Schema.optional(Schema.Finite),
+    }),
+  }),
 });
+
+/**
+ * A session read's turn fields. `outcome` is how the last completed execution
+ * ended, recorded at `time.idle`; `busy` is when the most recent execution
+ * started, and while one runs `idle` still holds the previous execution's end.
+ */
+export type SessionTurn = (typeof SessionSchema.Type)["data"];
 
 const PluginSchema = Schema.Struct({
   data: Schema.Array(Schema.Struct({ id: Schema.optional(Schema.String) })),
@@ -339,17 +350,10 @@ const deleteSession = (client: Client, sessionID: string): Effect.Effect<void> =
     return yield* Effect.void;
   });
 
-const session = (
-  client: Client,
-  sessionID: string,
-): Effect.Effect<{
-  readonly outcome?: SessionOutcome;
-}> =>
+const session = (client: Client, sessionID: string): Effect.Effect<SessionTurn> =>
   client
     .json({ method: "GET", path: sessionPath(sessionID) }, SessionSchema)
-    .pipe(
-      Effect.map((info) => (info.data.outcome === undefined ? {} : { outcome: info.data.outcome })),
-    );
+    .pipe(Effect.map((info) => info.data));
 
 const pluginIds = (plugins: typeof PluginSchema.Type): ReadonlyArray<string> =>
   plugins.data.flatMap((plugin) => (plugin.id === undefined ? [] : [plugin.id]));

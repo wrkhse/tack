@@ -131,7 +131,7 @@ const FAKE = [
   "",
   '  if (request.method === "GET" && id !== undefined && action === "") {',
   '    if (id === "malformed") {',
-  '      send(response, 200, { data: { outcome: "weird" } });',
+  '      send(response, 200, { data: { outcome: "weird", time: {} } });',
   "",
   "      return;",
   "    }",
@@ -142,7 +142,9 @@ const FAKE = [
   "      return;",
   "    }",
   "",
-  '    send(response, 200, { data: { id, outcome: "succeeded" } });',
+  "    send(response, 200, {",
+  '      data: { id, outcome: "succeeded", time: { busy: 1700000000000, idle: 1700000000001 } },',
+  "    });",
   "",
   "    return;",
   "  }",
@@ -303,7 +305,10 @@ it.live("sends Basic auth and the exact request of each action", () =>
       const actions = requests.filter((request) => request.url.startsWith("/api/session"));
 
       expect(created).toEqual({ id: "session-1" });
-      expect(info).toEqual({ outcome: "succeeded" });
+      expect(info).toEqual({
+        outcome: "succeeded",
+        time: { busy: 1_700_000_000_000, idle: 1_700_000_000_001 },
+      });
       expect(actions.map(({ method, url, body }) => ({ method, url, body }))).toEqual([
         {
           method: "POST",

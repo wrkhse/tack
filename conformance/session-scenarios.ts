@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { Effect, Schema } from "effect";
+import { Effect, Predicate, Schema } from "effect";
 
 import {
   waitForEvidence,
@@ -98,15 +98,24 @@ const describeRequests = (requests: ReadonlyArray<ChatRequest>): string => {
   );
 };
 
+/** What the agent's own stream showed, for a failure message. */
+const describeStream = (trail: ReadonlyArray<Schema.Json>): string =>
+  trail.length === 0
+    ? "stream: none"
+    : "stream:\n" + trail.map((frame) => "  " + excerpt(JSON.stringify(frame))).join("\n");
+
 /** What one plugin's marker recorded, for an observation wait that ran out. */
 const describeObservations = (
   observations: ReadonlyArray<MarkerObservation>,
   signals: ReadonlyArray<SettledSignal>,
+  trail: ReadonlyArray<Schema.Json>,
 ): string =>
   "recorded: " +
   listed(observations.map((observation) => JSON.stringify(observation))) +
   "\nsettled: " +
-  listed(signals.map((signal) => signal.kind));
+  listed(signals.map((signal) => signal.kind)) +
+  "\n" +
+  describeStream(trail);
 
 /** Waits until the stand-in holds a request the predicate accepts. */
 const waitForRequest = (
@@ -136,7 +145,7 @@ const waitForObservation = (
     driver.observations(name).pipe(
       Effect.map((observations) => ({
         ready: observations.some(accepts),
-        seen: describeObservations(observations, driver.signals()),
+        seen: describeObservations(observations, driver.signals(), driver.trail()),
       })),
     ),
   );
@@ -161,6 +170,7 @@ export const describeSession = (evidence: SessionEvidence): string =>
     "recorded: " + listed(evidence.recorded),
     "markers: " + listed([...evidence.markers.keys()]),
     "settled: " + listed(evidence.settled.map((signal) => signal.kind)),
+    describeStream(evidence.trail),
   ].join("\n");
 
 const observationsOf = (
@@ -189,6 +199,19 @@ const hasValue = (
 const lastReason = (
   observations: ReadonlyArray<MarkerObservation>,
 ): MarkerObservation[string] | undefined => observations.at(-1)?.["reason"];
+
+/** One stream frame's type, when it carries one. */
+const frameType = (frame: Schema.Json): string | null => {
+  if (!Predicate.isObject(frame)) return null;
+
+  const type = frame["type"];
+
+  return Predicate.isString(type) ? type : null;
+};
+
+/** Whether one stream frame names the location the adapter scopes events by. */
+const frameLocated = (frame: Schema.Json): boolean =>
+  Predicate.isObject(frame) && frame["location"] !== undefined;
 
 /** A finished-note check: some request must have ended the given way. */
 const assertFinished = (evidence: SessionEvidence, reason: "aborted" | "error"): void => {
@@ -484,12 +507,6 @@ const lifecycle: SessionScenario = {
     Effect.gen(function* () {
       yield* driver.waitMarker("lifecycle-note");
       yield* driver.endSession();
-      yield* waitForObservation(
-        driver,
-        "lifecycle-note",
-        (observation) => observation["event"] === "ended",
-        "the lifecycle-note marker's ended event",
-      );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
@@ -502,11 +519,35 @@ const lifecycle: SessionScenario = {
       "the session must be created after the plugin loads\n" + details,
     );
     assert.equal(created.length, 1, "one session must be reported created\n" + details);
-    assert.equal(ended.length, 1, "one session must be reported ended\n" + details);
+
+    if (evidence.agent === "pi") {
+      assert.equal(ended.length, 1, "one session must be reported ended\n" + details);
+      assert.equal(
+        ended[0]?.["reason"],
+        "shutdown",
+        "Pi's end reason must match the harness\n" + details,
+      );
+
+      return;
+    }
+
+    const deletes = evidence.trail.filter((frame) => frameType(frame) === "session.deleted");
+
+    assert.ok(
+      deletes.length > 0,
+      "the server must publish session.deleted for the deleted session\n" + details,
+    );
+    assert.ok(
+      deletes.every((frame) => !frameLocated(frame)),
+      "OpenCode 2.3.0 publishes the delete without a location, so tack cannot attribute it " +
+        "to this scope; a located delete means the plugin may report the end and this row " +
+        "must expect one\n" +
+        details,
+    );
     assert.equal(
-      ended[0]?.["reason"],
-      evidence.agent === "pi" ? "shutdown" : "closed",
-      "the end reason must match the harness\n" + details,
+      ended.length,
+      0,
+      "a delete with no location is ignored, so the plugin must report no ended\n" + details,
     );
   },
 };

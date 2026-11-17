@@ -6,6 +6,7 @@ import {
   collectSessionRun,
   evidenceOf,
   nextSignal,
+  TRAIL_LIMIT,
   waitForMarker,
   type Driver,
   type MarkerTimeout,
@@ -32,6 +33,8 @@ const EXIT_TIMEOUT_MS = 30_000;
 /** One event stream served from the single reader that also records signals. */
 interface PiEventLog {
   readonly events: (types: ReadonlyArray<string>) => Stream.Stream<Schema.Json>;
+  /** The last few events Pi's stream showed, for a wait that has to say what it saw. */
+  readonly trail: () => ReadonlyArray<Schema.Json>;
 }
 
 /** Pi's wire records are JSON; the driver hands them on as JSON values. */
@@ -90,7 +93,10 @@ const trackEvents = (
         );
       });
 
-    return { events };
+    const trail = (): ReadonlyArray<Schema.Json> =>
+      history.slice(-TRAIL_LIMIT).map((event) => asJson(event));
+
+    return { events, trail };
   });
 
 interface PiDriverInput {
@@ -171,6 +177,7 @@ const driverFor = (input: PiDriverInput): Driver => {
       ),
     waitMarker: (name, timeoutMs) => waitForMarker(input.projectDir, name, timeoutMs),
     events: input.log.events,
+    trail: input.log.trail,
   };
 };
 
@@ -213,5 +220,5 @@ export const runPiSessionScenario = (
 
     yield* scenario.run(driver).pipe(Effect.ensuring(rpc.end()));
 
-    return yield* collectSessionRun(box, model, settled);
+    return yield* collectSessionRun(box, model, settled, log.trail());
   });
