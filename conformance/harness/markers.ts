@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { Effect, Schema } from "effect";
@@ -14,6 +14,9 @@ const ObservationSchema = Schema.Record(Schema.String, ValueSchema);
 /** Every observation a marker file holds, in the order the plugin wrote them. */
 export const MarkerObservations = Schema.Array(ObservationSchema);
 
+/** A marker file's whole text, decoded as the observations it holds. */
+export const MarkerFile = Schema.fromJsonString(MarkerObservations);
+
 /** One thing a plugin observed, as its marker file records it. */
 export type MarkerObservation = Schema.Schema.Type<typeof ObservationSchema>;
 
@@ -23,12 +26,19 @@ export const markerFile = (dir: string, name: string): string => join(dir, PREFI
 const decode = (text: string): ReadonlyArray<MarkerObservation> =>
   Schema.decodeUnknownSync(MarkerObservations)(JSON.parse(text));
 
-/** Appends one observation to a plugin's marker file, creating it. */
+/**
+ * Appends one observation to a plugin's marker file, creating it. The write
+ * publishes the whole array in one rename, so a reader polling the file sees
+ * either the observations before this one or the ones after it, never half of
+ * a write.
+ */
 const mark = (dir: string, name: string, observation: MarkerObservation): void => {
   const file = markerFile(dir, name);
   const prior = existsSync(file) ? decode(readFileSync(file, "utf8")) : [];
+  const writing = file + ".writing";
 
-  writeFileSync(file, JSON.stringify([...prior, observation]));
+  writeFileSync(writing, JSON.stringify([...prior, observation]));
+  renameSync(writing, file);
 };
 
 /** Records an observation in the working directory the plugin runs in. */

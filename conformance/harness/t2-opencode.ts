@@ -1,8 +1,10 @@
 import { Effect, Predicate, Queue, Schema, Stream, type Scope } from "effect";
 
+import type { StandIn } from "../model/stand-in.ts";
 import type { SessionScenario } from "../session-scenarios.ts";
 import {
   collectSessionRun,
+  evidenceOf,
   nextSignal,
   waitForMarker,
   type Driver,
@@ -64,10 +66,13 @@ interface OpenCodeDriverInput {
   readonly sessionID: string;
   readonly projectDir: string;
   readonly signals: Queue.Queue<SettledSignal>;
+  readonly model: StandIn;
+  readonly settled: ReadonlyArray<SettledSignal>;
 }
 
 /** One server session's driver; every action is the client's own call. */
 const driverFor = (input: OpenCodeDriverInput): Driver => ({
+  ...evidenceOf(input),
   prompt: (text) => input.server.prompt(input.sessionID, text),
   settle: () => nextSignal(input.signals).pipe(Effect.asVoid),
   interrupt: () =>
@@ -105,6 +110,8 @@ export const runOpenCodeSessionScenario = (
       sessionID: created.id,
       projectDir: box.projectDir,
       signals,
+      model,
+      settled,
     });
 
     yield* scenario.run(driver).pipe(Effect.ensuring(server.stop()));

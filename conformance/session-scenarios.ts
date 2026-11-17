@@ -2,9 +2,20 @@ import assert from "node:assert/strict";
 
 import { Effect, Schema } from "effect";
 
-import type { Driver, MarkerTimeout, SessionRun } from "./harness/driver.ts";
+import {
+  waitForEvidence,
+  type Driver,
+  type MarkerTimeout,
+  type SessionRun,
+  type SettledSignal,
+} from "./harness/driver.ts";
 import { MarkerObservations, type MarkerObservation } from "./harness/markers.ts";
-import { isCompactionRequest, type ChatRequest, type StandInOptions } from "./model/stand-in.ts";
+import {
+  isCompactionRequest,
+  MAX_POST_TOOL_DELAY_MS,
+  type ChatRequest,
+  type StandInOptions,
+} from "./model/stand-in.ts";
 import { textFor, type AgentName, type PluginName } from "./scenarios.ts";
 
 /** One long-lived run plus the agent that made it. */
@@ -32,40 +43,25 @@ const DENIED = "tack-conformance: permission denied";
 /** A fragment both agents' own compaction prompts carry. */
 const COMPACTION_MARKER = "summar";
 
-/** A conversation large enough that Pi can compact it rather than refuse. */
-const COMPACTION_PROMPT = "push it " + "x".repeat(120_000);
+/**
+ * The second prompt, large enough that Pi's compaction has a turn to
+ * summarize. Pi cuts at the newest user-message span once the entries after
+ * the cut reach `keepRecentTokens` (20 000 by default), and refuses with
+ * "Nothing to compact (session too small)" when the cut leaves nothing before
+ * it (`dist/core/compaction/compaction.js`, `prepareCompaction`). At about
+ * 300 KB this prompt is some 75 000 estimated tokens, so the cut lands on it
+ * and the first turn is what the summary is made of.
+ */
+const COMPACTION_PROMPT = "push it " + "x".repeat(300_000);
 
 /** How long a turn stays open after its tool result, for the mid-turn rows. */
 const MID_TURN_MS = 2_000;
 
-/** How long a turn waits after its tool result when the scenario interrupts it. */
-const SLOW_TURN_MS = 2_000;
-
-/** How long after a prompt the scenario interrupts a slow turn. */
-const INTERRUPT_AFTER_MS = 800;
-
-/** A bounded pause so a plugin's marker catches up with a harness signal. */
-const MARKER_PAUSE_MS = 300;
-
-/** The pause that lets an agent shut down and write its ended marker. */
-const END_PAUSE_MS = 500;
-
-/** The pause that lets the scripted compaction request reach the model. */
-const COMPACTION_PAUSE_MS = 1_000;
-
-const pause = (ms: number): Effect.Effect<void> => Effect.sleep(ms);
-
 /**
- * Starts a turn and interrupts it while the scripted model still owes its
- * post-tool response, so the interrupt lands inside a running turn.
+ * How long the model owes its post-tool answer when a scenario interrupts the
+ * turn. The whole bounded delay is the window the interrupt has to land in.
  */
-const interruptSlowTurn = (driver: Driver): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    yield* driver.prompt(PUSH);
-    yield* pause(INTERRUPT_AFTER_MS);
-    yield* driver.interrupt();
-    yield* pause(MARKER_PAUSE_MS);
-  });
+const SLOW_TURN_MS = MAX_POST_TOOL_DELAY_MS;
 
 /** Matches a request the way the conformance table describes one. */
 const hasText = (request: ChatRequest, text: string): boolean =>
@@ -75,11 +71,87 @@ const hasText = (request: ChatRequest, text: string): boolean =>
 const isToolBearing = (request: ChatRequest): boolean =>
   (request.tools ?? []).length > 0 && request.messages.some((message) => message.role === "tool");
 
-const someToolText = (requests: ReadonlyArray<ChatRequest>, text: string): boolean =>
-  requests.some((request) => isToolBearing(request) && hasText(request, text));
+/** A tool-bearing request that carries `text`. */
+const carries =
+  (text: string) =>
+  (request: ChatRequest): boolean =>
+    isToolBearing(request) && hasText(request, text);
 
 const listed = (names: ReadonlyArray<string>): string =>
   names.length === 0 ? "none" : names.join(", ");
+
+/** The most of one message a failure message quotes. */
+const MAX_QUOTED_CHARS = 400;
+
+const excerpt = (text: string): string =>
+  text.length > MAX_QUOTED_CHARS ? text.slice(0, MAX_QUOTED_CHARS) + "..." : text;
+
+/** What the model has been asked so far, for a request wait that ran out. */
+const describeRequests = (requests: ReadonlyArray<ChatRequest>): string => {
+  const last = requests.at(-1)?.messages.at(-1);
+
+  return (
+    "requests: " +
+    requests.length +
+    "\nlast message: " +
+    (last === undefined ? "none" : excerpt(JSON.stringify(last.content ?? last.role)))
+  );
+};
+
+/** What one plugin's marker recorded, for an observation wait that ran out. */
+const describeObservations = (
+  observations: ReadonlyArray<MarkerObservation>,
+  signals: ReadonlyArray<SettledSignal>,
+): string =>
+  "recorded: " +
+  listed(observations.map((observation) => JSON.stringify(observation))) +
+  "\nsettled: " +
+  listed(signals.map((signal) => signal.kind));
+
+/** Waits until the stand-in holds a request the predicate accepts. */
+const waitForRequest = (
+  driver: Driver,
+  accepts: (request: ChatRequest) => boolean,
+  what: string,
+): Effect.Effect<void> =>
+  waitForEvidence(
+    what,
+    driver.requests.pipe(
+      Effect.map((requests) => ({
+        ready: requests.some(accepts),
+        seen: describeRequests(requests),
+      })),
+    ),
+  );
+
+/** Waits until one plugin's marker holds an observation the predicate accepts. */
+const waitForObservation = (
+  driver: Driver,
+  name: string,
+  accepts: (observation: MarkerObservation) => boolean,
+  what: string,
+): Effect.Effect<void> =>
+  waitForEvidence(
+    what,
+    driver.observations(name).pipe(
+      Effect.map((observations) => ({
+        ready: observations.some(accepts),
+        seen: describeObservations(observations, driver.signals()),
+      })),
+    ),
+  );
+
+/**
+ * Starts a turn and interrupts it while the scripted model still owes its
+ * post-tool response, so the interrupt lands inside a running turn. The wait
+ * for that request proves the turn is running; a fixed pause would only hope.
+ */
+const interruptSlowTurn = (driver: Driver): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    yield* driver.prompt(PUSH);
+    yield* waitForRequest(driver, isToolBearing, "the turn's post-tool request");
+    yield* driver.interrupt();
+  });
 
 /** Names what a failed assertion saw, across every channel the run left. */
 export const describeSession = (evidence: SessionEvidence): string =>
@@ -137,6 +209,7 @@ const wake: SessionScenario = {
       yield* driver.prompt(PUSH);
       yield* driver.settle();
       yield* driver.waitMarker("append-wake");
+      yield* waitForRequest(driver, carries(WAKE), "a tool-bearing request carrying the wake text");
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
@@ -147,7 +220,7 @@ const wake: SessionScenario = {
       "the wake append must be accepted\n" + details,
     );
     assert.ok(
-      someToolText(evidence.requests, WAKE),
+      evidence.requests.some(carries(WAKE)),
       "a tool-bearing request must carry the wake text\n" + details,
     );
   },
@@ -162,6 +235,11 @@ const outside: SessionScenario = {
       yield* driver.prompt(PUSH);
       yield* driver.settle();
       yield* driver.waitMarker("append-outside");
+      yield* waitForRequest(
+        driver,
+        carries(OUTSIDE),
+        "a tool-bearing request carrying the outside text",
+      );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
@@ -172,7 +250,7 @@ const outside: SessionScenario = {
       "the timer's append must be accepted\n" + details,
     );
     assert.ok(
-      someToolText(evidence.requests, OUTSIDE),
+      evidence.requests.some(carries(OUTSIDE)),
       "a tool-bearing request must carry the outside text\n" + details,
     );
   },
@@ -187,6 +265,11 @@ const now: SessionScenario = {
       yield* driver.prompt(PUSH);
       yield* driver.settle();
       yield* driver.waitMarker("append-now");
+      yield* waitForRequest(
+        driver,
+        carries(NOW),
+        "a tool-bearing request carrying the steering text",
+      );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
@@ -197,7 +280,7 @@ const now: SessionScenario = {
       "the steering append must be accepted\n" + details,
     );
     assert.ok(
-      someToolText(evidence.requests, NOW),
+      evidence.requests.some(carries(NOW)),
       "a tool-bearing request must carry the steering text\n" + details,
     );
   },
@@ -229,7 +312,7 @@ const next: SessionScenario = {
     const afterFirst = evidence.requests.slice(evidence.requests.indexOf(first) + 1);
 
     assert.ok(
-      afterFirst.some((request) => isToolBearing(request) && hasText(request, NEXT)),
+      afterFirst.some(carries(NEXT)),
       "a later tool-bearing request must carry the queued text\n" + details,
     );
   },
@@ -329,8 +412,12 @@ const finishedDone: SessionScenario = {
     Effect.gen(function* () {
       yield* driver.prompt(PUSH);
       yield* driver.settle();
-      yield* driver.waitMarker("finished-note");
-      yield* pause(MARKER_PAUSE_MS);
+      yield* waitForObservation(
+        driver,
+        "finished-note",
+        (observation) => observation["reason"] === "done",
+        "a finished request reported done",
+      );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
@@ -348,7 +435,16 @@ const finishedAborted: SessionScenario = {
   name: "t2 finished aborted",
   plugins: ["finished-note"],
   standIn: { postToolDelayMs: SLOW_TURN_MS },
-  run: interruptSlowTurn,
+  run: (driver) =>
+    Effect.gen(function* () {
+      yield* interruptSlowTurn(driver);
+      yield* waitForObservation(
+        driver,
+        "finished-note",
+        (observation) => observation["reason"] === "aborted",
+        "the interrupted request reported aborted",
+      );
+    }),
   check: (evidence) => {
     const details = describeSession(evidence);
 
@@ -369,7 +465,12 @@ const finishedError: SessionScenario = {
     Effect.gen(function* () {
       yield* driver.prompt(PUSH);
       yield* driver.settle();
-      yield* pause(MARKER_PAUSE_MS);
+      yield* waitForObservation(
+        driver,
+        "finished-note",
+        (observation) => observation["reason"] === "error",
+        "the failed request reported error",
+      );
     }),
   check: (evidence) => {
     assertFinished(evidence, "error");
@@ -383,7 +484,12 @@ const lifecycle: SessionScenario = {
     Effect.gen(function* () {
       yield* driver.waitMarker("lifecycle-note");
       yield* driver.endSession();
-      yield* pause(END_PAUSE_MS);
+      yield* waitForObservation(
+        driver,
+        "lifecycle-note",
+        (observation) => observation["event"] === "ended",
+        "the lifecycle-note marker's ended event",
+      );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
@@ -441,7 +547,12 @@ const model: SessionScenario = {
     Effect.gen(function* () {
       yield* driver.prompt(PUSH);
       yield* driver.settle();
-      yield* driver.waitMarker("model-switch");
+      yield* waitForObservation(
+        driver,
+        "model-switch",
+        (observation) => observation["event"] === "turn",
+        "the model-switch marker's finished turn",
+      );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
@@ -473,10 +584,15 @@ const compact: SessionScenario = {
   standIn: { compactionMarker: COMPACTION_MARKER },
   run: (driver) =>
     Effect.gen(function* () {
+      yield* driver.prompt(PUSH);
+      yield* driver.settle();
       yield* driver.prompt(COMPACTION_PROMPT);
       yield* driver.waitMarker("compact-action");
-      yield* pause(COMPACTION_PAUSE_MS);
-      yield* driver.settle();
+      yield* waitForRequest(
+        driver,
+        (request) => isCompactionRequest(request, COMPACTION_MARKER),
+        "a compaction request",
+      );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);

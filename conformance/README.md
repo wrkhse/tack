@@ -76,17 +76,26 @@ answer rather than a `session_start` record. The driver writes `prompt` and
 session, which reports `session_shutdown` reason `quit` to the plugins.
 
 Both drivers expose the same `Driver` to a row: `prompt`, `settle`,
-`interrupt`, `endSession`, `waitMarker` and `events`. A row's steps and its
-check never name a harness event, except where the table says the two agents
-report one differently.
+`interrupt`, `endSession`, `waitMarker`, `events`, and the three reads a
+check's evidence comes from: `requests`, `observations` and `signals`. A
+row's steps and its check never name a harness event, except where the table
+says the two agents report one differently.
 
 ## The marker channel
 
 Every T2 plugin writes `t2-marker-<name>.json` in its working directory, which
 is the project directory. The file holds a JSON array of observations, one
-appended per event, such as `{"event":"finished","reason":"done"}`. After a
-run, the suite reads every marker into the evidence, beside the requests, the
-recorder's lines, the loaded names, and the turn signals each settle saw.
+appended per event, such as `{"event":"finished","reason":"done"}`. Each
+append is written to a temporary file and renamed into place, so the suite
+never reads half an observation. After a run, the suite reads every marker into
+the evidence, beside the requests, the recorder's lines, the loaded names, and
+the turn signals each settle saw.
+
+A row waits for the evidence it asserts instead of pausing for it: a request
+the stand-in must have received, or an observation a plugin must have written,
+is polled every 100 ms for up to 25 seconds. A run too slow to reach it fails
+with the request count and the last message, or with the observations and the
+turn signals it saw, rather than passing or failing on a fixed sleep.
 
 The marker is how a row proves what a plugin saw rather than what the harness
 returned: the permission row can prove Pi never called the hook, and the idle

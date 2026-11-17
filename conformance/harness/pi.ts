@@ -35,8 +35,13 @@ const modelsJson = (baseUrl: string) => ({
   },
 });
 
-/** A scripted failure must end a turn; a retry would hide it behind a later answer. */
-const settingsJson = () => ({ retry: { enabled: false } });
+/**
+ * Retries are off so a scripted failure ends its turn rather than being
+ * retried into a later answer, and auto-compaction is off so the only
+ * compaction a row sees is the one its plugin asked for. An extension's
+ * manual `compact()` is unaffected by the switch.
+ */
+const settingsJson = () => ({ retry: { enabled: false }, compaction: { enabled: false } });
 
 /** Writes the sandboxed Pi models file that serves both scripted ids, and its settings. */
 export const writePiConfig = (dir: string, baseUrl: string): Effect.Effect<void> =>

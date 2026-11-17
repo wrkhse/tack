@@ -2,7 +2,7 @@ import { Effect, Queue, Schema, type Stream } from "effect";
 
 import type { ChatRequest, StandIn } from "../model/stand-in.ts";
 import { parseLoaded } from "../plugins/loaded.ts";
-import { markerFile, markersIn } from "./markers.ts";
+import { MarkerFile, markerFile, markersIn, type MarkerObservation } from "./markers.ts";
 import { recorded } from "./recorder.ts";
 import { readOptionalText, type Sandbox } from "./sandbox.ts";
 
@@ -11,6 +11,12 @@ const MARKER_TIMEOUT_MS = 20_000;
 
 /** How often a marker wait looks for the file. */
 const MARKER_POLL_MS = 100;
+
+/** How long a wait for a run's evidence may take. */
+const EVIDENCE_TIMEOUT_MS = 25_000;
+
+/** How often a wait for a run's evidence looks again. */
+const EVIDENCE_POLL_MS = 100;
 
 /** How long a turn, started by a prompt or stopped by an interrupt, may take. */
 const SETTLE_TIMEOUT_MS = 30_000;
@@ -56,9 +62,47 @@ export interface Driver {
   readonly endSession: () => Effect.Effect<void>;
   /** Waits for a plugin's marker file and returns its text. */
   readonly waitMarker: (name: string, timeoutMs?: number) => Effect.Effect<string, MarkerTimeout>;
+  /** The stand-in's requests so far, in arrival order; each run reads them again. */
+  readonly requests: Effect.Effect<ReadonlyArray<ChatRequest>>;
+  /** One plugin's observations so far; empty before it records the first. */
+  readonly observations: (name: string) => Effect.Effect<ReadonlyArray<MarkerObservation>>;
+  /** The terminal signals collected so far, in order. */
+  readonly signals: () => ReadonlyArray<SettledSignal>;
   /** Streams the agent's own events of the given types; empty takes every type. */
   readonly events: (types: ReadonlyArray<string>) => Stream.Stream<Schema.Json>;
 }
+
+/** Reads one plugin's observations as they stand; empty before it records the first. */
+const readObservations = (
+  dir: string,
+  name: string,
+): Effect.Effect<ReadonlyArray<MarkerObservation>> =>
+  Effect.gen(function* () {
+    const text = yield* readOptionalText(markerFile(dir, name));
+
+    if (text === null) return [];
+
+    return yield* Schema.decodeEffect(MarkerFile)(text).pipe(Effect.orDie);
+  });
+
+/** What the evidence reads need: the stand-in, the project directory, and the signals. */
+export interface EvidenceSource {
+  readonly model: StandIn;
+  readonly projectDir: string;
+  readonly settled: ReadonlyArray<SettledSignal>;
+}
+
+/**
+ * The three reads every driver offers over one run's evidence: the stand-in's
+ * requests, one plugin's observations, and the turn signals collected so far.
+ */
+export const evidenceOf = (
+  source: EvidenceSource,
+): Pick<Driver, "requests" | "observations" | "signals"> => ({
+  requests: source.model.requests,
+  observations: (name) => readObservations(source.projectDir, name),
+  signals: () => [...source.settled],
+});
 
 /** What one long-lived run left behind. */
 export interface SessionRun {
@@ -90,6 +134,45 @@ export const waitForMarker = (
 
     return yield* new MarkerTimeout({ marker: name, timeoutMs });
   });
+
+/** What one evidence probe saw: whether the wait is over, and what to report if it is not. */
+export interface EvidenceProbe {
+  readonly ready: boolean;
+  readonly seen: string;
+}
+
+/**
+ * Polls one probe until the evidence its row asserts has arrived. A fixed
+ * pause cannot decide a pass: on a slower runner the moment arrives late, so
+ * the wait looks again every 100 ms and fails at its bound with what it saw.
+ */
+export const waitForEvidence = (
+  what: string,
+  probe: Effect.Effect<EvidenceProbe>,
+  timeoutMs = EVIDENCE_TIMEOUT_MS,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const attempts = Math.max(1, Math.ceil(timeoutMs / EVIDENCE_POLL_MS));
+    let seen = "no probe answered";
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const found = yield* probe;
+
+      if (found.ready) return;
+
+      seen = found.seen;
+
+      yield* Effect.sleep(EVIDENCE_POLL_MS);
+    }
+
+    yield* gaveUp(what, timeoutMs, seen);
+  });
+
+/** A wait that ran out, named for its row and carrying what the last probe saw. */
+const gaveUp = (what: string, timeoutMs: number, seen: string): Effect.Effect<void> =>
+  Effect.die(
+    new Error("tack-conformance: " + what + " did not arrive within " + timeoutMs + " ms\n" + seen),
+  );
 
 /** Takes the next turn's terminal signal, bounded so a silent agent fails the run. */
 export const nextSignal = (signals: Queue.Queue<SettledSignal>): Effect.Effect<SettledSignal> =>

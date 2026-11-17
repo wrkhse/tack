@@ -1,9 +1,10 @@
 import { Effect, PubSub, Queue, Schema, Stream, type Scope } from "effect";
 
-import { standInModel } from "../model/stand-in.ts";
+import { standInModel, type StandIn } from "../model/stand-in.ts";
 import type { SessionScenario } from "../session-scenarios.ts";
 import {
   collectSessionRun,
+  evidenceOf,
   nextSignal,
   waitForMarker,
   type Driver,
@@ -97,6 +98,8 @@ interface PiDriverInput {
   readonly projectDir: string;
   readonly signals: Queue.Queue<SettledSignal>;
   readonly log: PiEventLog;
+  readonly model: StandIn;
+  readonly settled: ReadonlyArray<SettledSignal>;
 }
 
 /**
@@ -145,6 +148,7 @@ const driverFor = (input: PiDriverInput): Driver => {
   };
 
   return {
+    ...evidenceOf(input),
     prompt: (text) => request({ type: "prompt", message: text }).pipe(Effect.flatMap(refused)),
     settle: () => nextSignal(input.signals).pipe(Effect.asVoid),
     interrupt: () =>
@@ -205,7 +209,7 @@ export const runPiSessionScenario = (
     const settled: Array<SettledSignal> = [];
     const log = yield* trackEvents(rpc, signals, settled);
 
-    const driver = driverFor({ rpc, projectDir: box.projectDir, signals, log });
+    const driver = driverFor({ rpc, projectDir: box.projectDir, signals, log, model, settled });
 
     yield* scenario.run(driver).pipe(Effect.ensuring(rpc.end()));
 

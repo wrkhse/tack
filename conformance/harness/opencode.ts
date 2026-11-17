@@ -33,6 +33,10 @@ const projectConfig = (pluginDirectories: ReadonlyArray<string>, baseUrl: string
     },
   },
   permissions: [{ action: "shell", resource: "*", effect: "allow" }],
+  // Only the compaction a row's plugin asks for runs, so a request the
+  // context threshold made cannot stand in for it. Manual compaction works
+  // with auto off.
+  compaction: { auto: false },
   plugins: pluginDirectories,
 });
 

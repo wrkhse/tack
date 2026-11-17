@@ -93,7 +93,9 @@ const SCRIPTED_COMMAND = "git push origin main";
 
 const MAX_REQUESTS = 50;
 const MAX_BODY_BYTES = 1024 * 1024;
-const MAX_POST_TOOL_DELAY_MS = 5_000;
+
+/** The longest post-tool delay a scenario may ask for, and the window it keeps a turn open. */
+export const MAX_POST_TOOL_DELAY_MS = 5_000;
 const CHUNK_HEAD = { id: "c1", object: "chat.completion.chunk", created: 0, model: "scripted" };
 const DONE_LINE = "data: [DONE]\n\n";
 
