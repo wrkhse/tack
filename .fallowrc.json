@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  // Vendored lint policy: maintained as upstream code, not analysed as ours.
+  "ignorePatterns": ["tools/oxlint/anti-slop/**"],
+  // @effect/tsgo: runs the `effect` task in vite.config.ts, which Fallow does not read.
+  // @effect/language-service: named by the tsconfig `plugins` block; the diagnostics ship inside
+  // the effect-tsgo binary rather than as an installed package.
+  "ignoreDependencies": ["@effect/tsgo", "@effect/language-service"]
+}
