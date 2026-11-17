@@ -50,4 +50,12 @@ jobs:
           node-version-file: .node-version
           run-install: false
       - run: bun install --frozen-lockfile
+      - name: Verify the pinned install
+        # An out-of-band install changes the lockfile or manifest; a postinstall
+        # that did not run leaves a tiny stub instead of the real CLI.
+        run: |
+          git diff --exit-code -- bun.lock package.json
+
+          test -x node_modules/.bin/opencode
+          test "$(wc -c < node_modules/.bin/opencode)" -gt 1024
       - run: bun run conformance:${{ matrix.agent }}
