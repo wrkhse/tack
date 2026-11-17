@@ -11,22 +11,26 @@ import { sandbox, writeText } from "./sandbox.ts";
 /** A Pi extension loaded with -e is one file. */
 const PLUGIN_FILE = "plugin.js";
 
+/** Both scripted model ids, so `setModel` has a real target. */
+const MODELS = [
+  { id: "scripted", name: "Scripted" },
+  { id: "scripted-2", name: "Scripted 2" },
+];
+
 const modelsJson = (baseUrl: string) => ({
   providers: {
     fake: {
       baseUrl,
       api: "openai-completions",
       apiKey: "fake-key",
-      models: [
-        {
-          id: "scripted",
-          name: "Scripted",
-          reasoning: false,
-          input: ["text"],
-          contextWindow: 32768,
-          maxTokens: 4096,
-        },
-      ],
+      models: MODELS.map(({ id, name }) => ({
+        id,
+        name,
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 32768,
+        maxTokens: 4096,
+      })),
     },
   },
 });

@@ -11,6 +11,12 @@ import { sandbox, writeText } from "./sandbox.ts";
 /** An OpenCode plugin is a directory whose entry file is index.js. */
 const PLUGIN_FILE = "index.js";
 
+/** One scripted model. Two ids are served, so `setModel` has a real target. */
+const modelEntry = () => ({
+  capabilities: { tools: true, input: ["text"], output: ["text"] },
+  limit: { context: 32768, output: 4096 },
+});
+
 const projectConfig = (pluginDirectories: ReadonlyArray<string>, baseUrl: string) => ({
   $schema: "https://opencode.ai/config.json",
   model: "fake/scripted",
@@ -21,10 +27,8 @@ const projectConfig = (pluginDirectories: ReadonlyArray<string>, baseUrl: string
       package: "@opencode/ai/providers/openai-compatible",
       settings: { baseURL: baseUrl, apiKey: "test" },
       models: {
-        scripted: {
-          capabilities: { tools: true, input: ["text"], output: ["text"] },
-          limit: { context: 32768, output: 4096 },
-        },
+        scripted: modelEntry(),
+        "scripted-2": modelEntry(),
       },
     },
   },
