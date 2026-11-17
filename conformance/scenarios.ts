@@ -7,6 +7,7 @@ import { recorded } from "./harness/recorder.ts";
 import type { CommandResult } from "./harness/run.ts";
 import { readOptionalText, type Sandbox } from "./harness/sandbox.ts";
 import type { ChatRequest, StandIn } from "./model/stand-in.ts";
+import { parseLoaded } from "./plugins/loaded.ts";
 
 /** The agent a scenario ran against. */
 export type AgentName = "opencode" | "pi";
@@ -27,6 +28,7 @@ export interface AgentRun {
   readonly recorded: ReadonlyArray<string>;
   readonly requests: ReadonlyArray<ChatRequest>;
   readonly observedText: string | null;
+  readonly loaded: ReadonlyArray<string>;
 }
 
 /** One CLI run plus the agent that made it. */
@@ -34,7 +36,10 @@ export interface Evidence extends AgentRun {
   readonly agent: AgentName;
 }
 
-/** Reads what a finished CLI run left in its sandbox: the log, the requests, the observed file. */
+/**
+ * Reads what a finished CLI run left in its sandbox: the git log, the requests,
+ * the loaded names, and the observed file.
+ */
 export const collectEvidence = (
   box: Sandbox,
   model: StandIn,
@@ -44,8 +49,15 @@ export const collectEvidence = (
     const requests = yield* model.requests;
     const recorderLines = yield* recorded(box.recorderFile);
     const observedText = yield* readOptionalText(join(box.projectDir, "tack-observed.json"));
+    const loadedText = yield* readOptionalText(box.loadedFile);
 
-    return { command, recorded: recorderLines, requests, observedText };
+    return {
+      command,
+      recorded: recorderLines,
+      requests,
+      observedText,
+      loaded: loadedText === null ? [] : parseLoaded(loadedText),
+    };
   });
 
 /** One row of the conformance table: what loads, and what must be true after. */
@@ -83,6 +95,34 @@ const describeRun = (evidence: Evidence): string =>
     "stderr tail:",
     tail(evidence.command.stderr),
   ].join("\n");
+
+/** Names each once and sorted, so a marker written twice still names one plugin. */
+const loadedNames = (names: ReadonlyArray<string>): ReadonlyArray<string> =>
+  Array.from(new Set(names)).toSorted();
+
+/** Names for a failure message, where an empty list says so. */
+const listed = (names: ReadonlyArray<string>): string =>
+  names.length === 0 ? "none" : names.join(", ");
+
+/**
+ * Asserts that the run loaded exactly the scenario's plugins: a plugin that
+ * silently failed to load leaves its assertion about absence resting on
+ * nothing.
+ */
+export const assertLoaded = (evidence: Evidence, plugins: ReadonlyArray<PluginName>): void => {
+  const expected = loadedNames(plugins);
+  const loaded = loadedNames(evidence.loaded);
+
+  const message =
+    "plugins that must load: " +
+    listed(expected) +
+    "\nplugins that loaded: " +
+    listed(loaded) +
+    "\n" +
+    describeRun(evidence);
+
+  assert.deepEqual(loaded, expected, message);
+};
 
 /** The content of every message with one role, stringified into one searchable string. */
 const textFor = (requests: ReadonlyArray<ChatRequest>, role: string): string =>

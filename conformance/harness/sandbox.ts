@@ -21,6 +21,7 @@ export interface Sandbox {
   readonly dir: string;
   readonly projectDir: string;
   readonly recorderFile: string;
+  readonly loadedFile: string;
   readonly opencode: AgentEnvironment;
   readonly pi: AgentEnvironment;
 }
@@ -55,6 +56,7 @@ const isolationEnv = (dir: string, parentPath: string, realGit: string | null) =
   XDG_STATE_HOME: join(dir, "xdg", "state"),
   XDG_CACHE_HOME: join(dir, "xdg", "cache"),
   TACK_RECORDER: join(dir, "recorder.log"),
+  TACK_LOADED: join(dir, "loaded.log"),
   TACK_REAL_GIT: realGit ?? "",
 });
 
@@ -141,6 +143,7 @@ export const sandbox: Effect.Effect<Sandbox, never, Scope.Scope> = Effect.gen(fu
     dir,
     projectDir: join(dir, "project"),
     recorderFile: join(dir, "recorder.log"),
+    loadedFile: join(dir, "loaded.log"),
     opencode: { bin: binPath("opencode"), env: openCodeEnv(dir, parentPath, realGit) },
     pi: { bin: binPath("pi"), env: piEnv(dir, parentPath, realGit) },
   };

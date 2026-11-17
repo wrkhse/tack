@@ -2,7 +2,13 @@ import { Effect, type Scope } from "effect";
 
 import { cliVersion } from "./harness/run.ts";
 import { pinnedVersion, sandbox, type AgentEnvironment, type Sandbox } from "./harness/sandbox.ts";
-import { assertVersion, type AgentName, type AgentRun, type Scenario } from "./scenarios.ts";
+import {
+  assertLoaded,
+  assertVersion,
+  type AgentName,
+  type AgentRun,
+  type Scenario,
+} from "./scenarios.ts";
 
 /** Checks that one CLI reports the version its package is pinned to. */
 export const checkPinnedVersion = (
@@ -29,6 +35,9 @@ export const checkScenario = (
     const run = yield* runScenario(scenario);
 
     yield* Effect.sync(() => {
-      scenario.check({ agent, ...run });
+      const evidence = { agent, ...run };
+
+      assertLoaded(evidence, scenario.plugins);
+      scenario.check(evidence);
     });
   });

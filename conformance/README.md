@@ -19,6 +19,7 @@ sequenceDiagram
     T->>M: start the scripted model
     T->>T: bundle one file per plugin
     T->>C: one run, prompt "push it"
+    C->>C: append each plugin's name to loaded.log
     C->>M: chat completion with tools
     M-->>C: tool call shell "git push origin main"
     C->>G: git push origin main --dry-run
@@ -28,6 +29,7 @@ sequenceDiagram
     M-->>C: done
     T->>M: read every request body
     T->>G: read recorder.log
+    T->>T: read loaded.log
 ```
 
 The stand-in model answers three ways. A request without tools is a title
@@ -41,21 +43,43 @@ own shell tool with `git push origin main`.
   the pinned CLI version.
 - Each plugin is bundled on its own, with its own copy of tack. Two plugins in
   one run therefore prove the host slot works across copies.
+- Every plugin a scenario names is proven loaded, not assumed: the run records
+  each plugin's name when its module is evaluated, and the scenario asserts the
+  two sets are equal.
 - A denied call never reaches the command: `recorder.log` is absent, and the
   model receives the reason in the tool result.
 - Both load orders rewrite to the same command, so priority decides and the
   agent's own plugin order does not.
+
+## The load marker
+
+Each entry file under `plugins/entries/` calls `markLoaded` at module scope,
+before it exports its plugin, so marking happens the moment the agent evaluates
+the module that holds the plugin. `markLoaded` appends the plugin's name to the
+file named by `TACK_LOADED`, one name per line, and does nothing when the
+variable is unset.
+
+After a run, the suite reads that file and asserts that the set of names is
+exactly the scenario's plugins, sorted: not a superset, not a subset. An
+assertion about absence, such as `toolAfter` never running in "deny after",
+therefore rests on a plugin that provably loaded rather than one that may have
+failed silently.
 
 ## The pinned install
 
 The suite resolves both CLIs from the repository's `node_modules` and asserts
 each `--version` against the pin in `package.json`. `@opencode/cli`'s binary is
 linked by its own postinstall, which `package.json` trusts through
-`trustedDependencies`. Never install a CLI out of band: `npm install
---ignore-scripts @opencode/cli` from the registry bypasses the lockfile and the
-pin, and CI fails on a changed lockfile or manifest, or on a missing binary,
-before a scenario runs. If the binary is missing, fix the trusted install
-instead.
+`trustedDependencies`.
+
+Never install a CLI out of band: `npm install --ignore-scripts @opencode/cli`
+from the registry bypasses the lockfile and the pin. CI fails on a changed
+lockfile or manifest, then compares the entry point the suite runs,
+`node_modules/.bin/opencode` resolved through its symlink, byte for byte with
+the binary of the platform package under `node_modules/@opencode/cli-*/bin`. A
+fallback install copies a binary from the registry and leaves the lockfile
+alone, but its bytes differ, so the job fails before a scenario runs. If a
+binary is missing or differs, fix the trusted install instead.
 
 ## Isolation
 
@@ -72,6 +96,7 @@ environment survives.
 | `XDG_CACHE_HOME`      | the CLIs' cache directory             |
 | `PI_CODING_AGENT_DIR` | `models.json` for Pi                  |
 | `TACK_RECORDER`       | the file the git shim appends to      |
+| `TACK_LOADED`         | the file each plugin's entry marks    |
 | `TACK_REAL_GIT`       | the real git, for every other command |
 
 `PATH` starts with the sandbox `bin` directory, which holds the git shim, and
@@ -110,17 +135,17 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 
 ## Layout
 
-| Path                  | Holds                                             |
-| --------------------- | ------------------------------------------------- |
-| `model/stand-in.ts`   | the scripted model, its requests, and its bounds  |
-| `harness/recorder.ts` | the git shim and the lines it recorded            |
-| `harness/sandbox.ts`  | the throwaway tree, both environments, the pins   |
-| `harness/bundle.ts`   | one Bun bundle per plugin                         |
-| `harness/run.ts`      | one CLI run, bounded output, a 120 second timeout |
-| `harness/opencode.ts` | OpenCode config, arguments, and one scenario      |
-| `harness/pi.ts`       | Pi `models.json`, arguments, and one scenario     |
-| `plugins/`            | the tack plugins and their per-agent entry files  |
-| `scenarios.ts`        | the table above, as data and checks               |
-| `suite.ts`            | the checks both agents' tests share               |
-| `opencode.test.ts`    | the version check and every scenario, in OpenCode |
-| `pi.test.ts`          | the version check and every scenario, in Pi       |
+| Path                  | Holds                                              |
+| --------------------- | -------------------------------------------------- |
+| `model/stand-in.ts`   | the scripted model, its requests, and its bounds   |
+| `harness/recorder.ts` | the git shim and the lines it recorded             |
+| `harness/sandbox.ts`  | the throwaway tree, both environments, the pins    |
+| `harness/bundle.ts`   | one Bun bundle per plugin                          |
+| `harness/run.ts`      | one CLI run, bounded output, a 120 second timeout  |
+| `harness/opencode.ts` | OpenCode config, arguments, and one scenario       |
+| `harness/pi.ts`       | Pi `models.json`, arguments, and one scenario      |
+| `plugins/`            | the tack plugins, entry files, and the load marker |
+| `scenarios.ts`        | the table above, as data and checks                |
+| `suite.ts`            | the checks both agents' tests share                |
+| `opencode.test.ts`    | the version check and every scenario, in OpenCode  |
+| `pi.test.ts`          | the version check and every scenario, in Pi        |
