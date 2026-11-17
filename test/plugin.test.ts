@@ -23,9 +23,15 @@ describe("resolvePlugin", () => {
       expect(resolved.priority).toBe(100);
       expect(resolved.budgetMs).toBe(5000);
       expect(resolved.toolBeforeOnError).toBe("deny");
+      expect(resolved.permissionAskedOnError).toBe("leave");
       expect(resolved.toolBefore).toBeUndefined();
       expect(resolved.promptSent).toBeUndefined();
       expect(resolved.toolAfter).toBeUndefined();
+      expect(resolved.sessionCreated).toBeUndefined();
+      expect(resolved.sessionEnded).toBeUndefined();
+      expect(resolved.responseFinished).toBeUndefined();
+      expect(resolved.sessionIdle).toBeUndefined();
+      expect(resolved.permissionAsked).toBeUndefined();
     }),
   );
 
@@ -35,12 +41,13 @@ describe("resolvePlugin", () => {
         name: "signed-push",
         priority: 20,
         budgetMs: 250,
-        onError: { toolBefore: "allow" },
+        onError: { toolBefore: "allow", permissionAsked: "deny" },
       });
 
       expect(resolved.priority).toBe(20);
       expect(resolved.budgetMs).toBe(250);
       expect(resolved.toolBeforeOnError).toBe("allow");
+      expect(resolved.permissionAskedOnError).toBe("deny");
     }),
   );
 

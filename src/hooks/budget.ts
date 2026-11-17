@@ -3,10 +3,27 @@ import { Duration, Effect, Schema } from "effect";
 import type { ResolvedPlugin } from "../plugin.ts";
 
 /** The hook a handler failure happened in. */
-export type HookName = "toolBefore" | "promptSent" | "toolAfter";
+export type HookName =
+  | "toolBefore"
+  | "promptSent"
+  | "toolAfter"
+  | "sessionCreated"
+  | "sessionEnded"
+  | "responseFinished"
+  | "sessionIdle"
+  | "permissionAsked";
 
 /** The hook name schema and type share one closed union. */
-const HookNameSchema = Schema.Literals(["toolBefore", "promptSent", "toolAfter"]);
+const HookNameSchema = Schema.Literals([
+  "toolBefore",
+  "promptSent",
+  "toolAfter",
+  "sessionCreated",
+  "sessionEnded",
+  "responseFinished",
+  "sessionIdle",
+  "permissionAsked",
+]);
 
 /**
  * One plugin handler missed its contract: it threw, rejected, timed out, or

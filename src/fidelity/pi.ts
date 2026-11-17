@@ -39,5 +39,65 @@ export const piFidelity: Fidelity = {
       how: "one realm",
       source: "spike/unagent/REALM-SPIKE.md",
     },
+    "session.append.now": {
+      fidelity: "native",
+      how: '`pi.sendMessage({ customType, content, display: false }, { deliverAs: "steer" })` while streaming; no `triggerTurn`, delivered after the turn\'s tool calls, before the next model call; idle, it is stored without starting a run',
+      source: source("dist/core/extensions/types.d.ts#L1303-L1316"),
+    },
+    "session.append.next": {
+      fidelity: "native",
+      how: '`pi.sendMessage(..., { deliverAs: "followUp" })`, delivered when the agent has no more tool calls; no `triggerTurn`, so an idle session stores it without starting a run',
+      source: source("dist/core/extensions/types.d.ts#L1303-L1316"),
+    },
+    "session.append.wake": {
+      fidelity: "native",
+      how: '`pi.sendMessage(..., { deliverAs: "steer", triggerTurn: true })`; idle, it starts a turn immediately, and while streaming it steers. Without `triggerTurn`, an idle session only stores the message',
+      source: source("docs/extensions.md#L1648"),
+    },
+    "session.compact": {
+      fidelity: "native",
+      how: "`ctx.compact({ customInstructions?, onComplete?, onError? })` aborts the running turn first, where OpenCode waits for a step boundary",
+      source: source("dist/core/extensions/types.d.ts#L224-L270"),
+    },
+    "session.interrupt": {
+      fidelity: "native",
+      how: "`ctx.abort()`; the run settles with `agent_settled.aborted: true`",
+      source: source("dist/core/extensions/types.d.ts#L263"),
+    },
+    "session.model": {
+      fidelity: "native",
+      how: "`pi.setModel(model)` with the model from `ctx.modelRegistry.find(provider, id)`; it returns false when the provider has no credentials, and an unknown model yields no model",
+      source: source("dist/core/extensions/types.d.ts#L1343-L1344"),
+    },
+    "event.responseFinished": {
+      fidelity: "native",
+      how: "`turn_end` extends `BoundaryState`, and `outcome` is `completed`, `aborted` or `error`; tack maps `done`, `aborted` and `error` straight across",
+      source: source("dist/core/extensions/types.d.ts#L772"),
+    },
+    "event.sessionCreated": {
+      fidelity: "native",
+      how: "`session_start` with reason `startup`, `reload`, `new`, `resume` or `fork`; `resumed` is true for `resume` and `fork`",
+      source: source("dist/core/extensions/types.d.ts#L595-L601"),
+    },
+    "event.sessionEnded": {
+      fidelity: "native",
+      how: "`session_shutdown` reports `quit` as `shutdown`; `reload`, `new`, `resume` and `fork` report `replaced`, because the session was replaced, not ended by the person",
+      source: source("dist/core/extensions/types.d.ts#L657-L662"),
+    },
+    "event.sessionIdle": {
+      fidelity: "native",
+      how: "`agent_settled` is the only final-idle signal and is notification-only; it fires with `aborted: true` when the run was aborted, where OpenCode's idle hook stays silent. `ctx.isIdle()` reads the current state",
+      source: source("dist/core/extensions/types.d.ts#L821-L825"),
+    },
+    "event.permissionAsked": {
+      fidelity: "unsupported",
+      how: "Pi has no permission layer: no event, no callback and no config setting. `docs/security.md` L3 says it \"does not ask for approval before every tool call\", the extension event union has no permission member, and the settings schema has no permission field. An extension's own `tool_call` handler asking with `ctx.ui.select/confirm` is T1's `toolBefore` guard, not a permission layer",
+      source: source("docs/security.md#L3"),
+    },
+    "session.actOutsideHook": {
+      fidelity: "native",
+      how: 'from `session_start` on; the factory\'s action methods throw "Extension runtime not initialized..." during loading; background work is deferred to `session_start` and closed at `session_shutdown`, as the file-trigger example does. A captured `pi` or ctx must not be used after a session is replaced',
+      source: source("dist/core/extensions/loader.js#L112-L113"),
+    },
   },
 };

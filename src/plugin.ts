@@ -1,6 +1,10 @@
 import { Effect, Schema } from "effect";
 
+import type { SessionCreated, SessionEnded } from "./hooks/lifecycle.ts";
+import type { PermissionAsked } from "./hooks/permission-asked.ts";
 import type { PromptSent } from "./hooks/prompt-sent.ts";
+import type { ResponseFinished } from "./hooks/response-finished.ts";
+import type { SessionIdle } from "./hooks/session-idle.ts";
 import type { ToolAfter } from "./hooks/tool-after.ts";
 import type { ToolBefore } from "./hooks/tool-before.ts";
 
@@ -17,10 +21,18 @@ export interface PluginDefinition {
   readonly name: string;
   readonly priority?: number;
   readonly budgetMs?: number;
-  readonly onError?: { readonly toolBefore?: "deny" | "allow" };
+  readonly onError?: {
+    readonly toolBefore?: "deny" | "allow";
+    readonly permissionAsked?: "deny" | "leave";
+  };
   readonly toolBefore?: ToolBefore;
   readonly promptSent?: PromptSent;
   readonly toolAfter?: ToolAfter;
+  readonly sessionCreated?: SessionCreated;
+  readonly sessionEnded?: SessionEnded;
+  readonly responseFinished?: ResponseFinished;
+  readonly sessionIdle?: SessionIdle;
+  readonly permissionAsked?: PermissionAsked;
 }
 
 /**
@@ -32,9 +44,15 @@ export interface ResolvedPlugin {
   readonly priority: number;
   readonly budgetMs: number;
   readonly toolBeforeOnError: "deny" | "allow";
+  readonly permissionAskedOnError: "deny" | "leave";
   readonly toolBefore: ToolBefore | undefined;
   readonly promptSent: PromptSent | undefined;
   readonly toolAfter: ToolAfter | undefined;
+  readonly sessionCreated: SessionCreated | undefined;
+  readonly sessionEnded: SessionEnded | undefined;
+  readonly responseFinished: ResponseFinished | undefined;
+  readonly sessionIdle: SessionIdle | undefined;
+  readonly permissionAsked: PermissionAsked | undefined;
 }
 
 const DEFAULT_PRIORITY = 100;
@@ -95,8 +113,14 @@ export function resolvePlugin(
     priority,
     budgetMs,
     toolBeforeOnError: definition.onError?.toolBefore ?? "deny",
+    permissionAskedOnError: definition.onError?.permissionAsked ?? "leave",
     toolBefore: definition.toolBefore,
     promptSent: definition.promptSent,
     toolAfter: definition.toolAfter,
+    sessionCreated: definition.sessionCreated,
+    sessionEnded: definition.sessionEnded,
+    responseFinished: definition.responseFinished,
+    sessionIdle: definition.sessionIdle,
+    permissionAsked: definition.permissionAsked,
   });
 }
