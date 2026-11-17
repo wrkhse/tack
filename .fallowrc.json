@@ -2,8 +2,11 @@
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
   // Vendored lint policy: maintained as upstream code, not analysed as ours.
   "ignorePatterns": ["tools/oxlint/anti-slop/**"],
-  // @effect/tsgo: runs the `effect` task in vite.config.ts, which Fallow does not read.
   // @effect/language-service: named by the tsconfig `plugins` block; the diagnostics ship inside
   // the effect-tsgo binary rather than as an installed package.
-  "ignoreDependencies": ["@effect/tsgo", "@effect/language-service"]
+  // @opencode/cli: the conformance suite spawns it from node_modules/.bin by path, never imports it.
+  "ignoreDependencies": ["@effect/language-service", "@opencode/cli"],
+  // Fallow follows these roots: the package entry, plus the conformance suite, whose tests spawn
+  // the CLIs and are not reachable from src/index.ts.
+  "entry": ["src/index.ts", "conformance/**/*.test.ts", "conformance/plugins/**/*.ts"]
 }

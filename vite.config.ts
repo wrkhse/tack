@@ -68,7 +68,22 @@ export default defineConfig({
           setupFiles: ["tools/vitest/rule-tester.ts"],
         },
       },
-      { test: { name: "unit", include: ["test/**/*.test.ts"] } },
+      {
+        test: {
+          name: "unit",
+          include: ["test/**/*.test.ts"],
+        },
+      },
+      {
+        // Starts real agent CLIs and a stand-in model: CI or a disposable container only.
+        test: {
+          name: "conformance",
+          include: ["conformance/**/*.test.ts"],
+          testTimeout: 180_000,
+          hookTimeout: 180_000,
+          fileParallelism: false,
+        },
+      },
     ],
   },
   run: {

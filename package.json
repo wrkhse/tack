@@ -3,24 +3,54 @@
   "private": true,
   "workspaces": [],
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "check": "vp check && vp run types && vp run effect && vp test run --project anti-slop --project unit && vp run health && vp run audit",
-    "fix": "vp check --fix"
+    "fix": "vp check --fix",
+    "conformance:opencode": "vp test run --project conformance conformance/opencode.test.ts",
+    "conformance:pi": "vp test run --project conformance conformance/pi.test.ts"
+  },
+  "dependencies": {
+    "effect": "4.1.4"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
     "@effect/tsgo": "0.70.0",
+    "@effect/vitest": "4.1.4",
+    "@opencode/cli": "2.3.0",
+    "@opencode/plugin": "2.3.0",
     "@types/node": "26.6.6",
     "fallow": "3.43.2",
     "typescript": "7.0.2",
     "vite": "catalog:",
     "vite-plus": "catalog:"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@opencode/plugin": "2.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
   "overrides": {
+    "effect": "4.1.4",
+    "glob": "14.0.6",
+    "minimatch": "11.0.9",
     "vite": "catalog:"
   },
   "packageManager": "bun@1.4.4",
   "catalog": {
     "vite": "npm:@voidzero-dev/vite-plus-core@8.3.8000",
     "vite-plus": "1.7.0"
-  }
+  },
+  "trustedDependencies": [
+    "@opencode/cli"
+  ]
 }
