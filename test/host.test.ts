@@ -2,7 +2,13 @@ import { expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 
 import type { ResolvedPlugin } from "../src/plugin.ts";
-import { ForeignHostSlot, HOST_KEY, ProtocolMismatch, hostSlot } from "../src/host/host.ts";
+import {
+  DuplicatePlugin,
+  ForeignHostSlot,
+  HOST_KEY,
+  ProtocolMismatch,
+  hostSlot,
+} from "../src/host/host.ts";
 
 const safePush: ResolvedPlugin = {
   name: "safe-push",
@@ -49,7 +55,7 @@ it.effect("uses a foreign plain slot at the same protocol", () =>
 
     const slot = yield* hostSlot();
 
-    slot.register("pi", safePush);
+    yield* slot.register("pi", safePush, "/plugins/a.js");
 
     expect([...foreign.scopes.keys()]).toEqual(["pi"]);
     expect(slot.plugins("pi").map((plugin) => plugin.name)).toEqual(["safe-push"]);
@@ -118,7 +124,7 @@ it.effect("creates the slot and reuses it on the next call", () =>
     const first = yield* hostSlot();
     const second = yield* hostSlot();
 
-    first.register("create", safePush);
+    yield* first.register("create", safePush, "/plugins/a.js");
 
     expect(second.plugins("create").map((plugin) => plugin.name)).toEqual(["safe-push"]);
   }),
@@ -138,29 +144,62 @@ it.effect("fixes the slot so no later copy can replace it", () =>
   }),
 );
 
-it.effect("keeps a name's position when it is registered again", () =>
+it.effect("refuses a second registration of a name in one scope", () =>
   Effect.gen(function* () {
     const slot = yield* hostSlot();
-    const stale = slot.register("replace", safePush);
+    const first = yield* slot.register("duplicate", safePush, "/plugins/a.js");
 
-    slot.register("replace", signedPush);
+    const error = yield* Effect.flip(
+      slot.register("duplicate", safePushReplacement, "/plugins/b.js"),
+    );
 
-    const current = slot.register("replace", safePushReplacement);
+    expect(error).toBeInstanceOf(DuplicatePlugin);
+    expect(error.message).toBe(
+      'tack: two plugins named "safe-push" are loaded in duplicate (/plugins/a.js and /plugins/b.js); give them different names.',
+    );
+    expect(slot.plugins("duplicate")).toEqual([safePush]);
+    expect(slot.isLeader(first)).toBe(true);
+  }),
+);
 
-    expect(slot.plugins("replace").map((plugin) => plugin.name)).toEqual([
+it.effect("registers a different name alongside the first in one scope", () =>
+  Effect.gen(function* () {
+    const slot = yield* hostSlot();
+
+    yield* slot.register("distinct", safePush, "/plugins/a.js");
+    yield* slot.register("distinct", signedPush, "/plugins/b.js");
+
+    expect(slot.plugins("distinct").map((plugin) => plugin.name)).toEqual([
       "safe-push",
       "signed-push",
     ]);
-    expect(slot.isLeader(current)).toBe(true);
-    expect(slot.isLeader(stale)).toBe(false);
+  }),
+);
+
+it.effect("freezes the slot so its scopes cannot be replaced", () =>
+  Effect.gen(function* () {
+    const slot = yield* hostSlot();
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, HOST_KEY);
+
+    if (descriptor === undefined) {
+      throw new Error("the host slot is not fixed at its symbol");
+    }
+
+    yield* slot.register("frozen", safePush, "/plugins/a.js");
+
+    expect(Object.isFrozen(descriptor.value)).toBe(true);
+    expect(() => {
+      descriptor.value.scopes = new Map();
+    }).toThrow(TypeError);
+    expect(slot.plugins("frozen").map((plugin) => plugin.name)).toEqual(["safe-push"]);
   }),
 );
 
 it.effect("hands leadership to the next registration on dispose", () =>
   Effect.gen(function* () {
     const slot = yield* hostSlot();
-    const first = slot.register("leader", safePush);
-    const second = slot.register("leader", signedPush);
+    const first = yield* slot.register("leader", safePush, "/plugins/a.js");
+    const second = yield* slot.register("leader", signedPush, "/plugins/b.js");
 
     expect(slot.isLeader(first)).toBe(true);
     expect(slot.isLeader(second)).toBe(false);
@@ -172,55 +211,16 @@ it.effect("hands leadership to the next registration on dispose", () =>
   }),
 );
 
-it.effect("removes only the disposed layer from its name", () =>
-  Effect.gen(function* () {
-    const slot = yield* hostSlot();
-    const stale = slot.register("layer", safePush);
-    const current = slot.register("layer", safePushReplacement);
-
-    stale.dispose();
-
-    expect(slot.plugins("layer").map((plugin) => plugin.name)).toEqual(["safe-push"]);
-    expect(slot.isLeader(current)).toBe(true);
-    expect(slot.isLeader(stale)).toBe(false);
-  }),
-);
-
-it.effect("restores the earlier registration when a same-named later one is disposed", () =>
-  Effect.gen(function* () {
-    const slot = yield* hostSlot();
-    const first = slot.register("restore", safePush);
-    const second = slot.register("restore", safePushReplacement);
-
-    expect(slot.plugins("restore").map((plugin) => plugin.name)).toEqual(["safe-push"]);
-    expect(slot.isLeader(second)).toBe(true);
-    expect(slot.isLeader(first)).toBe(false);
-
-    second.dispose();
-
-    expect(slot.isLeader(first)).toBe(true);
-
-    first.dispose();
-
-    expect(slot.plugins("restore")).toEqual([]);
-
-    const third = slot.register("restore", safePush);
-
-    expect(slot.plugins("restore").map((plugin) => plugin.name)).toEqual(["safe-push"]);
-    expect(slot.isLeader(third)).toBe(true);
-  }),
-);
-
 it.effect("deletes an empty scope and recreates it on the next register", () =>
   Effect.gen(function* () {
     const slot = yield* hostSlot();
-    const registration = slot.register("empty", safePush);
+    const registration = yield* slot.register("empty", safePush, "/plugins/a.js");
 
     registration.dispose();
 
     expect(slot.plugins("empty")).toEqual([]);
 
-    const again = slot.register("empty", safePush);
+    const again = yield* slot.register("empty", safePush, "/plugins/a.js");
 
     expect(slot.isLeader(again)).toBe(true);
   }),

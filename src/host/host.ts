@@ -11,18 +11,17 @@ export const HOST_KEY = Symbol.for(HOST_KEY_NAME);
 /** The host protocol version this copy of tack speaks. */
 const HOST_PROTOCOL = 1;
 
+/** One live registration, the only definition in force for its name in a scope. */
 interface HostEntry {
   readonly token: symbol;
   readonly plugin: ResolvedPlugin;
+  readonly source: string;
 }
-
-/** One name's live registrations, oldest first; the last is the definition in force. */
-type NameStack = Array<HostEntry>;
 
 /** The slot's plain shape. Only data and functions, never a class instance. */
 interface HostSlotData {
   readonly protocol: number;
-  readonly scopes: Map<string, Map<string, NameStack>>;
+  readonly scopes: Map<string, Map<string, HostEntry>>;
 }
 
 /** One plugin's live registration in a scope. */
@@ -34,7 +33,11 @@ export interface Registration {
 
 /** The host slot an agent adapter reads and registers through. */
 export interface HostSlot {
-  readonly register: (scope: string, plugin: ResolvedPlugin) => Registration;
+  readonly register: (
+    scope: string,
+    plugin: ResolvedPlugin,
+    source: string,
+  ) => Effect.Effect<Registration, DuplicatePlugin>;
   readonly plugins: (scope: string) => ReadonlyArray<ResolvedPlugin>;
   readonly isLeader: (registration: Registration) => boolean;
 }
@@ -69,11 +72,31 @@ export class ForeignHostSlot extends Schema.TaggedError<
 }
 
 /**
- * A slot's scopes map: one map per scope of that scope's name stacks. A scope
- * whose value is not a map cannot serve the reads below, so it is refused.
+ * A second live registration of a name in one scope. Two different plugins
+ * cannot share a name, and a reload disposes before it registers again, so the
+ * existing registration is never replaced silently.
+ */
+export class DuplicatePlugin extends Schema.TaggedError<
+  DuplicatePlugin,
+  { readonly brand: unique symbol }
+>()("DuplicatePlugin", {
+  name: Schema.String,
+  scope: Schema.String,
+  existing: Schema.String,
+  incoming: Schema.String,
+}) {
+  override get message(): string {
+    return `tack: two plugins named "${this.name}" are loaded in ${this.scope} (${this.existing} and ${this.incoming}); give them different names.`;
+  }
+}
+
+/**
+ * A slot's scopes map: one map per scope of that scope's live registrations. A
+ * scope whose value is not a map cannot serve the reads below, so it is
+ * refused.
  */
 const ScopesSchema = Schema.declare(
-  (value): value is Map<string, Map<string, NameStack>> =>
+  (value): value is Map<string, Map<string, HostEntry>> =>
     Predicate.isMap(value) && [...value.values()].every(Predicate.isMap),
 );
 
@@ -101,22 +124,40 @@ function hostGlobal(): HostGlobal {
 }
 
 /**
- * Adds a registration on top of its name's stack. A name already in the scope
- * keeps its position; only the definition in force for that name changes.
+ * Adds the scope's one live registration for a name. A name already in force in
+ * the scope is refused, naming both sources: two plugins never share a name.
  */
-function registerIn(data: HostSlotData, scope: string, plugin: ResolvedPlugin): symbol {
-  const names = data.scopes.get(scope) ?? new Map<string, NameStack>();
-  const stack = names.get(plugin.name) ?? [];
-  const token = Symbol();
+function registerIn(
+  data: HostSlotData,
+  scope: string,
+  plugin: ResolvedPlugin,
+  source: string,
+): Effect.Effect<Registration, DuplicatePlugin> {
+  return Effect.suspend(() => {
+    const names = data.scopes.get(scope) ?? new Map<string, HostEntry>();
+    const existing = names.get(plugin.name);
 
-  stack.push({ token, plugin });
-  names.set(plugin.name, stack);
-  data.scopes.set(scope, names);
+    if (existing !== undefined) {
+      return Effect.fail(
+        new DuplicatePlugin({
+          name: plugin.name,
+          scope,
+          existing: existing.source,
+          incoming: source,
+        }),
+      );
+    }
 
-  return token;
+    const token = Symbol();
+
+    names.set(plugin.name, { token, plugin, source });
+    data.scopes.set(scope, names);
+
+    return Effect.succeed({ scope, token, dispose: () => disposeIn(data, scope, token) });
+  });
 }
 
-/** Removes one registration; a name leaves the scope only when its stack empties. */
+/** Removes one live registration; a token that is no longer live removes nothing. */
 function disposeIn(data: HostSlotData, scope: string, token: symbol): void {
   const names = data.scopes.get(scope);
 
@@ -124,19 +165,12 @@ function disposeIn(data: HostSlotData, scope: string, token: symbol): void {
     return;
   }
 
-  for (const [name, stack] of names) {
-    const index = stack.findIndex((entry) => entry.token === token);
-
-    if (index === -1) {
+  for (const [name, entry] of names) {
+    if (entry.token !== token) {
       continue;
     }
 
-    stack.splice(index, 1);
-
-    if (stack.length === 0) {
-      names.delete(name);
-    }
-
+    names.delete(name);
     break;
   }
 
@@ -145,7 +179,7 @@ function disposeIn(data: HostSlotData, scope: string, token: symbol): void {
   }
 }
 
-/** One definition per name, the top of each stack, in first-registration order. */
+/** One definition per name, in first-registration order. */
 function activeIn(data: HostSlotData, scope: string): ReadonlyArray<ResolvedPlugin> {
   const names = data.scopes.get(scope);
 
@@ -153,20 +187,10 @@ function activeIn(data: HostSlotData, scope: string): ReadonlyArray<ResolvedPlug
     return [];
   }
 
-  const active: Array<ResolvedPlugin> = [];
-
-  for (const stack of names.values()) {
-    const top = stack[stack.length - 1];
-
-    if (top !== undefined) {
-      active.push(top.plugin);
-    }
-  }
-
-  return active;
+  return [...names.values()].map((entry) => entry.plugin);
 }
 
-/** True only for the top of the first name's stack: the earliest live registration. */
+/** True only for the earliest live registration in the scope: its leader. */
 function leadsIn(data: HostSlotData, registration: Registration): boolean {
   const names = data.scopes.get(registration.scope);
 
@@ -180,22 +204,13 @@ function leadsIn(data: HostSlotData, registration: Registration): boolean {
     return false;
   }
 
-  const stack = first.value;
-  const top = stack[stack.length - 1];
-
-  return top !== undefined && top.token === registration.token;
+  return first.value.token === registration.token;
 }
 
 /** Builds the slot API around one plain slot object. */
 function slotOf(data: HostSlotData): HostSlot {
-  const registrationFor = (scope: string, token: symbol): Registration => ({
-    scope,
-    token,
-    dispose: () => disposeIn(data, scope, token),
-  });
-
   return {
-    register: (scope, plugin) => registrationFor(scope, registerIn(data, scope, plugin)),
+    register: (scope, plugin, source) => registerIn(data, scope, plugin, source),
     plugins: (scope) => activeIn(data, scope),
     isLeader: (registration) => leadsIn(data, registration),
   };
@@ -204,19 +219,26 @@ function slotOf(data: HostSlotData): HostSlot {
 /**
  * Creates the slot and fixes it at the symbol. Every copy reads and mutates
  * this one slot; no later copy can replace or delete it, so registrations an
- * earlier copy holds cannot be silently detached.
+ * earlier copy holds cannot be silently detached. The slot object is frozen
+ * too, so assigning `scopes` cannot split the process's registrations.
  */
-function createSlot(global: HostGlobal): HostSlotData {
-  const created: HostSlotData = { protocol: HOST_PROTOCOL, scopes: new Map() };
+function createSlot(global: HostGlobal): Effect.Effect<HostSlotData, ForeignHostSlot> {
+  const created: HostSlotData = Object.freeze({ protocol: HOST_PROTOCOL, scopes: new Map() });
 
-  Object.defineProperty(global, HOST_KEY, {
-    value: created,
-    writable: false,
-    configurable: false,
-    enumerable: false,
-  });
+  try {
+    Object.defineProperty(global, HOST_KEY, {
+      value: created,
+      writable: false,
+      configurable: false,
+      enumerable: false,
+    });
+  } catch {
+    // A non-extensible globalThis, or a property fixed another way, cannot
+    // hold tack's slot; that is a foreign value like any other.
+    return Effect.fail(new ForeignHostSlot());
+  }
 
-  return created;
+  return Effect.succeed(created);
 }
 
 /**
@@ -229,13 +251,12 @@ function createSlot(global: HostGlobal): HostSlotData {
 export function hostSlot(): Effect.Effect<HostSlot, ProtocolMismatch | ForeignHostSlot> {
   return Effect.suspend((): Effect.Effect<HostSlot, ProtocolMismatch | ForeignHostSlot> => {
     const global = hostGlobal();
-    const existing: unknown = global[HOST_KEY];
 
-    if (existing === undefined) {
-      return Effect.succeed(slotOf(createSlot(global)));
+    if (!(HOST_KEY in global)) {
+      return Effect.map(createSlot(global), slotOf);
     }
 
-    const decoded = Schema.decodeUnknownOption(SlotSchema)(existing);
+    const decoded = Schema.decodeUnknownOption(SlotSchema)(global[HOST_KEY]);
 
     if (Option.isNone(decoded)) {
       return Effect.fail(new ForeignHostSlot());
