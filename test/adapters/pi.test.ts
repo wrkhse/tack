@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "@effect/vitest";
 import { Effect, Predicate } from "effect";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { HOST_KEY, hostSlot } from "../../src/host/host.ts";
+import { hostSlot } from "../../src/host/host.ts";
 import type { ToolCall, ToolResult } from "../../src/index.ts";
 import { createAgentPlugin } from "../../src/index.ts";
 
@@ -53,6 +53,9 @@ interface FakePi {
 
 const ctx: FakePiContext = { sessionManager: { getSessionId: () => "s1" } };
 
+/** The fakes a case started, shut down after it so the next case starts clean. */
+const started: FakePi[] = [];
+
 const safePush = createAgentPlugin(() => ({
   name: "safe-push",
 
@@ -94,7 +97,11 @@ function fakePi(): FakePi {
     throw new Error("the test fake is not a Pi extension API");
   }
 
-  return { pi: fake, handlers, unsubscribed };
+  const created = { pi: fake, handlers, unsubscribed };
+
+  started.push(created);
+
+  return created;
 }
 
 function hookOf(handlers: FakePi["handlers"], name: PiEventName): FakeHandler {
@@ -113,7 +120,17 @@ function runHook<A>(hook: () => A | Promise<A>): Effect.Effect<A> {
 }
 
 afterEach(() => {
-  Reflect.deleteProperty(globalThis, HOST_KEY);
+  const shutdowns: Array<Promise<FakeResult>> = [];
+
+  for (const fake of started.splice(0)) {
+    const shutdown = fake.handlers.session_shutdown;
+
+    if (shutdown !== undefined) {
+      shutdowns.push(Promise.resolve(shutdown({ reason: "quit" }, ctx)));
+    }
+  }
+
+  return Promise.all(shutdowns);
 });
 
 it.effect("blocks a denied call with the reason", () =>
