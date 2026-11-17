@@ -37,7 +37,7 @@ export const opencodeFidelity: Fidelity = {
     },
     "host.sharedRealm": {
       fidelity: "native",
-      how: "one realm for every location",
+      how: "one process realm; per-location scopes unconfirmed in a run",
       source: "spike/unagent/REALM-SPIKE.md",
     },
   },
