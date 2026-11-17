@@ -15,6 +15,7 @@ export type AgentName = "opencode" | "pi";
 export type PluginName =
   | "deny-push"
   | "throws"
+  | "throws-allowed"
   | "safe-push"
   | "signed-push"
   | "push-note"
@@ -92,17 +93,33 @@ const textFor = (requests: ReadonlyArray<ChatRequest>, role: string): string =>
 
 const observed = (text: string) => Schema.decodeUnknownSync(ObservedSchema)(JSON.parse(text));
 
+/** Asserts a denied call never reached git and that the model received the reason. */
+const assertDenied = (evidence: Evidence): void => {
+  const details = describeRun(evidence);
+
+  assert.equal(evidence.command.exitCode, 0, details);
+  assert.deepEqual(evidence.recorded, [], "a denied push must not reach git\n" + details);
+  assert.ok(
+    textFor(evidence.requests, "tool").includes(DENY_REASON),
+    "the model must receive the deny reason\n" + details,
+  );
+};
+
 const deny: Scenario = {
   name: "deny",
   plugins: ["deny-push"],
-  check: (evidence) => {
-    const details = describeRun(evidence);
+  check: assertDenied,
+};
 
-    assert.equal(evidence.command.exitCode, 0, details);
-    assert.deepEqual(evidence.recorded, [], "a denied push must not reach git\n" + details);
-    assert.ok(
-      textFor(evidence.requests, "tool").includes(DENY_REASON),
-      "the model must receive the deny reason\n" + details,
+const denyAfter: Scenario = {
+  name: "deny after",
+  plugins: ["deny-push", "observe"],
+  check: (evidence) => {
+    assertDenied(evidence);
+    assert.equal(
+      evidence.observedText,
+      null,
+      "toolAfter must not run for a denied call\n" + describeRun(evidence),
     );
   },
 };
@@ -118,6 +135,21 @@ const failClosed: Scenario = {
     assert.ok(
       textFor(evidence.requests, "tool").includes(FAILURE_REASON),
       "the model must receive the failure reason\n" + details,
+    );
+  },
+};
+
+const optOut: Scenario = {
+  name: "opt out",
+  plugins: ["throws-allowed", "safe-push"],
+  check: (evidence) => {
+    const details = describeRun(evidence);
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.deepEqual(
+      evidence.recorded,
+      [REWRITTEN],
+      "a guard that opted into allow must not stop the next rewrite\n" + details,
     );
   },
 };
@@ -207,7 +239,9 @@ const after: Scenario = {
 /** The conformance table: every scenario in both agents. */
 export const scenarios: ReadonlyArray<Scenario> = [
   deny,
+  denyAfter,
   failClosed,
+  optOut,
   rewrite,
   combine,
   combineReversed,

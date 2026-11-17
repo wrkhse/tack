@@ -46,6 +46,17 @@ own shell tool with `git push origin main`.
 - Both load orders rewrite to the same command, so priority decides and the
   agent's own plugin order does not.
 
+## The pinned install
+
+The suite resolves both CLIs from the repository's `node_modules` and asserts
+each `--version` against the pin in `package.json`. `@opencode/cli`'s binary is
+linked by its own postinstall, which `package.json` trusts through
+`trustedDependencies`. Never install a CLI out of band: `npm install
+--ignore-scripts @opencode/cli` from the registry bypasses the lockfile and the
+pin, and CI fails on a changed lockfile or manifest, or on a missing binary,
+before a scenario runs. If the binary is missing, fix the trusted install
+instead.
+
 ## Isolation
 
 One `mkdtemp` directory holds everything a run may see, and it is deleted when
@@ -85,15 +96,17 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 
 ## Scenarios
 
-| Scenario         | Plugins                    | Passes when                       |
-| ---------------- | -------------------------- | --------------------------------- |
-| deny             | `deny-push`                | nothing recorded; reason returned |
-| fail closed      | `throws`                   | nothing recorded; error returned  |
-| rewrite          | `safe-push`                | `push origin main --dry-run`      |
-| combine          | `safe-push`, `signed-push` | `... --dry-run --signed` recorded |
-| combine reversed | `signed-push`, `safe-push` | the same, in the other load order |
-| append           | `push-note`                | the note is in the first prompt   |
-| after            | `safe-push`, `observe`     | the observed command and output   |
+| Scenario         | Plugins                       | Passes when                                |
+| ---------------- | ----------------------------- | ------------------------------------------ |
+| deny             | `deny-push`                   | nothing recorded; reason returned          |
+| deny after       | `deny-push`, `observe`        | the same, and `toolAfter` never ran        |
+| fail closed      | `throws`                      | nothing recorded; error returned           |
+| opt out          | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded |
+| rewrite          | `safe-push`                   | `push origin main --dry-run`               |
+| combine          | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded          |
+| combine reversed | `signed-push`, `safe-push`    | the same, in the other load order          |
+| append           | `push-note`                   | the note is in the first prompt            |
+| after            | `safe-push`, `observe`        | the observed command and output            |
 
 ## Layout
 
@@ -108,5 +121,6 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 | `harness/pi.ts`       | Pi `models.json`, arguments, and one scenario     |
 | `plugins/`            | the tack plugins and their per-agent entry files  |
 | `scenarios.ts`        | the table above, as data and checks               |
+| `suite.ts`            | the checks both agents' tests share               |
 | `opencode.test.ts`    | the version check and every scenario, in OpenCode |
 | `pi.test.ts`          | the version check and every scenario, in Pi       |
