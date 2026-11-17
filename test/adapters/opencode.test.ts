@@ -1,13 +1,13 @@
-import { afterEach, expect, it } from "@effect/vitest";
+import { expect, it } from "@effect/vitest";
 import { Effect, Predicate } from "effect";
 import type * as oc from "@opencode/plugin";
 
-import { HOST_KEY, hostSlot } from "../../src/host/host.ts";
+import { opencodeScope } from "../../src/agents/opencode.ts";
+import { hostSlot } from "../../src/host/host.ts";
 import type { AgentPlugin, ToolCall, ToolResult } from "../../src/index.ts";
 import { createAgentPlugin } from "../../src/index.ts";
 
 const DIRECTORY = "/work/app";
-const SCOPE = `opencode:${DIRECTORY}`;
 
 interface FakeToolEvent {
   readonly tool: string;
@@ -42,7 +42,10 @@ interface FakeRegistration {
 
 /** The fake's shape, which the adapter's three Context members cover. */
 interface FakeCandidate {
-  readonly location: { readonly directory: string };
+  readonly location: {
+    readonly directory: string;
+    readonly workspaceID?: string | undefined;
+  };
   readonly tool: {
     readonly hook: (
       name: "execute.before" | "execute.after",
@@ -66,19 +69,22 @@ function registration(name: string, disposed: string[]): Promise<FakeRegistratio
 
 /** The fake implements the three Context members the adapter reads. */
 function isOpenCodeContext(value: FakeCandidate): value is oc.Plugin.Context {
+  const { location } = value;
+
   return (
-    Predicate.isString(value.location.directory) &&
+    Predicate.isString(location.directory) &&
+    (location.workspaceID === undefined || Predicate.isString(location.workspaceID)) &&
     Predicate.isFunction(value.tool.hook) &&
     Predicate.isFunction(value.session.hook)
   );
 }
 
-function fakeContext(directory: string): FakeContext {
+function fakeContext(directory: string, workspaceID?: string): FakeContext {
   const disposed: string[] = [];
   const handlers: FakeHandlers = {};
 
   const fake = {
-    location: { directory },
+    location: { directory, workspaceID },
     tool: {
       hook: (name: "execute.before" | "execute.after", callback: FakeToolCallback) => {
         handlers[name] = callback;
@@ -180,13 +186,9 @@ const denyPush = createAgentPlugin(() => ({
   toolBefore: (call) => (call.tool === "shell" ? { deny: "blocked by test" } : undefined),
 }));
 
-afterEach(() => {
-  Reflect.deleteProperty(globalThis, HOST_KEY);
-});
-
 it.effect("throws the deny reason and leaves the input untouched", () =>
   Effect.gen(function* () {
-    const fake = fakeContext(DIRECTORY);
+    const fake = fakeContext("/work/deny");
 
     const event: FakeToolEvent = {
       tool: "shell",
@@ -205,7 +207,7 @@ it.effect("throws the deny reason and leaves the input untouched", () =>
 
 it.effect("rewrites the command and keeps the other input fields", () =>
   Effect.gen(function* () {
-    const fake = fakeContext(DIRECTORY);
+    const fake = fakeContext("/work/rewrite");
 
     const event: FakeToolEvent = {
       tool: "shell",
@@ -230,7 +232,7 @@ it.effect("appends prompt text after a blank line", () =>
       promptSent: () => ({ append: "dry runs only." }),
     }));
 
-    const fake = fakeContext(DIRECTORY);
+    const fake = fakeContext("/work/prompt");
     const event: FakePromptEvent = { sessionID: "s1", prompt: { text: "push it" } };
 
     yield* attach(note, fake);
@@ -252,7 +254,7 @@ it.effect("passes completed output and failures to toolAfter", () =>
       },
     }));
 
-    const fake = fakeContext(DIRECTORY);
+    const fake = fakeContext("/work/after");
 
     yield* attach(observe, fake);
 
@@ -310,10 +312,54 @@ it.effect("combines rewrites in one scope whatever the load order", () =>
   }),
 );
 
+it.effect("keeps two workspaces at one directory in separate scopes", () =>
+  Effect.gen(function* () {
+    const first = fakeContext(DIRECTORY, "ws-one");
+    const second = fakeContext(DIRECTORY, "ws-two");
+    const slot = yield* hostSlot();
+
+    yield* attach(denyPush, first);
+    yield* attach(denyPush, second);
+
+    const firstScope = opencodeScope(first.context.location);
+    const secondScope = opencodeScope(second.context.location);
+
+    expect([firstScope, secondScope]).toEqual([
+      'opencode:["/work/app","ws-one"]',
+      'opencode:["/work/app","ws-two"]',
+    ]);
+    expect(slot.plugins(firstScope).map((plugin) => plugin.name)).toEqual(["deny-push"]);
+    expect(slot.plugins(secondScope).map((plugin) => plugin.name)).toEqual(["deny-push"]);
+
+    const firstEvent: FakeToolEvent = {
+      tool: "shell",
+      sessionID: "s1",
+      input: { command: "git push origin main" },
+    };
+
+    const secondEvent: FakeToolEvent = {
+      tool: "shell",
+      sessionID: "s1",
+      input: { command: "git push origin main" },
+    };
+
+    const firstFailure = yield* runHookFailure(() =>
+      hookOf(first.handlers["execute.before"])(firstEvent),
+    );
+
+    const secondFailure = yield* runHookFailure(() =>
+      hookOf(second.handlers["execute.before"])(secondEvent),
+    );
+
+    expect(firstFailure?.message).toBe("blocked by test");
+    expect(secondFailure?.message).toBe("blocked by test");
+  }),
+);
+
 it.effect("hands leadership to the next registration when the leader unloads", () =>
   Effect.gen(function* () {
-    const first = fakeContext(DIRECTORY);
-    const second = fakeContext(DIRECTORY);
+    const first = fakeContext("/work/leadership");
+    const second = fakeContext("/work/leadership");
     const cleanup = yield* attach(safePush, first);
 
     yield* attach(signedPush, second);
@@ -344,14 +390,15 @@ it.effect("hands leadership to the next registration when the leader unloads", (
 
 it.effect("removes the slot registration in the setup cleanup", () =>
   Effect.gen(function* () {
-    const fake = fakeContext(DIRECTORY);
+    const fake = fakeContext("/work/cleanup");
     const slot = yield* hostSlot();
     const cleanup = yield* attach(safePush, fake);
+    const scope = opencodeScope(fake.context.location);
 
-    expect(slot.plugins(SCOPE)).toHaveLength(1);
+    expect(slot.plugins(scope)).toHaveLength(1);
 
     yield* release(cleanup);
 
-    expect(slot.plugins(SCOPE)).toEqual([]);
+    expect(slot.plugins(scope)).toEqual([]);
   }),
 );

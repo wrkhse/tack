@@ -20,13 +20,17 @@ result's text parts.
 | `toolBefore` rewrite | assigns `event.input`      | mutates `event.input.command`           |
 | `promptSent` append  | `prompt` hook edits `text` | `input` transform                       |
 | `toolAfter`          | `execute.after`            | `tool_result`                           |
-| scope                | `opencode:<directory>`     | `pi`, one per process                   |
+| scope                | `opencode:<location>`      | `pi`, one per process                   |
 | registration ends    | the setup cleanup          | `session_shutdown`                      |
 
 A rewrite keeps the agent's other input fields. On OpenCode the adapter spreads
 the input and replaces `command`; Pi requires the command to change in place.
 OpenCode's after event carries `Tool.Result`, whose model-facing text is
 `content` (a string, or text and file parts); `output` is structured output.
+
+The OpenCode scope key is `opencode:` followed by
+`JSON.stringify([directory, workspaceID ?? null])`. The workspace is part of
+it because two workspaces can share one directory and must not share a chain.
 
 ## Usage
 
@@ -46,10 +50,12 @@ export default safePush.pi();
 ## Leader rule
 
 Every output registers its own agent hooks and its own entry in the host slot.
-Each hook invocation checks `slot.isLeader(registration)` at call time and
-returns immediately when it is not the leader. Exactly one instance runs the
-chain per call. If the leader unloads, the next registration becomes leader and
-its already-registered hooks run the chain: no gap, no double run.
+A name's registrations form a stack, and the slot serves the top of each stack
+in first-registration order. Each hook invocation checks
+`slot.isLeader(registration)` at call time and returns immediately when it is
+not the leader. Exactly one instance runs the chain per call: the top of the
+first name's stack. If the leader unloads, the next registration becomes leader
+and its already-registered hooks run the chain: no gap, no double run.
 
 ```mermaid
 sequenceDiagram
@@ -76,6 +82,7 @@ Both `@opencode/plugin` and `@earendil-works/pi-coding-agent` are development
 dependencies used only for their types. The adapters import nothing from them at
 run time: OpenCode loads the plain object, and Pi receives the factory function.
 
-A reload replaces the plugin's registration in place by name, so it keeps its
-position in the scope and its previous hooks stop being the leader. The new
-registration's hooks take over from that position.
+A reload registers the plugin's name again, on top of that name's stack. The
+name keeps its position in the scope, so the earlier registration's hooks stop
+being the leader and the new one's hooks take over from that position. Disposing
+the new registration restores the earlier registration, whose hooks lead again.

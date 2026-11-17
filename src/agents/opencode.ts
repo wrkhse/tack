@@ -199,10 +199,23 @@ function setupPlugin(
   });
 }
 
+/**
+ * The scope one OpenCode location gets.
+ *
+ * OpenCode keys a location by its directory and its workspace, so two
+ * workspaces open on one directory are two locations. Keying by the directory
+ * alone would let their same-named registrations replace each other and leave
+ * one workspace's calls with no guard at all. The pair is JSON encoded, so no
+ * directory and workspace ID can spell another pair's key.
+ */
+export function opencodeScope(location: oc.Location.Info): string {
+  return `opencode:${JSON.stringify([location.directory, location.workspaceID ?? null])}`;
+}
+
 /** Wraps one resolved definition as an OpenCode server plugin. */
 export function opencodePlugin(plugin: ResolvedPlugin): OpenCodePlugin {
   return {
     id: `tack.${plugin.name}`,
-    setup: (context) => setupPlugin(plugin, context, `opencode:${context.location.directory}`),
+    setup: (context) => setupPlugin(plugin, context, opencodeScope(context.location)),
   };
 }
