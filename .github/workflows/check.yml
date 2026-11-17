@@ -52,16 +52,16 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Verify the pinned install
         # An out-of-band install changes the lockfile or manifest. @opencode/cli's
-        # postinstall links the binary of the installed platform package; a
-        # fallback install fetches its own copy instead, which leaves the
-        # lockfile untouched and the bytes unequal.
+        # postinstall links the binary of one of the installed platform packages;
+        # a fallback install fetches its own copy instead, which leaves the
+        # lockfile untouched and its bytes unequal to every candidate.
         run: |
           git diff --exit-code -- bun.lock package.json
 
-          platform=(node_modules/@opencode/cli-*/bin/opencode)
+          candidates=(node_modules/@opencode/cli-*/bin/opencode)
 
-          if [ "${#platform[@]}" -ne 1 ] || [ ! -f "${platform[0]}" ]; then
-            echo "expected one platform binary, found: ${platform[*]}" >&2
+          if [ ! -f "${candidates[0]}" ]; then
+            echo "no platform binary was installed; expected at least one of node_modules/@opencode/cli-*/bin/opencode" >&2
             exit 1
           fi
 
@@ -72,8 +72,14 @@ jobs:
 
           installed="$(readlink -f node_modules/.bin/opencode)"
 
-          if ! cmp -s "$installed" "${platform[0]}"; then
-            echo "the suite would run $installed, not the platform package's ${platform[0]}" >&2
-            exit 1
-          fi
+          for candidate in "${candidates[@]}"; do
+            if cmp -s "$installed" "$candidate"; then
+              echo "the suite runs $installed, byte-identical to $candidate"
+              exit 0
+            fi
+          done
+
+          echo "the suite would run $installed, which matches none of the installed platform binaries:" >&2
+          printf '  %s\n' "${candidates[@]}" >&2
+          exit 1
       - run: bun run conformance:${{ matrix.agent }}
