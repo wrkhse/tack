@@ -1,4 +1,6 @@
-import { Effect, Predicate } from "effect";
+import { fileURLToPath } from "node:url";
+
+import { Cause, Effect, Exit, Option, Predicate } from "effect";
 import type {
   BashToolCallEvent,
   ExtensionAPI,
@@ -16,12 +18,18 @@ import { runPromptSent } from "../hooks/prompt-sent.ts";
 import type { ToolResult } from "../hooks/tool-after.ts";
 import { runToolAfter } from "../hooks/tool-after.ts";
 import type { HookContext, ToolCall } from "../hooks/tool-before.ts";
-import { ToolDecision, runToolBefore } from "../hooks/tool-before.ts";
 import type { ResolvedPlugin } from "../plugin.ts";
+import { runBefore } from "./chain.ts";
 import { joinTextParts } from "./text.ts";
 
 /** The scope every Pi extension in one process shares. */
 const PI_SCOPE = "pi";
+
+/**
+ * The file this adapter was loaded from. Each plugin bundles its own copy of
+ * tack, so under a bundle this names that plugin's bundle file.
+ */
+const SOURCE = fileURLToPath(import.meta.url);
 
 /** A Pi 1.5 extension factory. */
 export type PiExtension = (pi: ExtensionAPI) => void;
@@ -65,12 +73,12 @@ function callOf(event: ToolCallEvent | ToolResultEvent): ToolCall {
 }
 
 /** Pi requires rewrites in place; no validation runs after the mutation. */
-function assignRewrite(event: ToolCallEvent, command: string): void {
-  if (!isShellCall(event)) {
+function assignRewrite(event: ToolCallEvent, call: ToolCall): void {
+  if (call.tool !== "shell" || !isShellCall(event)) {
     return;
   }
 
-  event.input.command = command;
+  event.input.command = call.input.command;
 }
 
 /** Runs `toolBefore` and returns Pi's block result for a deny. */
@@ -80,24 +88,13 @@ function handleToolCall(
   event: ToolCallEvent,
   sessionId: string,
 ): ToolCallEventResult | undefined | Promise<ToolCallEventResult | undefined> {
-  if (!slot.isLeader(registration)) {
-    return undefined;
-  }
-
-  const ctx: HookContext = { agent: "pi", sessionId };
-  const call = callOf(event);
-
-  return run(runToolBefore(slot.plugins(registration.scope), call, ctx)).then((decision) =>
-    ToolDecision.$match(decision, {
-      Allow: (value) => {
-        if (value.rewritten && value.call.tool === "shell") {
-          assignRewrite(event, value.call.input.command);
-        }
-
-        return undefined;
-      },
-      Deny: (value) => ({ block: true, reason: value.reason }),
-    }),
+  return runBefore(
+    slot,
+    registration,
+    callOf(event),
+    { agent: "pi", sessionId },
+    (reason) => ({ block: true, reason }),
+    (call) => assignRewrite(event, call),
   );
 }
 
@@ -140,11 +137,30 @@ function handleInput(
   );
 }
 
-/** Registers one plugin's hooks for the process scope. */
+/** Registers in the process scope, throwing the duplicate's message instead. */
+function registeredIn(slot: HostSlot, plugin: ResolvedPlugin): Registration {
+  const exit = Effect.runSyncExit(slot.register(PI_SCOPE, plugin, SOURCE));
+
+  if (Exit.isSuccess(exit)) {
+    return exit.value;
+  }
+
+  throw new Error(
+    Option.match(Cause.findErrorOption(exit.cause), {
+      onNone: () => "tack: plugin registration failed",
+      onSome: (error) => error.message,
+    }),
+  );
+}
+
+/**
+ * Registers one plugin's hooks for the process scope. Pi's factory is
+ * synchronous, so the slot lookup and registration run here; a name already
+ * live in the scope throws with the duplicate's message.
+ */
 function attach(plugin: ResolvedPlugin, pi: ExtensionAPI): void {
-  // Pi's factory is synchronous, so the pure slot lookup runs here.
   const slot: HostSlot = Effect.runSync(hostSlot());
-  const registration = slot.register(PI_SCOPE, plugin);
+  const registration = registeredIn(slot, plugin);
 
   const offs: Array<() => void> = [
     pi.on("tool_call", (event, ctx) =>

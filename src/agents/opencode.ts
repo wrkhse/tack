@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { Effect, Predicate } from "effect";
 import type * as oc from "@opencode/plugin";
 import type { Result } from "@opencode/plugin/promise/tool";
@@ -8,9 +10,15 @@ import { runPromptSent } from "../hooks/prompt-sent.ts";
 import type { ToolResult } from "../hooks/tool-after.ts";
 import { runToolAfter } from "../hooks/tool-after.ts";
 import type { HookContext, ShellDialect, ToolCall } from "../hooks/tool-before.ts";
-import { ToolDecision, runToolBefore } from "../hooks/tool-before.ts";
 import type { ResolvedPlugin } from "../plugin.ts";
+import { runBefore } from "./chain.ts";
 import { joinTextParts } from "./text.ts";
+
+/**
+ * The file this adapter was loaded from. Each plugin bundles its own copy of
+ * tack, so under a bundle this names that plugin's bundle file.
+ */
+const SOURCE = fileURLToPath(import.meta.url);
 
 /** An OpenCode 2.3 server plugin: the shape `@opencode/plugin` declares. */
 export interface OpenCodePlugin {
@@ -87,14 +95,14 @@ function callOf(event: ToolEvent): ToolCall {
 }
 
 /** Replaces only the command, keeping OpenCode's other input fields. */
-function assignRewrite(event: ToolEvent, command: string): void {
+function assignRewrite(event: ToolEvent, call: ToolCall): void {
   const input = event.input;
 
-  if (!Predicate.isObject(input)) {
+  if (call.tool !== "shell" || !Predicate.isObject(input)) {
     return;
   }
 
-  event.input = { ...input, command };
+  event.input = { ...input, command: call.input.command };
 }
 
 /** Runs `toolBefore` for a call and throws the reason on a deny. */
@@ -103,25 +111,16 @@ function handleBefore(
   registration: Registration,
   event: ToolEvent,
 ): void | Promise<void> {
-  if (!slot.isLeader(registration)) {
-    return;
-  }
-
-  const ctx: HookContext = { agent: "opencode", sessionId: event.sessionID };
-  const call = callOf(event);
-
-  return run(runToolBefore(slot.plugins(registration.scope), call, ctx)).then((decision) => {
-    ToolDecision.$match(decision, {
-      Allow: (value) => {
-        if (value.rewritten && value.call.tool === "shell") {
-          assignRewrite(event, value.call.input.command);
-        }
-      },
-      Deny: (value) => {
-        throw new Error(value.reason);
-      },
-    });
-  });
+  return runBefore(
+    slot,
+    registration,
+    callOf(event),
+    { agent: "opencode", sessionId: event.sessionID },
+    (reason) => {
+      throw new Error(reason);
+    },
+    (call) => assignRewrite(event, call),
+  );
 }
 
 /** Runs `toolAfter` with the completed output or the failure message. */
@@ -176,27 +175,40 @@ function disposeAll(
   return Promise.all(hooks.map((hook) => hook.dispose())).then(() => undefined);
 }
 
-/** Registers the plugin and its hooks in one location's scope. */
+/** Registers the plugin's three hooks and builds the cleanup that releases them. */
+function hookInto(
+  slot: HostSlot,
+  registration: Registration,
+  context: oc.Plugin.Context,
+): Promise<oc.Plugin.Cleanup> {
+  return Promise.all([
+    context.tool.hook("execute.before", (event) => handleBefore(slot, registration, event)),
+    context.tool.hook("execute.after", (event) => handleAfter(slot, registration, event)),
+    context.session.hook("prompt", (event) => handlePrompt(slot, registration, event)),
+  ]).then(
+    (hooks) => () => disposeAll(registration, hooks),
+    (cause: Error) => {
+      registration.dispose();
+      throw cause;
+    },
+  );
+}
+
+/**
+ * Registers the plugin and its hooks in one location's scope. A name already
+ * live in the scope fails the load, so the setup rejects with the duplicate's
+ * message and the existing registration keeps its hooks.
+ */
 function setupPlugin(
   plugin: ResolvedPlugin,
   context: oc.Plugin.Context,
   scope: string,
 ): Promise<oc.Plugin.Cleanup> {
-  return run(hostSlot()).then((slot) => {
-    const registration = slot.register(scope, plugin);
-
-    return Promise.all([
-      context.tool.hook("execute.before", (event) => handleBefore(slot, registration, event)),
-      context.tool.hook("execute.after", (event) => handleAfter(slot, registration, event)),
-      context.session.hook("prompt", (event) => handlePrompt(slot, registration, event)),
-    ]).then(
-      (hooks) => () => disposeAll(registration, hooks),
-      (cause: Error) => {
-        registration.dispose();
-        throw cause;
-      },
-    );
-  });
+  return run(hostSlot()).then((slot) =>
+    run(slot.register(scope, plugin, SOURCE)).then((registration) =>
+      hookInto(slot, registration, context),
+    ),
+  );
 }
 
 /**

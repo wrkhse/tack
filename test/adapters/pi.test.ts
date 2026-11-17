@@ -262,3 +262,22 @@ it.effect("ends the registration and unsubscribes on session shutdown", () =>
     expect(fake.unsubscribed).toEqual(["tool_call", "tool_result", "input", "session_shutdown"]);
   }),
 );
+
+it.effect("throws when the same name loads twice in the process scope", () =>
+  Effect.gen(function* () {
+    const first = fakePi();
+    const second = fakePi();
+
+    safePush.pi()(first.pi);
+
+    expect(() => safePush.pi()(second.pi)).toThrow(
+      'tack: two plugins named "safe-push" are loaded in pi',
+    );
+
+    const event = { toolName: "bash", input: { command: "git push origin main" } };
+
+    yield* runHook(() => hookOf(first.handlers, "tool_call")(event, ctx));
+
+    expect(event.input).toEqual({ command: "git push origin main --dry-run" });
+  }),
+);

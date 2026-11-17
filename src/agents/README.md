@@ -9,6 +9,11 @@ hook runners, so a plugin behaves the same in both.
 | `opencode.ts` | `opencodePlugin` | `{ id, setup }` server plugin    |
 | `pi.ts`       | `piExtension`    | `(pi) => void` extension factory |
 
+`chain.ts` holds `runBefore`, the single leader rule and `toolBefore`
+decision match that both adapters call. Each passes how it expresses a deny
+(OpenCode throws the reason, Pi returns `{ block, reason }`) and how it
+applies a rewrite (assign `event.input` on OpenCode, mutate
+`event.input.command` on Pi).
 `text.ts` holds `joinTextParts`, the shared helper both adapters use to join a
 result's text parts.
 
@@ -50,12 +55,11 @@ export default safePush.pi();
 ## Leader rule
 
 Every output registers its own agent hooks and its own entry in the host slot.
-A name's registrations form a stack, and the slot serves the top of each stack
-in first-registration order. Each hook invocation checks
+A scope holds one live registration per name. Each hook invocation checks
 `slot.isLeader(registration)` at call time and returns immediately when it is
-not the leader. Exactly one instance runs the chain per call: the top of the
-first name's stack. If the leader unloads, the next registration becomes leader
-and its already-registered hooks run the chain: no gap, no double run.
+not the leader. Exactly one instance runs the chain per call: the earliest live
+registration in the scope. If the leader unloads, the next registration becomes
+leader and its already-registered hooks run the chain: no gap, no double run.
 
 ```mermaid
 sequenceDiagram
@@ -76,13 +80,17 @@ sequenceDiagram
     L->>P: toolAfter
 ```
 
-## Dependencies and reloads
+## Dependencies, reloads and duplicate names
 
 Both `@opencode/plugin` and `@earendil-works/pi-coding-agent` are development
 dependencies used only for their types. The adapters import nothing from them at
 run time: OpenCode loads the plain object, and Pi receives the factory function.
 
-A reload registers the plugin's name again, on top of that name's stack. The
-name keeps its position in the scope, so the earlier registration's hooks stop
-being the leader and the new one's hooks take over from that position. Disposing
-the new registration restores the earlier registration, whose hooks lead again.
+A reload disposes the old registration before it registers again: OpenCode runs
+the setup cleanup before the new setup, and Pi disposes at `session_shutdown`.
+Depth one is therefore the only legitimate case. Registering a name that is
+still live in the scope fails that plugin's load: OpenCode's setup rejects with
+the duplicate's message, and Pi's extension factory throws an `Error` carrying
+it. Both messages come from `DuplicatePlugin` and name the plugin, the scope
+and the two source files. Two different plugins named `guard`, loaded with
+`pi -e a.js -e b.js`, are refused instead of one silently replacing the other.

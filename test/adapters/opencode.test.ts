@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { expect, it } from "@effect/vitest";
 import { Effect, Predicate } from "effect";
 import type * as oc from "@opencode/plugin";
@@ -133,6 +135,22 @@ function runHookFailure(hook: () => void | Promise<void>): Effect.Effect<Error |
 
 function attach(plugin: AgentPlugin<void>, fake: FakeContext): Effect.Effect<oc.Plugin.Cleanup> {
   return Effect.promise(() => plugin.opencode().setup(fake.context));
+}
+
+/** Runs a setup that must fail and returns the rejection. */
+function setupFailure(
+  plugin: AgentPlugin<void>,
+  fake: FakeContext,
+): Effect.Effect<Error | undefined> {
+  return Effect.promise(() =>
+    plugin
+      .opencode()
+      .setup(fake.context)
+      .then(
+        () => undefined,
+        (cause: Error) => cause,
+      ),
+  );
 }
 
 function release(cleanup: oc.Plugin.Cleanup): Effect.Effect<void> {
@@ -353,6 +371,35 @@ it.effect("keeps two workspaces at one directory in separate scopes", () =>
 
     expect(firstFailure?.message).toBe("blocked by test");
     expect(secondFailure?.message).toBe("blocked by test");
+  }),
+);
+
+it.effect("refuses a second plugin of the same name in one location", () =>
+  Effect.gen(function* () {
+    const first = fakeContext("/work/duplicate");
+    const second = fakeContext("/work/duplicate");
+    const slot = yield* hostSlot();
+    const scope = opencodeScope(first.context.location);
+    const source = fileURLToPath(new URL("../../src/agents/opencode.ts", import.meta.url));
+
+    yield* attach(denyPush, first);
+
+    const failure = yield* setupFailure(denyPush, second);
+
+    expect(failure?.message).toBe(
+      `tack: two plugins named "deny-push" are loaded in ${scope} (${source} and ${source}); give them different names.`,
+    );
+    expect(slot.plugins(scope).map((plugin) => plugin.name)).toEqual(["deny-push"]);
+
+    const event: FakeToolEvent = {
+      tool: "shell",
+      sessionID: "s1",
+      input: { command: "git push origin main" },
+    };
+
+    const denied = yield* runHookFailure(() => hookOf(first.handlers["execute.before"])(event));
+
+    expect(denied?.message).toBe("blocked by test");
   }),
 );
 
