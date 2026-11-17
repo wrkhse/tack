@@ -68,6 +68,7 @@ export default defineConfig({
           setupFiles: ["tools/vitest/rule-tester.ts"],
         },
       },
+      { test: { name: "unit", include: ["test/**/*.test.ts"] } },
     ],
   },
   run: {

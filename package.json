@@ -4,7 +4,7 @@
   "workspaces": [],
   "type": "module",
   "scripts": {
-    "check": "vp check && vp run types && vp run effect && vp test run --project anti-slop && vp run health && vp run audit",
+    "check": "vp check && vp run types && vp run effect && vp test run --project anti-slop --project unit && vp run health && vp run audit",
     "fix": "vp check --fix"
   },
   "devDependencies": {
