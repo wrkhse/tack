@@ -9,6 +9,8 @@ export type { AgentPlugin } from "./create.ts";
 
 export { InvalidPlugin } from "./plugin.ts";
 
+export { DuplicatePlugin } from "./host/host.ts";
+
 export type { Agent, Meta, PluginDefinition, ResolvedPlugin } from "./plugin.ts";
 
 export { APPEND_CAP_BYTES } from "./hooks/prompt-sent.ts";
