@@ -27,6 +27,18 @@
     "vite": "catalog:",
     "vite-plus": "catalog:"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@opencode/plugin": "2.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
   "overrides": {
     "effect": "4.1.4",
     "glob": "14.0.6",
