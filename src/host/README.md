@@ -5,13 +5,16 @@ Every tack plugin in one agent process shares one slot,
 their own copy of tack, so the slot holds only plain data and handler
 functions under a protocol version.
 
-| Export          | Meaning                                                         |
-| --------------- | --------------------------------------------------------------- |
-| `HOST_KEY`      | `Symbol.for("@workhorse/tack/host")`                            |
-| `HOST_PROTOCOL` | `1`; a slot at another version is refused, naming both versions |
-| `hostSlot()`    | `Effect<HostSlot, ProtocolMismatch>`; gets or creates the slot  |
-| `HostSlot`      | `register`, `plugins`, `isLeader`                               |
-| `Registration`  | `scope`, `token`, `dispose`                                     |
+| Export             | Meaning                                                        |
+| ------------------ | -------------------------------------------------------------- |
+| `HOST_KEY`         | `Symbol.for("@workhorse/tack/host")`                           |
+| `hostSlot()`       | `Effect<HostSlot, ProtocolMismatch>`; gets or creates the slot |
+| `HostSlot`         | `register`, `plugins`, `isLeader`                              |
+| `Registration`     | `scope`, `token`, `dispose`                                    |
+| `ProtocolMismatch` | a slot at another protocol number; refused, naming both        |
+
+The protocol number is `1`; the module keeps it private and writes it on the
+slot it creates. A slot at another number is refused, naming both.
 
 ## Scopes and leadership
 
