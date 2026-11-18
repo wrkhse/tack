@@ -74,6 +74,48 @@ describe("runPermissionAsked", () => {
   );
 });
 
+describe("runPermissionAsked consent", () => {
+  it.effect("takes a later deny even after an earlier allow", () =>
+    Effect.gen(function* () {
+      const allowing = resolvedPlugin({
+        name: "allowing",
+        priority: 10,
+        permissionAsked: () => ({ allow: true }),
+      });
+
+      const denying = resolvedPlugin({
+        name: "denying",
+        priority: 20,
+        permissionAsked: () => ({ deny: "later says no" }),
+      });
+
+      const result = yield* runPermissionAsked([allowing, denying], request, ctx);
+
+      expect(result).toEqual({ deny: "later says no" });
+    }),
+  );
+
+  it.effect("is not consent when an earlier allow is followed by a leave", () =>
+    Effect.gen(function* () {
+      const allowing = resolvedPlugin({
+        name: "allowing",
+        priority: 10,
+        permissionAsked: () => ({ allow: true }),
+      });
+
+      const leaving = resolvedPlugin({
+        name: "leaving",
+        priority: 20,
+        permissionAsked: () => undefined,
+      });
+
+      const result = yield* runPermissionAsked([allowing, leaving], request, ctx);
+
+      expect(result).toBeUndefined();
+    }),
+  );
+});
+
 describe("runPermissionAsked failures", () => {
   it.effect("logs a failed handler and leaves the decision by default", () =>
     Effect.gen(function* () {
@@ -97,6 +139,35 @@ describe("runPermissionAsked failures", () => {
       );
 
       expect(result).toBeUndefined();
+      expect(
+        capture.lines().filter((line) => line.includes("tack: broken failed: boom")),
+      ).toHaveLength(1);
+    }),
+  );
+
+  it.effect("keeps walking after a failure, so a later deny still wins", () =>
+    Effect.gen(function* () {
+      const capture = logCapture();
+
+      const broken = resolvedPlugin({
+        name: "broken",
+        priority: 10,
+        permissionAsked: () => {
+          throw new Error("boom");
+        },
+      });
+
+      const denying = resolvedPlugin({
+        name: "denying",
+        priority: 20,
+        permissionAsked: () => ({ deny: "later says no" }),
+      });
+
+      const result = yield* runPermissionAsked([broken, denying], request, ctx).pipe(
+        Effect.withLogger(capture.logger),
+      );
+
+      expect(result).toEqual({ deny: "later says no" });
       expect(
         capture.lines().filter((line) => line.includes("tack: broken failed: boom")),
       ).toHaveLength(1);

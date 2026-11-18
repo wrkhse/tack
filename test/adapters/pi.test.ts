@@ -18,6 +18,8 @@ type PiEventName =
 
 interface FakeCompactOptions {
   readonly customInstructions?: string;
+  readonly onComplete?: () => void;
+  readonly onError?: (error: Error) => void;
 }
 
 interface FakeModel {
@@ -116,6 +118,8 @@ interface FakePi {
   readonly handlers: Partial<Record<PiEventName, FakeHandler>>;
   readonly unsubscribed: string[];
   readonly calls: FakeCall[];
+  /** When set, every action throws Pi's stale-context error. */
+  readonly stale: { active: boolean };
 }
 
 /** The fakes a case started, shut down after it so the next case starts clean. */
@@ -153,6 +157,15 @@ function optionsOf(call: FakeCall | undefined): FakeSendOptions {
   return call.options;
 }
 
+/** The options one `compact` call carried, as Pi received them. */
+function compactOf(call: FakeCall | undefined): FakeCompactOptions {
+  if (call?.method !== "compact") {
+    throw new Error("the adapter made no compact call");
+  }
+
+  return call.options;
+}
+
 /** The fake's shape: the one ExtensionAPI member the factory reads. */
 interface FakeCandidate {
   readonly on: (...args: never[]) => () => void;
@@ -167,6 +180,13 @@ function fakePi(modelResult = true): FakePi {
   const handlers: Partial<Record<PiEventName, FakeHandler>> = {};
   const unsubscribed: string[] = [];
   const calls: FakeCall[] = [];
+  const stale = { active: false };
+
+  const assertFresh = (): void => {
+    if (stale.active) {
+      throw new Error("This extension ctx is stale after session replacement or reload.");
+    }
+  };
 
   const context: FakePiContext = {
     sessionManager: { getSessionId: () => "s1" },
@@ -177,9 +197,11 @@ function fakePi(modelResult = true): FakePi {
           : undefined,
     },
     compact: (options) => {
+      assertFresh();
       calls.push({ method: "compact", options });
     },
     abort: () => {
+      assertFresh();
       calls.push({ method: "abort" });
     },
   };
@@ -193,9 +215,11 @@ function fakePi(modelResult = true): FakePi {
       };
     },
     sendMessage: (message: FakeAppendMessage, options?: FakeSendOptions) => {
+      assertFresh();
       calls.push({ method: "sendMessage", message, options });
     },
     setModel: (model: FakeModel) => {
+      assertFresh();
       calls.push({ method: "setModel", model });
 
       return Promise.resolve(modelResult);
@@ -206,7 +230,7 @@ function fakePi(modelResult = true): FakePi {
     throw new Error("the test fake is not a Pi extension API");
   }
 
-  const created = { pi: fake, context, handlers, unsubscribed, calls };
+  const created = { pi: fake, context, handlers, unsubscribed, calls, stale };
 
   started.push(created);
 
@@ -258,6 +282,7 @@ function handleOf(fake: FakePi): Effect.Effect<Session> {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 
   const shutdowns: Array<Promise<FakeResult>> = [];
@@ -478,15 +503,64 @@ it.effect("appends a synthetic message with the options its when names", () =>
   }),
 );
 
-it.effect("compacts the session", () =>
+it.effect("reports a completed compaction as accepted", () =>
   Effect.gen(function* () {
     const fake = fakePi();
     const session = yield* handleOf(fake);
 
-    const outcome = yield* Effect.promise(() => session.compact());
+    const pending = session.compact();
+
+    yield* Effect.promise(() => vi.waitFor(() => expect(fake.calls).toHaveLength(1)));
+
+    compactOf(fake.calls[0]).onComplete?.();
+
+    const outcome = yield* Effect.promise(() => pending);
 
     expect(outcome).toEqual({ status: "accepted" });
-    expect(fake.calls).toEqual([{ method: "compact", options: {} }]);
+    expect(fake.calls).toHaveLength(1);
+  }),
+);
+
+it.effect("refuses a compaction Pi reports as failed", () =>
+  Effect.gen(function* () {
+    const observed = quietConsole();
+    const fake = fakePi();
+    const session = yield* handleOf(fake);
+
+    const pending = session.compact();
+
+    yield* Effect.promise(() => vi.waitFor(() => expect(fake.calls).toHaveLength(1)));
+
+    compactOf(fake.calls[0]).onError?.(new Error("out of room"));
+
+    const outcome = yield* Effect.promise(() => pending);
+
+    expect(outcome).toEqual({ status: "refused", reason: "out of room" });
+    expect(
+      observed.lines().filter((line) => line.includes("compact refused: out of room")),
+    ).toHaveLength(1);
+  }),
+);
+
+it.effect("does not accept a compaction before Pi reports it", () =>
+  Effect.gen(function* () {
+    const fake = fakePi();
+    const session = yield* handleOf(fake);
+    let settled = false;
+
+    const pending = session.compact().then((outcome) => {
+      settled = true;
+
+      return outcome;
+    });
+
+    yield* Effect.promise(() => vi.waitFor(() => expect(fake.calls).toHaveLength(1)));
+
+    expect(settled).toBe(false);
+
+    compactOf(fake.calls[0]).onComplete?.();
+
+    expect(yield* Effect.promise(() => pending)).toEqual({ status: "accepted" });
   }),
 );
 
@@ -565,6 +639,57 @@ it.effect("reports an ended session after its extension instance shut down", () 
 
     expect(outcome).toEqual({ status: "ended" });
     expect(fake.calls).toEqual([]);
+  }),
+);
+
+it.effect("reports an action on a stale ctx as ended", () =>
+  Effect.gen(function* () {
+    const fake = fakePi();
+    const session = yield* handleOf(fake);
+
+    fake.stale.active = true;
+
+    const outcomes = [
+      yield* Effect.promise(() => session.append("note", { when: "wake" })),
+      yield* Effect.promise(() => session.compact()),
+      yield* Effect.promise(() => session.interrupt()),
+      yield* Effect.promise(() =>
+        session.setModel({ providerID: "anthropic", id: "claude-sonnet-4-5" }),
+      ),
+    ];
+
+    expect(outcomes).toEqual([
+      { status: "ended" },
+      { status: "ended" },
+      { status: "ended" },
+      { status: "ended" },
+    ]);
+    expect(fake.calls).toEqual([]);
+  }),
+);
+
+it.effect("refuses a compaction that never reports", () =>
+  Effect.gen(function* () {
+    const observed = quietConsole();
+    const fake = fakePi();
+    const session = yield* handleOf(fake);
+
+    vi.useFakeTimers();
+
+    const pending = session.compact();
+
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(60_000));
+
+    const outcome = yield* Effect.promise(() => pending);
+
+    vi.useRealTimers();
+
+    expect(outcome).toEqual({ status: "refused", reason: "compaction did not report" });
+    expect(
+      observed
+        .lines()
+        .filter((line) => line.includes("compact refused: compaction did not report")),
+    ).toHaveLength(1);
   }),
 );
 

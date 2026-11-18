@@ -24,12 +24,12 @@ A handler may return its value directly or as a promise. It gets
 `budgetMs` (default 5000) to settle; a throw, a rejection or a missed budget
 becomes a `HandlerFailed` whose message is `tack: <plugin> failed: <reason>`.
 
-| Hook              | A failed handler                                                                                       |
-| ----------------- | ------------------------------------------------------------------------------------------------------ |
-| `toolBefore`      | Denies unless `onError.toolBefore` is `"allow"`                                                        |
-| `promptSent`      | The append is dropped and the failure logged                                                           |
-| `toolAfter`       | The failure is logged; the other handlers still run                                                    |
-| `permissionAsked` | Denies when `onError.permissionAsked` is `"deny"`; otherwise logs and leaves the decision to the agent |
+| Hook              | A failed handler                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `toolBefore`      | Denies unless `onError.toolBefore` is `"allow"`                                                                  |
+| `promptSent`      | The append is dropped and the failure logged                                                                     |
+| `toolAfter`       | The failure is logged; the other handlers still run                                                              |
+| `permissionAsked` | Denies when `onError.permissionAsked` is `"deny"`; otherwise logs it, records a leave, and runs the next handler |
 
 `toolBefore` decodes each handler result with Effect Schema. Anything other
 than `undefined`, `{ deny }` or `{ rewrite: { command } }` fails the handler,
@@ -41,16 +41,18 @@ These hooks observe a session or decide one permission request. Each handler
 runs under its plugin's `budgetMs`, and each returned value is decoded with
 Effect Schema before tack acts on it.
 
-| Hook               | Arguments                     | Combination rule                                                                                 | A failed handler                                                         |
-| ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| `sessionCreated`   | `({ session, resumed }, ctx)` | Every plugin runs, in priority order                                                             | Logged; the other handlers still run                                     |
-| `sessionEnded`     | `({ session, reason }, ctx)`  | Every plugin runs, in priority order                                                             | Logged; the other handlers still run                                     |
-| `responseFinished` | `({ session, reason }, ctx)`  | Every plugin runs, in priority order                                                             | Logged; the other handlers still run                                     |
-| `sessionIdle`      | `({ session }, ctx)`          | Every plugin runs, in priority order                                                             | Logged; the other handlers still run                                     |
-| `permissionAsked`  | `(request, ctx)`              | The first deny wins; every answering handler allowing allows; otherwise the agent's rule decides | `"deny"` denies with the message; `"leave"` logs and leaves the decision |
+| Hook               | Arguments                     | Combination rule                                                                                                          | A failed handler                                                  |
+| ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `sessionCreated`   | `({ session, resumed }, ctx)` | Every plugin runs, in priority order                                                                                      | Logged; the other handlers still run                              |
+| `sessionEnded`     | `({ session, reason }, ctx)`  | Every plugin runs, in priority order                                                                                      | Logged; the other handlers still run                              |
+| `responseFinished` | `({ session, reason }, ctx)`  | Every plugin runs, in priority order                                                                                      | Logged; the other handlers still run                              |
+| `sessionIdle`      | `({ session }, ctx)`          | Every plugin runs, in priority order                                                                                      | Logged; the other handlers still run                              |
+| `permissionAsked`  | `(request, ctx)`              | The first deny wins; `{ allow: true }` only when every handler allows; any leave, empty answer or failure decides nothing | `"deny"` denies with the message; `"leave"` logs it and continues |
 
 `{ allow: true }` from `permissionAsked` skips the person's configured ask, so
-the action proceeds without a prompt. Return `undefined` to let the ask happen.
+the action proceeds without a prompt. It is consent only when every handler
+allows: an `undefined` answer and a handler that failed are each not
+consent, so the person's configured ask still runs.
 `request.effect` is the harness's current effect, `allow` or `ask`; a
 configured `deny` never reaches the hook.
 

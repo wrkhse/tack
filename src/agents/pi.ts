@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 
-import { Cause, Effect, Exit, Option, Predicate } from "effect";
+import { Cause, Duration, Effect, Exit, Option, Predicate } from "effect";
 import type {
   BashToolCallEvent,
   ExtensionAPI,
@@ -106,13 +106,14 @@ function assignRewrite(event: ToolCallEvent, call: ToolCall): void {
 /** The outcome a native call that resolved reports. */
 const ACCEPTED: Outcome = { status: "accepted" };
 
-/** The outcome an action reports once its extension instance has shut down. */
+/** The outcome an action reports once its extension instance shut down or went stale. */
 const ENDED: Outcome = { status: "ended" };
 
 /**
- * The custom message type every append carries. Pi runs its own `input` hook
- * for a message an extension sends, with source `extension`, and the adapter
- * skips that text, so an append is never transformed again.
+ * The custom message type every append carries. Pi admits a `sendMessage`
+ * message as a custom message without running its `input` hook, so an append
+ * is never transformed again; `input` runs only for `sendUserMessage`, whose
+ * source `extension` the adapter skips.
  */
 const APPEND_TYPE = "tack.append";
 
@@ -158,15 +159,35 @@ function appendTo(pi: ExtensionAPI, text: string, when: AppendWhen): void {
   );
 }
 
-/** Runs one action, reporting `ended` once its extension instance has shut down. */
-function act(attachment: Attachment, perform: () => void): Promise<Outcome> {
+/** The message Pi rejects a captured instance with once its session was replaced. */
+const STALE_PREFIX = "This extension ctx is stale";
+
+/** True when Pi refused a call because the captured instance no longer serves a session. */
+function isStale(cause: unknown): boolean {
+  return cause instanceof Error && cause.message.startsWith(STALE_PREFIX);
+}
+
+/** The outcome a throw or rejection names: a stale instance has ended, anything else is refused. */
+function failureOf(cause: unknown): Outcome {
+  if (isStale(cause)) {
+    return ENDED;
+  }
+
+  return refused(cause instanceof Error ? cause.message : String(cause));
+}
+
+/** Runs one action, reporting `ended` once its instance shut down or went stale. */
+function act(attachment: Attachment, perform: () => void | Promise<void>): Promise<Outcome> {
   if (attachment.isEnded()) {
     return Promise.resolve(ENDED);
   }
 
   return Promise.resolve()
     .then(perform)
-    .then(() => ACCEPTED);
+    .then(
+      () => ACCEPTED,
+      (cause): Outcome => failureOf(cause),
+    );
 }
 
 /** Switches the model, refusing one this agent does not have or cannot authenticate. */
@@ -185,11 +206,45 @@ function switchModel(
     return Promise.resolve(refused(`no model ${model.providerID}/${model.id} for this agent`));
   }
 
-  return attachment.pi
-    .setModel(found)
-    .then((applied): Outcome =>
-      applied ? ACCEPTED : refused(`no credentials for ${model.providerID}/${model.id}`),
+  return Promise.resolve()
+    .then(() => attachment.pi.setModel(found))
+    .then(
+      (applied): Outcome =>
+        applied ? ACCEPTED : refused(`no credentials for ${model.providerID}/${model.id}`),
+      (cause): Outcome => failureOf(cause),
     );
+}
+
+/** How long Pi gets to report a requested compaction before tack stops waiting. */
+const COMPACT_REPORT_MS = 60_000;
+
+/**
+ * Requests compaction and reports Pi's own outcome. Pi returns from `compact`
+ * before compaction runs, so its callbacks are the only report: completing
+ * accepts, failing refuses with its message, and an attempt that reports
+ * neither within the bound refuses. A stale instance has ended.
+ */
+function compactIn(attachment: Attachment, context: ExtensionContext): Promise<Outcome> {
+  if (attachment.isEnded()) {
+    return Promise.resolve(ENDED);
+  }
+
+  const request = Effect.callback<Outcome>((resume) => {
+    try {
+      context.compact({
+        onComplete: () => resume(Effect.succeed(ACCEPTED)),
+        onError: (error) => resume(Effect.succeed(failureOf(error))),
+      });
+    } catch (cause) {
+      resume(Effect.succeed(failureOf(cause)));
+    }
+  });
+
+  const timeout = Effect.sleep(Duration.millis(COMPACT_REPORT_MS)).pipe(
+    Effect.as(refused("compaction did not report")),
+  );
+
+  return run(Effect.raceFirst(request, timeout));
 }
 
 /**
@@ -200,7 +255,7 @@ function switchModel(
 function piSessionPort(attachment: Attachment, context: ExtensionContext): SessionPort {
   return {
     append: (input) => act(attachment, () => appendTo(attachment.pi, input.text, input.when)),
-    compact: () => act(attachment, () => context.compact({})),
+    compact: () => compactIn(attachment, context),
     interrupt: () => act(attachment, () => context.abort()),
     setModel: (input) => switchModel(attachment, context, input.model),
   };

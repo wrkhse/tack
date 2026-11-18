@@ -56,7 +56,7 @@ export const piFidelity: Fidelity = {
     },
     "session.compact": {
       fidelity: "native",
-      how: "`ctx.compact({ customInstructions?, onComplete?, onError? })` aborts the running turn first, where OpenCode waits for a step boundary",
+      how: "native, but it differs: `ctx.compact({ customInstructions?, onComplete?, onError? })` aborts the running turn first, where OpenCode waits for a step boundary",
       source: source("dist/core/extensions/types.d.ts#L224-L270"),
     },
     "session.interrupt": {

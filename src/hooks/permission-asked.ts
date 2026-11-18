@@ -79,11 +79,13 @@ function ask(
 /**
  * Runs every `permissionAsked` handler in priority order.
  *
- * The first deny wins and supplies the reason. If every handler that answered
- * allowed, the result is `{ allow: true }`, which skips the person's
- * configured ask; otherwise the agent's own rule decides. A failed handler is
- * a `HandlerFailed`: `"deny"` refuses with the failure message, and the
- * default `"leave"` logs it and leaves the decision to the agent.
+ * The first deny wins and supplies the reason. `{ allow: true }` is consent
+ * only when every handler answered allow: an `undefined` answer and a handler
+ * that failed are each not consent, so the result is `undefined` and the
+ * agent's own rule decides. A failed handler is
+ * a `HandlerFailed`: the `"deny"` setting refuses with the failure message;
+ * the default `"leave"` logs it, records that the handler left, and runs the
+ * next one, so one failure never stops the rest.
  */
 export function runPermissionAsked(
   plugins: ReadonlyArray<ResolvedPlugin>,
@@ -92,6 +94,7 @@ export function runPermissionAsked(
 ): Effect.Effect<PermissionAskedResult> {
   return Effect.gen(function* () {
     let allowed = false;
+    let left = false;
 
     for (const plugin of plugins.toSorted(byPriority)) {
       const handler = plugin.permissionAsked;
@@ -109,10 +112,14 @@ export function runPermissionAsked(
 
         yield* Effect.logWarning(answer.message);
 
-        return undefined;
+        left = true;
+
+        continue;
       }
 
       if (answer.value === undefined) {
+        left = true;
+
         continue;
       }
 
@@ -123,6 +130,6 @@ export function runPermissionAsked(
       allowed = true;
     }
 
-    return allowed ? { allow: true } : undefined;
+    return allowed && !left ? { allow: true } : undefined;
   });
 }
