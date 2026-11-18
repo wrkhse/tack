@@ -4,25 +4,43 @@ import { runOpenCodeScenario } from "./harness/opencode.ts";
 import { runOpenCodeResumedScenario, runOpenCodeSessionScenario } from "./harness/t2-opencode.ts";
 import { scenarios } from "./scenarios.ts";
 import { sessionScenariosFor } from "./session-scenarios.ts";
-import { checkPinnedVersion, checkScenario, checkSessionScenario } from "./suite.ts";
+import {
+  checkPinnedVersion,
+  checkScenario,
+  checkSessionScenario,
+  iterations,
+  requireSelection,
+  selectedRows,
+} from "./suite.ts";
 
 const AGENT = "opencode";
 const PACKAGE = "@opencode/cli";
+
+const scenarioRows = selectedRows(scenarios);
+const sessionRows = selectedRows(sessionScenariosFor(AGENT));
+
+requireSelection(AGENT, [scenarioRows, sessionRows]);
 
 it.live(AGENT + " reports the pinned version", () =>
   checkPinnedVersion(AGENT, PACKAGE, (box) => box.opencode),
 );
 
-for (const scenario of scenarios) {
-  it.live(AGENT + ": " + scenario.name, () => checkScenario(AGENT, runOpenCodeScenario, scenario));
+for (const scenario of scenarioRows) {
+  for (const iteration of iterations()) {
+    it.live(iteration.name(AGENT + ": " + scenario.name), () =>
+      checkScenario(AGENT, runOpenCodeScenario, scenario),
+    );
+  }
 }
 
-for (const scenario of sessionScenariosFor(AGENT)) {
-  it.live(AGENT + ": " + scenario.name, () =>
-    checkSessionScenario(
-      AGENT,
-      scenario.beforePlugin === true ? runOpenCodeResumedScenario : runOpenCodeSessionScenario,
-      scenario,
-    ),
-  );
+for (const scenario of sessionRows) {
+  for (const iteration of iterations()) {
+    it.live(iteration.name(AGENT + ": " + scenario.name), () =>
+      checkSessionScenario(
+        AGENT,
+        scenario.beforePlugin === true ? runOpenCodeResumedScenario : runOpenCodeSessionScenario,
+        scenario,
+      ),
+    );
+  }
 }

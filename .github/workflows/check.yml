@@ -5,6 +5,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      repeat:
+        description: "How many times each conformance row runs (TACK_CONFORMANCE_REPEAT)"
+        required: false
+        default: "1"
+        type: string
+      only:
+        description: "Run only conformance rows whose name contains this text, case-insensitive (TACK_CONFORMANCE_ONLY)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -84,3 +95,6 @@ jobs:
           printf '  %s\n' "${candidates[@]}" >&2
           exit 1
       - run: bun run conformance:${{ matrix.agent }}
+        env:
+          TACK_CONFORMANCE_REPEAT: ${{ inputs.repeat || '1' }}
+          TACK_CONFORMANCE_ONLY: ${{ inputs.only }}

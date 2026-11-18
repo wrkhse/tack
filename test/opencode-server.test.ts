@@ -8,11 +8,13 @@ import { Cause, Effect, Exit, Schema, Stream, type Scope } from "effect";
 
 import { opencodeServer, type OpenCodeServer } from "../conformance/harness/opencode-server.ts";
 import type { Sandbox } from "../conformance/harness/sandbox.ts";
+import { createWatchedSession, watchSession } from "../conformance/harness/t2-opencode.ts";
 
 /**
  * A plain node:http server standing in for `opencode serve`: it records every
  * request, refuses a wrong password, and answers the routes the driver uses.
- * The "huge" mode makes the event stream carry one event over 1 MiB.
+ * The "huge" mode makes the event stream carry one event over 1 MiB; "live"
+ * keeps it open for pushed events, and "one-shot" announces itself and ends.
  */
 const FAKE = [
   'import { appendFileSync, readFileSync, writeFileSync } from "node:fs";',
@@ -48,6 +50,7 @@ const FAKE = [
   "};",
   "",
   "let pluginPolls = 0;",
+  "const subscribers = new Set();",
   "",
   "const handle = (request, response, body) => {",
   '  const url = new URL(request.url, "http://127.0.0.1");',
@@ -95,6 +98,21 @@ const FAKE = [
   "      return;",
   "    }",
   "",
+  '    if (mode() === "one-shot") {',
+  '      event(response, { type: "server.connected", data: {} });',
+  "      response.end();",
+  "",
+  "      return;",
+  "    }",
+  "",
+  '    if (mode() === "live") {',
+  "      subscribers.add(response);",
+  '      response.on("close", () => subscribers.delete(response));',
+  '      event(response, { type: "server.connected", data: {} });',
+  "",
+  "      return;",
+  "    }",
+  "",
   '    event(response, { type: "session.idle", data: { sessionID: "session-1" } });',
   '    event(response, { type: "session.step.ended", data: { sessionID: "session-1" } });',
   "    response.end();",
@@ -123,6 +141,12 @@ const FAKE = [
   "  }",
   "",
   '  if (request.method === "DELETE" && id !== undefined && action === "") {',
+  '    if (mode() === "live") {',
+  "      for (const subscriber of subscribers) {",
+  '        event(subscriber, { type: "session.deleted", data: { sessionID: id } });',
+  "      }",
+  "    }",
+  "",
   "    response.writeHead(204);",
   "    response.end();",
   "",
@@ -267,7 +291,7 @@ const fakeServer = (
 
 const withServer = <A>(
   env: Readonly<Record<string, string>>,
-  body: (fake: MockServer, server: OpenCodeServer) => Effect.Effect<A>,
+  body: (fake: MockServer, server: OpenCodeServer) => Effect.Effect<A, never, Scope.Scope>,
 ): Effect.Effect<A> =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -372,9 +396,33 @@ it.live("fails a non-2xx response with its status, path and body", () =>
 it.live("streams only the requested event types and ends with the server's reply", () =>
   withServer({}, (_fake, server) =>
     Effect.gen(function* () {
-      const chosen = yield* server.events(["session.step.ended"]).pipe(Stream.runCollect);
+      const opened: Array<string> = [];
+      const closed: Array<string> = [];
+      let frames = 0;
+
+      const chosen = yield* server
+        .events(["session.step.ended"], {
+          opened: (at) => {
+            opened.push(at);
+          },
+          closed: (at) => {
+            closed.push(at);
+          },
+          frame: () => {
+            frames += 1;
+          },
+        })
+        .pipe(Stream.runCollect);
 
       expect(chosen).toEqual([{ type: "session.step.ended", data: { sessionID: "session-1" } }]);
+
+      // Both frames arrive, though only one type is kept: the count says the
+      // connection was alive when a witness has no frame of its own to show.
+      expect(frames).toBe(2);
+      expect(opened).toHaveLength(1);
+      expect(closed).toHaveLength(1);
+      expect(opened[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(closed[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 
       const all = yield* server.events([]).pipe(Stream.runCollect);
 
@@ -382,6 +430,59 @@ it.live("streams only the requested event types and ends with the server's reply
         { type: "session.idle", data: { sessionID: "session-1" } },
         { type: "session.step.ended", data: { sessionID: "session-1" } },
       ]);
+    }),
+  ),
+);
+
+it.live("opens the witness before the session, so a delete cannot outrun it", () =>
+  withServer({}, (fake, server) =>
+    Effect.gen(function* () {
+      yield* fake.setMode("live");
+
+      const created = yield* createWatchedSession(server, "/work/project");
+
+      yield* server.deleteSession(created.id);
+
+      // The delete answers only after it published the frame, so the witness's
+      // own arrival is the wait: a pause would guess when the frame lands.
+      yield* created.witness.arrived;
+
+      expect(created.witness.frames()).toEqual([
+        { type: "session.deleted", data: { sessionID: "session-1" } },
+      ]);
+      expect(recorded(fake.log).map((request) => request.method + " " + request.url)).toEqual([
+        "GET /api/event",
+        "POST /api/session",
+        "DELETE /api/session/session-1",
+      ]);
+    }),
+  ),
+);
+
+it.live("loses the delete frame when the witness opens after the delete", () =>
+  withServer({}, (fake, server) =>
+    Effect.gen(function* () {
+      yield* fake.setMode("live");
+
+      const created = yield* server.createSession({ directory: "/work/project" });
+
+      yield* server.deleteSession(created.id);
+
+      // This is the order the fix rules out: the delete is published before the
+      // stream exists, and the server replays nothing. The stream announces
+      // itself and ends, so its whole life, not a deadline, bounds the check.
+      yield* fake.setMode("one-shot");
+
+      const late = yield* watchSession(server);
+
+      yield* late.ended;
+
+      expect(recorded(fake.log).map((request) => request.method + " " + request.url)).toEqual([
+        "POST /api/session",
+        "DELETE /api/session/session-1",
+        "GET /api/event",
+      ]);
+      expect(late.recent()).toEqual([]);
     }),
   ),
 );

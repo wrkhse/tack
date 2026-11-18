@@ -177,7 +177,8 @@ const driverFor = (input: PiDriverInput): Driver => {
         Effect.asVoid,
       ),
     waitMarker: (name, timeoutMs) => waitForMarker(input.projectDir, name, timeoutMs),
-    events: input.log.events,
+    // Pi's log replays its history, so a stream opened after an event still sees it.
+    events: (types) => Effect.succeed(input.log.events(types)),
     trail: input.log.trail,
   };
 };
