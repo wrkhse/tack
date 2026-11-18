@@ -60,6 +60,11 @@ export const opencodeFidelity: Fidelity = {
       how: "`ValueSchema` is an Effect schema, any Standard Schema, or `JsonSchema.JsonSchema`, so a plain JSON Schema object is accepted (`@opencode/schema` `dist/tool.d.ts` L49)",
       source: source("packages/schema/src/tool.ts#L49"),
     },
+    "tool.mcp": {
+      fidelity: "fallback",
+      how: "the harness is an MCP client, so a generated server could serve it, but the plugin registers in process and OpenCode needs no server ([MCP servers](https://opencode.ai/docs/mcp-servers); Server plugins → API → Tools)",
+      source: "https://opencode.ai/docs/mcp-servers",
+    },
     "host.sharedRealm": {
       fidelity: "native",
       how: "one process realm; per-location scopes unconfirmed in a run",

@@ -69,6 +69,8 @@ export interface ToolRegistryOptions {
 export interface ToolRegistry {
   /** One tool this plugin holds, by name. */
   readonly get: (name: string) => CompiledTool | undefined;
+  /** Every tool this registry holds now, in install order. */
+  readonly list: () => ReadonlyArray<CompiledTool>;
   /** A tool tack defines in this scope, whoever's plugin declares it. */
   readonly resolve: (name: string) => CompiledTool | undefined;
   readonly add: (definition: ToolDefinition) => ToolHandle;
@@ -135,6 +137,7 @@ export function createToolRegistry(
 
   return {
     get: (name) => entries.get(name),
+    list: () => Array.from(entries.values()),
     resolve,
     add: (definition) => {
       const built = compileDefinition(

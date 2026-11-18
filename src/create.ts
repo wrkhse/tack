@@ -11,6 +11,11 @@ import { resolvePlugin } from "./plugin.ts";
 export interface AgentPlugin<Options> {
   readonly opencode: (options: Options) => OpenCodePlugin;
   readonly pi: (options: Options) => PiExtension;
+  /**
+   * Resolves the plugin for a process with no agent session, like the
+   * generated MCP server. The factory runs with `meta.agent` of `"mcp"`.
+   */
+  readonly mcp: (options: Options) => ResolvedPlugin;
 }
 
 /**
@@ -46,5 +51,6 @@ export function createAgentPlugin<Options = void>(
   return {
     opencode: (options) => opencodePlugin(resolveFor(factory, options, "opencode")),
     pi: (options) => piExtension(resolveFor(factory, options, "pi")),
+    mcp: (options) => resolveFor(factory, options, "mcp"),
   };
 }

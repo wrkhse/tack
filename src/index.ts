@@ -24,6 +24,10 @@ export { DuplicateTool } from "./tools/registry.ts";
 
 export type { ToolHandle, ToolRegistry } from "./tools/registry.ts";
 
+export { serveMcp } from "./mcp/serve.ts";
+
+export type { McpOptions } from "./mcp/serve.ts";
+
 export type { Prompt, PromptSent, PromptSentResult } from "./hooks/prompt-sent.ts";
 
 export type {

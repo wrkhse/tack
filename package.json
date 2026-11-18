@@ -10,9 +10,12 @@
     "check": "vp check && vp run types && vp run effect && vp test run --project anti-slop --project landmines --project unit && vp run health && vp run audit",
     "fix": "vp check --fix",
     "conformance:opencode": "vp test run --project conformance conformance/opencode.test.ts",
-    "conformance:pi": "vp test run --project conformance conformance/pi.test.ts"
+    "conformance:pi": "vp test run --project conformance conformance/pi.test.ts",
+    "conformance:mcp": "vp test run --project conformance conformance/mcp.test.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@modelcontextprotocol/server": "^2.4.0",
     "effect": "4.1.4"
   },
   "devDependencies": {

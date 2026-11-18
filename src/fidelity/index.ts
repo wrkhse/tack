@@ -14,6 +14,7 @@ export const capabilities = [
   "tool.call",
   "tool.result",
   "tool.schema",
+  "tool.mcp",
   "host.sharedRealm",
   "session.append.now",
   "session.append.next",

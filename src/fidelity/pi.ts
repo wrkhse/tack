@@ -36,9 +36,7 @@ export const piFidelity: Fidelity = {
     },
     "tool.register": {
       fidelity: "native",
-      how: "`pi.registerTool({ name, label, description, parameters, execute })` works during load and after startup; the tool is active and declared on the next request (`dist/core/extensions/types.d.ts` L1271; `docs/extensions.md` L1582–1592)",
-      // The docs name a session_start handler and say the tool is refreshed at
-      // once, which is why tack registers there and the first request carries it.
+      how: '`pi.registerTool({ name, label, description, parameters, execute })` works during load and after startup; Pi\'s docs call the list "refreshed immediately" (`docs/extensions.md` L1582–1592), and the `t3 list` row proves a tool registered at the first session start is declared in the first request (`dist/core/extensions/types.d.ts` L1271)',
       source: source("docs/extensions.md#L1582-L1592"),
     },
     "tool.remove": {
@@ -60,6 +58,11 @@ export const piFidelity: Fidelity = {
       fidelity: "native",
       how: "Pi validates arguments as JSON Schema with `@earendil-works/pi-schema`, whatever built the schema, so a plain object is accepted (`docs/extensions.md` L174–184)",
       source: source("docs/extensions.md#L174-L184"),
+    },
+    "tool.mcp": {
+      fidelity: "fallback",
+      how: "`pi mcp add` connects a stdio server, so the generated entry reaches it too; the in-process registration is the path tack uses (`docs/mcp.md` L3; `docs/extensions.md` L1582–1592)",
+      source: source("docs/mcp.md#L3"),
     },
     "host.sharedRealm": {
       fidelity: "native",
