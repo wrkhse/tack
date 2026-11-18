@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:net";
 
-import { Cause, Deferred, Effect, Exit, Schema, Scope, Stream } from "effect";
+import { Cause, DateTime, Deferred, Effect, Exit, Schema, Scope, Stream } from "effect";
 
 import { duplexChild, type Duplex } from "./duplex.ts";
 import type { Sandbox } from "./sandbox.ts";
@@ -55,6 +55,20 @@ const SessionOutcomeSchema = Schema.Literals(["succeeded", "failed", "interrupte
 
 export type SessionOutcome = typeof SessionOutcomeSchema.Type;
 
+/**
+ * What a caller hears about the event stream it opened. A connection that never
+ * opens reports nothing at all, which is what tells a dead subscription apart
+ * from one that merely stayed quiet.
+ */
+export interface EventStreamObserver {
+  /** The server answered with a stream, at this wall-clock instant (ISO 8601, milliseconds). */
+  readonly opened: (at: string) => void;
+  /** The stream ended, failed or was interrupted, at this wall-clock instant. */
+  readonly closed: (at: string) => void;
+  /** One event arrived, whether or not the caller's types keep it. */
+  readonly frame: () => void;
+}
+
 /** The OpenCode server one scenario drives, bound to its port and password. */
 export interface OpenCodeServer {
   /** Creates a session at `directory` for the fake provider and scripted model. */
@@ -74,9 +88,13 @@ export interface OpenCodeServer {
   readonly session: (sessionID: string) => Effect.Effect<SessionTurn>;
   /**
    * Streams the server's events of the given types; an empty list takes every
-   * event. The stream ends when the server closes the connection.
+   * event. The stream ends when the server closes the connection. `observer`
+   * hears when the connection opened and closed, and every frame it carried.
    */
-  readonly events: (types: ReadonlyArray<string>) => Stream.Stream<Schema.Json>;
+  readonly events: (
+    types: ReadonlyArray<string>,
+    observer?: EventStreamObserver,
+  ) => Stream.Stream<Schema.Json>;
   /** Waits until a tack plugin is listed for `directory`. */
   readonly awaitPlugin: (directory: string) => Effect.Effect<void>;
   /** Reloads every location's configuration, keeping its running sessions. */
@@ -485,7 +503,27 @@ const readEvent = (input: HttpRequest, text: string): Effect.Effect<EventRecord>
     }).pipe(Effect.orDie);
   });
 
-const events = (client: Client, types: ReadonlyArray<string>): Stream.Stream<Schema.Json> => {
+/** Tells the observer the stream opened, when it is listening. */
+const streamOpened = (observer: EventStreamObserver | undefined): Effect.Effect<void> =>
+  Effect.suspend(() =>
+    observer === undefined
+      ? Effect.void
+      : DateTime.now.pipe(Effect.map((now) => observer.opened(DateTime.formatIso(now)))),
+  );
+
+/** Tells the observer the stream closed, when it is listening. */
+const streamClosed = (observer: EventStreamObserver | undefined): Effect.Effect<void> =>
+  Effect.suspend(() =>
+    observer === undefined
+      ? Effect.void
+      : DateTime.now.pipe(Effect.map((now) => observer.closed(DateTime.formatIso(now)))),
+  );
+
+const events = (
+  client: Client,
+  types: ReadonlyArray<string>,
+  observer?: EventStreamObserver,
+): Stream.Stream<Schema.Json> => {
   const input: HttpRequest = { method: "GET", path: "/api/event", accept: "text/event-stream" };
 
   return Stream.unwrap(
@@ -500,13 +538,17 @@ const events = (client: Client, types: ReadonlyArray<string>): Stream.Stream<Sch
         );
       }
 
+      yield* streamOpened(observer);
+
       return response.body.pipe(
         Stream.decodeText(),
         frames(input),
         Stream.mapEffect((text) => readEvent(input, text)),
+        Stream.tap(() => Effect.sync(() => observer?.frame())),
         Stream.filter((event) => types.length === 0 || types.includes(event.type)),
         Stream.map((event) => event.json),
         Stream.buffer({ capacity: MAX_BUFFERED_EVENTS }),
+        Stream.ensuring(streamClosed(observer)),
       );
     }),
   );
@@ -700,7 +742,7 @@ export const opencodeServer = (box: Sandbox): Effect.Effect<OpenCodeServer, neve
       interrupt: (sessionID) => interrupt(client, sessionID),
       deleteSession: (sessionID) => deleteSession(client, sessionID),
       session: (sessionID) => session(client, sessionID),
-      events: (types) => events(client, types),
+      events: (types, observer) => events(client, types, observer),
       awaitPlugin: (directory) => awaitPlugin(client, directory),
       reloadLocations: () => reloadLocations(client),
       stop,

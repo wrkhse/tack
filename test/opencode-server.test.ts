@@ -372,9 +372,33 @@ it.live("fails a non-2xx response with its status, path and body", () =>
 it.live("streams only the requested event types and ends with the server's reply", () =>
   withServer({}, (_fake, server) =>
     Effect.gen(function* () {
-      const chosen = yield* server.events(["session.step.ended"]).pipe(Stream.runCollect);
+      const opened: Array<string> = [];
+      const closed: Array<string> = [];
+      let frames = 0;
+
+      const chosen = yield* server
+        .events(["session.step.ended"], {
+          opened: (at) => {
+            opened.push(at);
+          },
+          closed: (at) => {
+            closed.push(at);
+          },
+          frame: () => {
+            frames += 1;
+          },
+        })
+        .pipe(Stream.runCollect);
 
       expect(chosen).toEqual([{ type: "session.step.ended", data: { sessionID: "session-1" } }]);
+
+      // Both frames arrive, though only one type is kept: the count says the
+      // connection was alive when a witness has no frame of its own to show.
+      expect(frames).toBe(2);
+      expect(opened).toHaveLength(1);
+      expect(closed).toHaveLength(1);
+      expect(opened[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(closed[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 
       const all = yield* server.events([]).pipe(Stream.runCollect);
 

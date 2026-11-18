@@ -1,4 +1,4 @@
-import { Effect, Predicate, Schema, Stream, type Scope } from "effect";
+import { DateTime, Effect, Predicate, Schema, Stream, type Scope } from "effect";
 
 import type { StandIn } from "../model/stand-in.ts";
 import type { SessionScenario } from "../session-scenarios.ts";
@@ -16,6 +16,7 @@ import {
 } from "./driver.ts";
 import {
   opencodeServer,
+  type EventStreamObserver,
   type OpenCodeServer,
   type SessionOutcome,
   type SessionTurn,
@@ -87,10 +88,74 @@ const shownValue = (value: number | string | undefined): string =>
 const shownFrames = (frames: ReadonlyArray<Schema.Json>): string =>
   frames.length === 0 ? "none" : frames.map((frame) => excerpt(JSON.stringify(frame))).join("\n");
 
+/** One connection the witness stream made: when it opened, and when it ended. */
+interface WitnessConnection {
+  readonly openedAt: string;
+  closedAt?: string;
+}
+
+/** What the witness stream did: its connections, its frames, and when the DELETE went out. */
+interface WitnessStream {
+  readonly connections: Array<WitnessConnection>;
+  frames: number;
+  deleteAt?: string;
+}
+
+/** Records every connection and every frame of one witness stream. */
+const watchStream = (stream: WitnessStream): EventStreamObserver => ({
+  opened: (at) => {
+    stream.connections.push({ openedAt: at });
+  },
+  closed: (at) => {
+    const open = stream.connections.findLast((connection) => connection.closedAt === undefined);
+
+    if (open !== undefined) open.closedAt = at;
+  },
+  frame: () => {
+    stream.frames += 1;
+  },
+});
+
+/** Whether the stream had already ended when the DELETE went out. */
+const retiredBeforeDelete = (stream: WitnessStream): string => {
+  if (stream.deleteAt === undefined) return "no DELETE was sent";
+
+  const closedAt = stream.connections.at(-1)?.closedAt;
+
+  return closedAt !== undefined && closedAt <= stream.deleteAt ? "yes" : "no";
+};
+
+/** One line on the witness stream itself, for a failure that has to say whether it was there. */
+const describeWitnessStream = (stream: WitnessStream): string => {
+  const first = stream.connections[0];
+  const reconnects = stream.connections.slice(1);
+
+  return (
+    "witness stream: connected " +
+    (first?.openedAt ?? "never") +
+    ", closed " +
+    (stream.connections.at(-1)?.closedAt ?? "never") +
+    ", reconnects " +
+    (reconnects.length === 0
+      ? "none"
+      : reconnects.map((connection) => connection.openedAt).join(", ")) +
+    ", frames " +
+    stream.frames +
+    ", delete at " +
+    (stream.deleteAt ?? "never") +
+    ", retired before the DELETE: " +
+    retiredBeforeDelete(stream)
+  );
+};
+
 /** What the event stream showed: this session's frames, and the latest of any session. */
 interface Witness {
   readonly frames: () => ReadonlyArray<Schema.Json>;
   readonly recent: () => ReadonlyArray<Schema.Json>;
+  /** Stamps the DELETE's send time, so the stream's state at that moment is known. */
+  readonly beginDelete: Effect.Effect<void>;
+  /** One line on the witness stream: its connection, its close and its frames. */
+  readonly stream: () => string;
 }
 
 /**
@@ -103,9 +168,10 @@ const trackEvents = (
   sessionID: string,
   mine: Array<Schema.Json>,
   recent: Array<Schema.Json>,
+  stream: WitnessStream,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.forkScoped(
-    server.events([...WITNESS_TYPES]).pipe(
+    server.events([...WITNESS_TYPES], watchStream(stream)).pipe(
       Stream.runForEach((event) =>
         Effect.sync(() => {
           remember(recent, event);
@@ -178,7 +244,9 @@ const waitForTurn = (
           "\nframes for this session:\n" +
           shownFrames(witness.frames()) +
           "\nlast frames on the stream:\n" +
-          shownFrames(witness.recent()),
+          shownFrames(witness.recent()) +
+          "\n" +
+          witness.stream(),
       ),
     );
   });
@@ -196,7 +264,9 @@ const waitForDeleted = (witness: Witness): Effect.Effect<void> =>
           "frames for this session:\n" +
           shownFrames(frames) +
           "\nlast frames on the stream:\n" +
-          shownFrames(witness.recent()),
+          shownFrames(witness.recent()) +
+          "\n" +
+          witness.stream(),
       };
     }),
     DELETE_TIMEOUT_MS,
@@ -249,9 +319,11 @@ const driverFor = (input: OpenCodeDriverInput): Driver => {
     rebind: () =>
       Effect.die(new Error("tack-conformance: OpenCode has no session rebind for a row to use")),
     endSession: () =>
-      input.server
-        .deleteSession(input.sessionID)
-        .pipe(Effect.andThen(waitForDeleted(input.witness))),
+      Effect.gen(function* () {
+        yield* input.witness.beginDelete;
+        yield* input.server.deleteSession(input.sessionID);
+        yield* waitForDeleted(input.witness);
+      }),
     waitMarker: (name, timeoutMs) => waitForMarker(input.projectDir, name, timeoutMs),
     events: (types) => input.server.events(types),
     trail: () => input.witness.frames(),
@@ -269,10 +341,20 @@ const runOnSession = (
     const settled: Array<SettledSignal> = [];
     const mine: Array<Schema.Json> = [];
     const recent: Array<Schema.Json> = [];
+    const stream: WitnessStream = { connections: [], frames: 0 };
 
-    yield* trackEvents(server, sessionID, mine, recent);
+    yield* trackEvents(server, sessionID, mine, recent, stream);
 
-    const witness: Witness = { frames: () => [...mine], recent: () => [...recent] };
+    const witness: Witness = {
+      frames: () => [...mine],
+      recent: () => [...recent],
+      beginDelete: DateTime.now.pipe(
+        Effect.map((now) => {
+          stream.deleteAt = DateTime.formatIso(now);
+        }),
+      ),
+      stream: () => describeWitnessStream(stream),
+    };
 
     const driver = driverFor({
       server,
