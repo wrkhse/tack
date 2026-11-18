@@ -20,8 +20,29 @@ import {
 /** The repeat setting a run without `TACK_CONFORMANCE_REPEAT` uses: one run per row. */
 const REPEAT_DEFAULT = "1";
 
+/** The filter a run without `TACK_CONFORMANCE_ONLY` uses: every row. */
+const ONLY_DEFAULT = "";
+
 /** The most a row may repeat in one run, so a mistyped variable stops before CI does. */
 const MAX_REPEAT = 100;
+
+/** The row filter as written: empty keeps every row. */
+const onlySetting = (): string =>
+  Effect.runSync(
+    Config.String("TACK_CONFORMANCE_ONLY").pipe(Config.withDefault(ONLY_DEFAULT)),
+  ).trim();
+
+/** Whether a row's name carries the filter, case-insensitively. */
+const rowSelected = (row: string): boolean => {
+  const filter = onlySetting().toLowerCase();
+
+  return filter === "" || row.toLowerCase().includes(filter);
+};
+
+/** The rows this run keeps, in table order; every row unless the filter names one. */
+export const selectedRows = <A extends { readonly name: string }>(
+  rows: ReadonlyArray<A>,
+): ReadonlyArray<A> => rows.filter((row) => rowSelected(row.name));
 
 /** One run of a row: a test of its own, named for its place when the row repeats. */
 export interface Iteration {
@@ -51,15 +72,21 @@ const repeatCount = (): number => {
 
 /**
  * Every run of every row this process owes: one per repeat. Each iteration is a
- * test of its own, so it gets its own sandbox and its own failure.
+ * test of its own, so it gets its own sandbox and its own failure. A filtered
+ * run names its filter, so its log cannot be mistaken for a full one.
  */
 export const iterations = (): ReadonlyArray<Iteration> => {
   const count = repeatCount();
+  const only = onlySetting();
+
+  const suffix = only === "" ? "" : " [only: " + only + "]";
 
   return Array.from({ length: count }, (_, offset) => {
     const index = offset + 1;
 
-    return { name: (row: string) => (count === 1 ? row : row + " (" + index + "/" + count + ")") };
+    return {
+      name: (row: string) => (count === 1 ? row : row + " (" + index + "/" + count + ")") + suffix,
+    };
   });
 };
 

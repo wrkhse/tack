@@ -11,6 +11,11 @@ on:
         required: false
         default: "1"
         type: string
+      only:
+        description: "Run only conformance rows whose name contains this text, case-insensitive (TACK_CONFORMANCE_ONLY)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -92,3 +97,4 @@ jobs:
       - run: bun run conformance:${{ matrix.agent }}
         env:
           TACK_CONFORMANCE_REPEAT: ${{ inputs.repeat || '1' }}
+          TACK_CONFORMANCE_ONLY: ${{ inputs.only }}
