@@ -10,7 +10,7 @@ import { ensureDirectory, repoRoot } from "./sandbox.ts";
  * Bundles one plugin entry with Bun. Every entry gets its own bundle, so every
  * plugin carries its own copy of tack and the host slot is proven across copies.
  */
-const bundleEntry = (
+export const bundleEntry = (
   entry: string,
   outfile: string,
   env: Readonly<Record<string, string>>,

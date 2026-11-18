@@ -50,8 +50,9 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
+      # mcp runs the generated server's stdio rows and starts no agent CLI.
       matrix:
-        agent: [opencode, pi]
+        agent: [opencode, pi, mcp]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
