@@ -113,11 +113,16 @@ tool and its message. A handler that returns the wrong shape becomes one too.
 ## Limits
 
 `timeoutMs` bounds the handler: one that runs past it has `ctx.signal`
-aborted and is interrupted, and the model reads an error result naming the tool
-and the timeout. The default is 30 000 ms. `ctx.signal` also fires when the
-transport stops the call. Racing the handler interrupts tack's fiber, not a
-promise the handler already started, so a handler that does slow work listens to
-the signal and stops.
+aborted with a `TimeoutError` whose message names the tool and the limit, and
+is interrupted; the model reads an error result carrying the same message. The
+default is 30 000 ms.
+
+`ctx.signal` also fires when the transport stops the call, and a call the
+transport stopped ends at once with
+`tack: tool "<name>" stopped before it answered` rather than waiting for the
+deadline. Racing the handler interrupts tack's fiber, not a promise the handler
+already started, so a handler that does slow work listens to the signal and
+stops.
 
 A result whose content totals over `MAX_RESULT_BYTES` (262 144 UTF-8 bytes) is
 refused with an error result naming the tool, the size and the limit. Tack does

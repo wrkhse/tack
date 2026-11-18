@@ -313,20 +313,29 @@ it.effect("answers an error result when the handler outlives its timeout", () =>
 
 it.effect("aborts the handler's signal when the timeout fires", () =>
   Effect.gen(function* () {
-    let stopped = false;
+    let stopped: { readonly name: string; readonly message: string } | undefined;
 
     const slow = tool({
       name: "monitor_slow",
       description: "Stop when asked",
       input: { type: "object", properties: {} },
       run: (_input, handler) => {
-        handler.signal?.addEventListener(
-          "abort",
-          () => {
-            stopped = true;
-          },
-          { once: true },
-        );
+        const signal = handler.signal;
+
+        const record = (): void => {
+          const reason = signal?.reason;
+
+          stopped =
+            reason instanceof DOMException
+              ? { name: reason.name, message: reason.message }
+              : undefined;
+        };
+
+        if (signal?.aborted === true) {
+          record();
+        } else {
+          signal?.addEventListener("abort", record, { once: true });
+        }
 
         return Promise.race([]);
       },
@@ -344,11 +353,14 @@ it.effect("aborts the handler's signal when the timeout fires", () =>
       content: [`tack: tool "monitor_slow" timed out after ${DEFAULT_TIMEOUT_MS} ms`],
       isError: true,
     });
-    expect(stopped).toBe(true);
+    expect(stopped).toEqual({
+      name: "TimeoutError",
+      message: `tack: tool "monitor_slow" timed out after ${DEFAULT_TIMEOUT_MS} ms`,
+    });
   }),
 );
 
-it.effect("passes the transport's stop to the handler's signal", () =>
+it.effect("ends the call when the transport stops it", () =>
   Effect.gen(function* () {
     const transport = transportStop();
     const started = Promise.withResolvers<void>();
@@ -394,13 +406,11 @@ it.effect("passes the transport's stop to the handler's signal", () =>
 
     expect(stopped).toBe(true);
 
-    // The handler never settles on its own, so the call still ends at tack's bound.
-    yield* TestClock.adjust(Duration.millis(DEFAULT_TIMEOUT_MS));
-
+    // No clock advance: a call the transport stopped ends at once, not at its deadline.
     const result = yield* Fiber.join(fiber);
 
     expect(result).toEqual({
-      content: [`tack: tool "monitor_stopped" timed out after ${DEFAULT_TIMEOUT_MS} ms`],
+      content: ['tack: tool "monitor_stopped" stopped before it answered'],
       isError: true,
     });
   }),

@@ -328,13 +328,50 @@ function stoppable(ctx: ToolContext, stop: AbortSignal): ToolContext {
   return { ...ctx, signal: AbortSignal.any(signals) };
 }
 
-/** Runs the handler with the decoded input, under the tool's timeout. */
+/** The result a call gives when the transport stopped it before the handler answered. */
+function stoppedResult(compiled: CompiledTool): ToolCallResult {
+  return failed(`tack: tool "${compiled.name}" stopped before it answered`);
+}
+
+/**
+ * Ends the call the moment the transport stops it. A transport that supplied
+ * no signal never completes here, so the handler and its deadline decide.
+ */
+function transportStop(
+  compiled: CompiledTool,
+  signal: AbortSignal | undefined,
+): Effect.Effect<ToolCallResult> {
+  if (signal === undefined) {
+    return Effect.never;
+  }
+
+  return Effect.callback<ToolCallResult>((resume) => {
+    if (signal.aborted) {
+      resume(Effect.succeed(stoppedResult(compiled)));
+
+      return Effect.void;
+    }
+
+    const onAbort = (): void => resume(Effect.succeed(stoppedResult(compiled)));
+
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/** Runs the handler with the decoded input, under the tool's timeout and the transport's stop. */
 function runHandler(
   compiled: CompiledTool,
   input: Schema.Json,
   ctx: ToolContext,
 ): Effect.Effect<ToolCallResult> {
   const stop = new AbortController();
+
+  const timeout = new DOMException(
+    `tack: tool "${compiled.name}" timed out after ${compiled.timeoutMs} ms`,
+    "TimeoutError",
+  );
 
   const attempt = Effect.tryPromise({
     try: () => Promise.resolve(compiled.run(input, stoppable(ctx, stop.signal))),
@@ -346,14 +383,14 @@ function runHandler(
     Effect.ensuring(Effect.sync(() => stop.abort())),
   );
 
-  const timeout = Effect.gen(function* () {
+  const deadline = Effect.gen(function* () {
     yield* Effect.sleep(Duration.millis(compiled.timeoutMs));
-    yield* Effect.sync(() => stop.abort());
+    yield* Effect.sync(() => stop.abort(timeout));
 
-    return failed(`tack: tool "${compiled.name}" timed out after ${compiled.timeoutMs} ms`);
+    return failed(timeout.message);
   });
 
-  return Effect.raceFirst(attempt, timeout);
+  return Effect.raceFirst(Effect.raceFirst(attempt, deadline), transportStop(compiled, ctx.signal));
 }
 
 /** Validates what the handler returned and refuses a result over the size limit. */
