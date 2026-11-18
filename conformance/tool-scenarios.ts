@@ -102,12 +102,19 @@ const result: Scenario = {
   },
 };
 
+/**
+ * OpenCode validates a call's arguments against the same header before it
+ * reaches `execute`, so the error the model reads is OpenCode's
+ * `Invalid arguments for tool "monitor_create"` list, not tack's. Tack's own
+ * decode still guards every transport that validates nothing.
+ */
 const badInput: Scenario = {
   name: "t3 bad input",
   plugins: ["tool-create"],
   standIn: missingKey,
   check: (evidence) => {
     const details = describeRun(evidence);
+    const error = textFor(evidence.requests, "tool");
 
     assert.equal(evidence.command.exitCode, 0, details);
     assert.deepEqual(
@@ -116,8 +123,8 @@ const badInput: Scenario = {
       "a call the header rejects must not reach the handler\n" + details,
     );
     assert.ok(
-      textFor(evidence.requests, "tool").includes("key"),
-      "the model must receive an error naming the field\n" + details,
+      error.includes(TOOL) && error.includes("key"),
+      "the model must receive an error naming the tool and the field\n" + details,
     );
   },
 };

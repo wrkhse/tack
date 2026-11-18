@@ -130,6 +130,7 @@ interface FakeNativeTool {
   readonly name: string;
   readonly description: string;
   readonly input: JsonSchema.JsonSchema;
+  readonly options?: { readonly codemode?: boolean };
   readonly execute: (input: Schema.Json, call: FakeToolCall) => Promise<FakeNativeResult>;
 }
 
@@ -1593,6 +1594,7 @@ it.effect("registers a tool with its header and maps the result", () =>
 
     const registered = toolOf(fake, "monitor_create");
 
+    expect(registered.options).toEqual({ codemode: false });
     expect(registered.description).toBe("Start watching a Jira issue");
     expect(registered.input).toEqual({
       type: "object",

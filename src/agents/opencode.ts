@@ -728,12 +728,19 @@ function handlePrompt(
   });
 }
 
-/** OpenCode's view of one tack tool: the header unchanged, and an execute that maps the result. */
+/**
+ * OpenCode's view of one tack tool: the header unchanged, and an execute that
+ * maps the result. `codemode: false` is what makes it a direct tool: OpenCode
+ * turns Code Mode on for an agent by default, and its tool snapshot offers only
+ * a tool whose `options.codemode` is `false` in the model's list, keeping
+ * every other one inside Code Mode's catalog.
+ */
 function nativeTool(tool: CompiledTool, scope: () => HookScope): NativeTool {
   return {
     name: tool.name,
     description: tool.description,
     input: tool.input,
+    options: { codemode: false },
     execute: (input, context) => runTool(tool, { input }, scope(), context),
   };
 }
