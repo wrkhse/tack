@@ -20,7 +20,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import type { HostSlot, Registration } from "../host/host.ts";
-import { hostSlot } from "../host/host.ts";
+import { hostSlot, scopedTool } from "../host/host.ts";
 import { runSessionCreated, runSessionEnded } from "../hooks/lifecycle.ts";
 import { runPromptSent } from "../hooks/prompt-sent.ts";
 import type { ResponseReason } from "../hooks/response-finished.ts";
@@ -302,15 +302,29 @@ function contextOf(attachment: Attachment, context: ExtensionContext): HookConte
   };
 }
 
+/** The result a call answers with when its extension instance is not attached yet. */
+function notReadyResult(name: string): AgentToolResult {
+  return {
+    content: [{ type: "text", text: `tack: tool "${name}" has no live attachment` }],
+    details: undefined,
+    isError: true,
+  };
+}
+
 /** Pi's view of one tack tool: the definition unchanged, and an execute that maps the result. */
-function nativePiTool(tool: CompiledTool, scope: () => Attachment): ToolDefinition {
+function nativePiTool(tool: CompiledTool, scope: () => Attachment | undefined): ToolDefinition {
   return {
     name: tool.name,
     label: tool.name,
     description: tool.description,
     parameters: tool.input,
-    execute: (toolCallId, params, signal, _onUpdate, context) =>
-      runPiTool(tool, { input: params }, scope(), toolCallId, signal, context),
+    execute: (toolCallId, params, signal, _onUpdate, context) => {
+      const attachment = scope();
+
+      return attachment === undefined
+        ? Promise.resolve(notReadyResult(tool.name))
+        : runPiTool(tool, { input: params }, attachment, toolCallId, signal, context);
+    },
   };
 }
 
@@ -356,11 +370,11 @@ function withdrawnResult(name: string): AgentToolResult {
 }
 
 /**
- * Pi cannot unregister a tool, so withdrawal re-registers the same name hidden:
- * the name stays registered, and a call to it answers an error rather than
- * reaching the definition Pi keeps. Leaving the original in place would leave
- * a stale handler the model could still reach, so the name must stay
- * remembered and carry the refusal.
+ * Pi cannot unregister a tool, so withdrawal re-registers the same name hidden.
+ * That hidden definition is the refusal: there is no separate withdrawn set, so
+ * a call to the name reaches this definition and answers an error instead of
+ * the handler Pi keeps. Leaving the original in place would leave a stale
+ * handler the model could still reach.
  */
 function withdrawnTool(tool: CompiledTool): ToolDefinition {
   return {
@@ -429,7 +443,7 @@ function piTools(
   plugin: ResolvedPlugin,
   pi: ExtensionAPI,
   slot: HostSlot,
-  scope: () => Attachment,
+  scope: () => Attachment | undefined,
 ): PiTools {
   const installed = new Map<string, CompiledTool>();
   const pending: Array<CompiledTool> = [];
@@ -482,6 +496,7 @@ function piTools(
       hasSession: true,
       port,
       taken: takenPiTools(slot, plugin),
+      elsewhere: (name) => scopedTool(slot, PI_SCOPE, plugin.name, name),
     },
     plugin.tools,
   );
@@ -701,13 +716,7 @@ function attach(plugin: ResolvedPlugin, pi: ExtensionAPI): void {
 
   let attachment: Attachment | undefined;
 
-  const scope = (): Attachment => {
-    if (attachment === undefined) {
-      throw new Error("tack: a Pi tool call arrived before its registration finished");
-    }
-
-    return attachment;
-  };
+  const scope = (): Attachment | undefined => attachment;
 
   let built: PiTools;
 

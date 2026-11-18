@@ -10,7 +10,7 @@ import type {
 } from "@opencode/plugin/promise/tool";
 
 import type { HostSlot, Registration } from "../host/host.ts";
-import { hostSlot } from "../host/host.ts";
+import { hostSlot, scopedTool } from "../host/host.ts";
 import { runSessionCreated, runSessionEnded } from "../hooks/lifecycle.ts";
 import { runPermissionAsked } from "../hooks/permission-asked.ts";
 import { runPromptSent } from "../hooks/prompt-sent.ts";
@@ -978,6 +978,7 @@ function hookInto(
           hasSession: true,
           port: native,
           taken: takenTools(slot, plugin, registration.scope, existing),
+          elsewhere: (name) => scopedTool(slot, registration.scope, plugin.name, name),
         },
         plugin.tools,
       );

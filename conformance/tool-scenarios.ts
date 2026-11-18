@@ -215,7 +215,7 @@ const badInput: Scenario = {
 
 const toolDeny: Scenario = {
   name: "t3 tool deny",
-  plugins: ["tool-deny"],
+  plugins: ["tool-deny", "tool-create"],
   standIn: call,
   check: (evidence) => {
     const details = describeRun(evidence);
@@ -231,7 +231,7 @@ const toolDeny: Scenario = {
 
 const toolRewrite: Scenario = {
   name: "t3 tool rewrite",
-  plugins: ["tool-rewrite"],
+  plugins: ["tool-rewrite", "tool-create"],
   standIn: call,
   check: (evidence) => {
     const details = describeRun(evidence);
@@ -247,10 +247,41 @@ const toolRewrite: Scenario = {
 
 const rewriteRejected: Scenario = {
   name: "t3 rewrite rejected",
-  plugins: ["tool-rewrite-bad"],
+  plugins: ["tool-rewrite-bad", "tool-create"],
   standIn: call,
   check: (evidence) => {
     assertRefusedWithField(evidence, "a rewrite the schema rejects must not reach the handler");
+  },
+};
+
+/**
+ * Pi refuses a tack tool named after its built-in `read` at the first session
+ * start. Print mode reports that refusal as `Extension error`, and the refused
+ * plugin's slot entry is gone before the next plugin reports the session, so
+ * the witness marker proves the other plugin still leads.
+ */
+const collision: Scenario = {
+  name: "t3 pi tool collision",
+  plugins: ["tool-collide", "tool-witness"],
+  only: "pi",
+  check: (evidence) => {
+    const details = describeRun(evidence);
+
+    assert.equal(evidence.command.exitCode, 0, details);
+    assert.ok(
+      evidence.command.stderr.includes('tack: two tools named "read" are registered in pi'),
+      "the person must see the refusal\n" + details,
+    );
+    assert.deepEqual(
+      evidence.observedText,
+      '{"event":"created"}',
+      "the refused plugin must not stop the other plugin's session start\n" + details,
+    );
+    assert.deepEqual(
+      evidence.recorded,
+      ["push origin main"],
+      "the run must continue after the refusal\n" + details,
+    );
   },
 };
 
@@ -316,6 +347,7 @@ export const toolScenarios: ReadonlyArray<Scenario> = [
   toolDeny,
   toolRewrite,
   rewriteRejected,
+  collision,
 ];
 
 /** T3's long-lived row: a withdrawal needs a second request after the removal. */

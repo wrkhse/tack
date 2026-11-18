@@ -135,6 +135,8 @@ interface FakeNativeTool {
 /** Pi's tool registry for the fake: what the adapter registers, and what it reads back. */
 interface FakeToolRegistry {
   readonly tools: Map<string, FakeNativeTool>;
+  /** Every name Pi was asked to register, in order, duplicates included. */
+  readonly registered: string[];
   readonly registerTool: (registered: FakeNativeTool) => void;
   readonly getAllTools: () => ReadonlyArray<{ readonly name: string }>;
 }
@@ -142,13 +144,16 @@ interface FakeToolRegistry {
 /** Pi's tool registry for the fake, and the tools it holds by name. */
 function fakeToolRegistry(): FakeToolRegistry {
   const tools = new Map<string, FakeNativeTool>();
+  const registered: string[] = [];
 
   return {
     tools,
-    registerTool: (registered) => {
-      tools.set(registered.name, registered);
+    registered,
+    registerTool: (held) => {
+      tools.set(held.name, held);
+      registered.push(held.name);
     },
-    getAllTools: () => [...tools.values()].map((registered) => ({ name: registered.name })),
+    getAllTools: () => [...tools.values()].map((held) => ({ name: held.name })),
   };
 }
 
@@ -171,6 +176,8 @@ interface FakePi {
   readonly calls: FakeCall[];
   /** Pi's tool registry, by name, as the adapter registered each tool. */
   readonly tools: Map<string, FakeNativeTool>;
+  /** Every name the adapter asked Pi to register, in order. */
+  readonly registered: string[];
   /** Resolves once the adapter has made a call of this method; never polls. */
   readonly called: (method: FakeCall["method"]) => Promise<void>;
   /** When set, every action throws Pi's stale-context error. */
@@ -339,6 +346,7 @@ function fakePi(modelResult = true): FakePi {
     called: log.called,
     stale,
     tools: registry.tools,
+    registered: registry.registered,
   };
 
   started.push(created);
@@ -644,6 +652,20 @@ it.effect("registers a tool with its label, description, header and result mappi
       content: [{ type: "text", text: "watching PROJ-1" }],
       details: { id: "m-1" },
     });
+  }),
+);
+
+it.effect("registers each declared tool once across session starts", () =>
+  Effect.gen(function* () {
+    const fake = fakePi();
+
+    monitor.pi()(fake.pi);
+
+    yield* startSession(fake);
+    // A new, resumed or forked session binds the same extension again.
+    yield* runHook(() => hookOf(fake.handlers, "session_start")({ reason: "new" }, fake.context));
+
+    expect(fake.registered).toEqual(["monitor_create"]);
   }),
 );
 

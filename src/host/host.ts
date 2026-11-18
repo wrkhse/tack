@@ -1,6 +1,7 @@
 import { Effect, Option, Predicate, Schema } from "effect";
 
 import type { ResolvedPlugin } from "../plugin.ts";
+import type { CompiledTool } from "../tools/tool.ts";
 
 /** The registered name the slot symbol is created from. */
 const HOST_KEY_NAME = "@workhorse/tack/host";
@@ -22,6 +23,31 @@ interface HostEntry {
 interface HostSlotData {
   readonly protocol: number;
   readonly scopes: Map<string, Map<string, HostEntry>>;
+}
+
+/**
+ * A tool another plugin in the scope declares, by name. A guard's whole-input
+ * rewrite asks this so it can rewrite a tool its own registry does not hold.
+ */
+export function scopedTool(
+  slot: HostSlot,
+  scope: string,
+  plugin: string,
+  name: string,
+): CompiledTool | undefined {
+  for (const other of slot.plugins(scope)) {
+    if (other.name === plugin) {
+      continue;
+    }
+
+    const found = other.tools.find((tool) => tool.name === name);
+
+    if (found !== undefined) {
+      return found;
+    }
+  }
+
+  return undefined;
 }
 
 /** One plugin's live registration in a scope. */

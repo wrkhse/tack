@@ -10,9 +10,9 @@ A row runs in the mode its steps need. T1's nine rows run one prompt to
 completion in a one-shot CLI; T2's fifteen run one long-lived session, because
 they need a second turn, an action after startup, or an end the suite controls.
 One T2 row runs in OpenCode only, because Pi has no session created before its
-extension loaded. T3's seven one-shot rows run one prompt to completion in both
-agents; its withdrawal row runs long-lived, because it needs a second request
-after the tool is removed.
+extension loaded. T3's eight one-shot rows run one prompt to completion, one of
+them in Pi only; its withdrawal row runs long-lived, because it needs a second
+request after the tool is removed.
 
 Run it in CI, or in a disposable container. Never on a development machine:
 each test starts the agent CLIs, which are that machine's own agents.
@@ -204,40 +204,41 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 
 ## Scenarios
 
-| Scenario                 | Plugins                       | Passes when                                                                  |
-| ------------------------ | ----------------------------- | ---------------------------------------------------------------------------- |
-| deny                     | `deny-push`                   | nothing recorded; reason returned                                            |
-| deny after               | `deny-push`, `observe`        | the same, and `toolAfter` never ran                                          |
-| fail closed              | `throws`                      | nothing recorded; error returned                                             |
-| opt out                  | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded                                   |
-| rewrite                  | `safe-push`                   | `push origin main --dry-run`                                                 |
-| combine                  | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded                                            |
-| combine reversed         | `signed-push`, `safe-push`    | the same, in the other load order                                            |
-| append                   | `push-note`                   | the note is in the first prompt                                              |
-| after                    | `safe-push`, `observe`        | the observed command and output                                              |
-| t2 wake                  | `append-wake`                 | a tool-bearing request carries the text                                      |
-| t2 outside hook          | `append-outside`              | the timer's text lands in a request                                          |
-| t2 now                   | `append-now`                  | a later tool-bearing request of the first turn carries it, not the prompt    |
-| t2 next                  | `append-next`                 | absent first, present in a later request                                     |
-| t2 permission            | `permission-deny`             | OpenCode denies; Pi never asks                                               |
-| t2 permission configured | `permission-deny`             | a sandbox deny skips the hook; the call is refused                           |
-| t2 idle                  | `idle-note`                   | one idle, then Pi's aborted and no more                                      |
-| t2 finished done         | `finished-note`               | every request ends `done`, exactly                                           |
-| t2 finished aborted      | `finished-note`               | the interrupt ends `aborted` last                                            |
-| t2 finished error        | `finished-note`, `retry-veto` | the failure ends `error`; the retry hook vetoes it                           |
-| t2 lifecycle             | `lifecycle-note`              | created; Pi: two starts on rebind, replaced, shutdown; OpenCode: delete ends |
-| t2 lifecycle resumed     | `lifecycle-note`              | OpenCode only: reports `resumed` for a pre-load session                      |
-| t2 interrupt             | `interrupt-action`            | accepted, and the turn settles interrupted                                   |
-| t2 model                 | `model-switch`                | accepted; the stand-in sees `scripted-2`                                     |
-| t2 compact               | `compact-action`              | accepted; Pi asks once, OpenCode twice (its summary-template nudge)          |
-| t3 list                  | `tool-create`                 | the first request declares `monitor_create` with its description and schema  |
-| t3 call                  | `tool-create`                 | `tack-tool monitor_create PROJ-1` recorded                                   |
-| t3 result                | `tool-create`                 | a tool message's content is `watching PROJ-1`                                |
-| t3 bad input             | `tool-create`                 | a tool message names `key`; nothing recorded                                 |
-| t3 tool deny             | `tool-deny`                   | the deny reason is returned; nothing recorded                                |
-| t3 tool rewrite          | `tool-rewrite`                | `tack-tool monitor_create PROJ-2` recorded                                   |
-| t3 rewrite rejected      | `tool-rewrite-bad`            | the schema rejects the rewrite; nothing recorded                             |
-| t3 withdraw              | `tool-withdraw`               | the next request omits the tool; a call to it answers an error               |
+| Scenario                 | Plugins                           | Passes when                                                                   |
+| ------------------------ | --------------------------------- | ----------------------------------------------------------------------------- |
+| deny                     | `deny-push`                       | nothing recorded; reason returned                                             |
+| deny after               | `deny-push`, `observe`            | the same, and `toolAfter` never ran                                           |
+| fail closed              | `throws`                          | nothing recorded; error returned                                              |
+| opt out                  | `throws-allowed`, `safe-push`     | the failing guard allows; dry run recorded                                    |
+| rewrite                  | `safe-push`                       | `push origin main --dry-run`                                                  |
+| combine                  | `safe-push`, `signed-push`        | `... --dry-run --signed` recorded                                             |
+| combine reversed         | `signed-push`, `safe-push`        | the same, in the other load order                                             |
+| append                   | `push-note`                       | the note is in the first prompt                                               |
+| after                    | `safe-push`, `observe`            | the observed command and output                                               |
+| t2 wake                  | `append-wake`                     | a tool-bearing request carries the text                                       |
+| t2 outside hook          | `append-outside`                  | the timer's text lands in a request                                           |
+| t2 now                   | `append-now`                      | a later tool-bearing request of the first turn carries it, not the prompt     |
+| t2 next                  | `append-next`                     | absent first, present in a later request                                      |
+| t2 permission            | `permission-deny`                 | OpenCode denies; Pi never asks                                                |
+| t2 permission configured | `permission-deny`                 | a sandbox deny skips the hook; the call is refused                            |
+| t2 idle                  | `idle-note`                       | one idle, then Pi's aborted and no more                                       |
+| t2 finished done         | `finished-note`                   | every request ends `done`, exactly                                            |
+| t2 finished aborted      | `finished-note`                   | the interrupt ends `aborted` last                                             |
+| t2 finished error        | `finished-note`, `retry-veto`     | the failure ends `error`; the retry hook vetoes it                            |
+| t2 lifecycle             | `lifecycle-note`                  | created; Pi: two starts on rebind, replaced, shutdown; OpenCode: delete ends  |
+| t2 lifecycle resumed     | `lifecycle-note`                  | OpenCode only: reports `resumed` for a pre-load session                       |
+| t2 interrupt             | `interrupt-action`                | accepted, and the turn settles interrupted                                    |
+| t2 model                 | `model-switch`                    | accepted; the stand-in sees `scripted-2`                                      |
+| t2 compact               | `compact-action`                  | accepted; Pi asks once, OpenCode twice (its summary-template nudge)           |
+| t3 list                  | `tool-create`                     | the first request declares `monitor_create` with its description and schema   |
+| t3 call                  | `tool-create`                     | `tack-tool monitor_create PROJ-1` recorded                                    |
+| t3 result                | `tool-create`                     | a tool message's content is `watching PROJ-1`                                 |
+| t3 bad input             | `tool-create`                     | a tool message names `key`; nothing recorded                                  |
+| t3 tool deny             | `tool-deny`, `tool-create`        | the deny reason is returned; nothing recorded                                 |
+| t3 tool rewrite          | `tool-rewrite`, `tool-create`     | `tack-tool monitor_create PROJ-2` recorded                                    |
+| t3 rewrite rejected      | `tool-rewrite-bad`, `tool-create` | the schema rejects the rewrite; nothing recorded                              |
+| t3 pi tool collision     | `tool-collide`, `tool-witness`    | Pi only: the refusal is reported and the next plugin still starts the session |
+| t3 withdraw              | `tool-withdraw`                   | the next request omits the tool; a call to it answers an error                |
 
 ## Layout
 

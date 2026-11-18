@@ -44,6 +44,13 @@ export const selectedRows = <A extends { readonly name: string }>(
   rows: ReadonlyArray<A>,
 ): ReadonlyArray<A> => rows.filter((row) => rowSelected(row.name));
 
+/** The rows one agent runs, in table order: a row may name a single agent. */
+export const rowsFor = <A extends { readonly name: string; readonly only?: AgentName }>(
+  rows: ReadonlyArray<A>,
+  agent: AgentName,
+): ReadonlyArray<A> =>
+  selectedRows(rows).filter((row) => row.only === undefined || row.only === agent);
+
 /** A filtered run that selected no row: it would check nothing but a version. */
 class EmptySelection extends Error {
   override name = "EmptySelection";

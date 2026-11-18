@@ -37,7 +37,9 @@ export const piFidelity: Fidelity = {
     "tool.register": {
       fidelity: "native",
       how: "`pi.registerTool({ name, label, description, parameters, execute })` works during load and after startup; the tool is active and declared on the next request (`dist/core/extensions/types.d.ts` L1271; `docs/extensions.md` L1582–1592)",
-      source: source("dist/core/extensions/types.d.ts#L1271"),
+      // The docs name a session_start handler and say the tool is refreshed at
+      // once, which is why tack registers there and the first request carries it.
+      source: source("docs/extensions.md#L1582-L1592"),
     },
     "tool.remove": {
       fidelity: "fallback",

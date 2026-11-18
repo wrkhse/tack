@@ -11,16 +11,17 @@ import {
   checkSessionScenario,
   iterations,
   requireSelection,
+  rowsFor,
   selectedRows,
 } from "./suite.ts";
 
 const AGENT = "pi";
 const PACKAGE = "@earendil-works/pi-coding-agent";
 
-const scenarioRows = selectedRows(scenarios);
+const scenarioRows = rowsFor(scenarios, AGENT);
 const sessionRows = selectedRows(sessionScenariosFor(AGENT));
-const toolRows = selectedRows(toolScenarios);
-const toolSessionRows = selectedRows(toolSessionScenarios);
+const toolRows = rowsFor(toolScenarios, AGENT);
+const toolSessionRows = rowsFor(toolSessionScenarios, AGENT);
 
 requireSelection(AGENT, [scenarioRows, sessionRows, toolRows, toolSessionRows]);
 

@@ -10,9 +10,9 @@ import type {
   ToolDecision,
 } from "../src/hooks/tool-before.ts";
 import { ToolDecision as Decision, runToolBefore } from "../src/hooks/tool-before.ts";
-import type { ToolRegistry } from "../src/tools/registry.ts";
+import type { ToolPort, ToolRegistry } from "../src/tools/registry.ts";
 import { createToolRegistry } from "../src/tools/registry.ts";
-import type { ToolDefinition } from "../src/tools/tool.ts";
+import type { CompiledTool, ToolDefinition } from "../src/tools/tool.ts";
 import { compileTools, invokeTool, tool } from "../src/tools/tool.ts";
 import { noTools, sessionFor } from "./helpers.ts";
 
@@ -69,23 +69,46 @@ const signedPush = plugin({
     call.tool === "shell" ? appendTo(call.input.command, " --signed") : undefined,
 });
 
+/** A port that keeps nothing: these tests only look a tool up. */
+function quietPort(): ToolPort {
+  return {
+    install: () => undefined,
+    withdraw: () => undefined,
+    settled: () => Promise.resolve(),
+  };
+}
+
+/** The one tool a definition compiles to. */
+function compileOne(definition: ToolDefinition): CompiledTool {
+  const [first] = Effect.runSync(compileTools("test", { [definition.name]: definition }, true));
+
+  if (first === undefined) {
+    throw new Error("the definition compiled no tool");
+  }
+
+  return first;
+}
+
 /** A registry holding one compiled tool, so a whole-input rewrite has a schema to decode. */
 function registryWith(definition: ToolDefinition): ToolRegistry {
-  const compiled = Effect.runSync(compileTools("test", { [definition.name]: definition }, true));
+  return createToolRegistry(
+    { plugin: "test", scope: "test", source: "test", hasSession: true, port: quietPort() },
+    [compileOne(definition)],
+  );
+}
 
+/** A guard's registry: no tools of its own, and one another plugin holds. */
+function guardRegistry(held: CompiledTool): ToolRegistry {
   return createToolRegistry(
     {
-      plugin: "test",
+      plugin: "guard",
       scope: "test",
-      source: "test",
+      source: "guard",
       hasSession: true,
-      port: {
-        install: () => undefined,
-        withdraw: () => undefined,
-        settled: () => Promise.resolve(),
-      },
+      port: quietPort(),
+      elsewhere: () => held,
     },
-    compiled,
+    [],
   );
 }
 
@@ -272,6 +295,38 @@ it.effect("rewrites a tack tool's whole input and runs the handler with it", () 
   }),
 );
 
+it.effect("rewrites another plugin's tool through the scope lookup", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+    const held = compileOne(monitorTool(seen));
+    const tools = guardRegistry(held);
+
+    const rewriting = plugin({
+      name: "rewriting",
+      toolBefore: () => ({ rewrite: { input: { key: "PROJ-2" } } }),
+    });
+
+    const call: ToolCall = {
+      tool: "other",
+      name: "monitor_create",
+      input: { key: "PROJ-1" },
+    };
+
+    const decision = allowOf(yield* runToolBefore([rewriting], call, { ...ctx, tools }));
+
+    expect(decision.rewritten).toBe(true);
+
+    const result = yield* invokeTool(
+      held,
+      { input: decision.call.input },
+      { callId: "call-1", signal: undefined, session: ctx.session, tools },
+    );
+
+    expect(result).toEqual({ content: ["watching PROJ-2"] });
+    expect(seen).toEqual(["PROJ-2"]);
+  }),
+);
+
 it.effect(
   "decodes a rewritten input before the handler runs, refusing one the schema rejects",
   () =>
@@ -303,6 +358,20 @@ it.effect(
       expect(result.content[0]).toContain('at ["key"]');
       expect(seen).toEqual([]);
     }),
+);
+
+it.effect("denies a rewrite that names both forms", () =>
+  Effect.gen(function* () {
+    const both: ToolBeforeResult = JSON.parse('{"rewrite":{"command":"ls","input":{"key":"x"}}}');
+
+    const confused = plugin({ name: "confused", toolBefore: () => both });
+
+    const decision = denyOf(yield* runToolBefore([confused], shellCall, ctx));
+
+    expect(decision.reason).toBe(
+      "tack: confused failed: a rewrite carries either a command or an input, not both",
+    );
+  }),
 );
 
 it.effect("denies a command rewrite on a call that is not the shell tool, naming it", () =>

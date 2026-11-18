@@ -35,15 +35,20 @@ during `setup`, and each tool a plugin adds or withdraws later is one more
 transform. Pi registers each tool with `pi.registerTool` when the first session
 starts: its action methods throw during extension loading, so that is the
 first moment a tool's name can be checked against every name Pi already holds.
-A tool registered there is declared on the first request. Pi has no unregister:
-a withdrawal re-registers the same name with `exposure: "hidden"`, which
-withdraws it from the model, and tack answers a call to the name with an error
-instead of reaching a stale handler.
+A tool registered there is declared on the first request. Pi runs an extension
+factory once: `/reload` loads the extensions again, while a new, resumed or
+forked session binds the same extension to another session. The first
+`session_start` registers a plugin's tools, and a later one registers nothing
+again. Pi has no unregister: a withdrawal re-registers the same name with
+`exposure: "hidden"`, and that hidden definition carries the refusal, so a call
+to the name answers an error instead of reaching a stale handler.
 
 A shell rewrite keeps the agent's other input fields. On OpenCode the adapter
 spreads the input and replaces `command`; Pi requires the command to change in
 place. A whole-input rewrite replaces the call's input on both: OpenCode assigns
-it, and Pi mutates the input object its executor already holds.
+it, and Pi mutates the input object its executor already holds. It looks the
+tool up across the scope, so a guard plugin rewrites a tool another plugin
+declares, not only its own.
 
 OpenCode's after event carries `Tool.Result`, whose model-facing text is
 `content` (a string, or text and file parts); `output` is structured output.

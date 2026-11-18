@@ -124,7 +124,7 @@ function applyInputRewrite(
     );
   }
 
-  if (ctx.tools.get(call.name) === undefined) {
+  if (ctx.tools.resolve(call.name) === undefined) {
     return Effect.fail(
       invalidResult(
         plugin,
@@ -167,6 +167,15 @@ function applyToolBeforeResult(
   return applyInputRewrite(plugin, rewrite.input, call, ctx);
 }
 
+/** True for a rewrite that names both forms, which no call can satisfy. */
+function rewritesBothForms(value: ToolBeforeResult): boolean {
+  if (value === undefined || "deny" in value) {
+    return false;
+  }
+
+  return "command" in value.rewrite && "input" in value.rewrite;
+}
+
 /** Decodes the untrusted handler value before tack acts on it. */
 function decodeToolBeforeResult(
   plugin: ResolvedPlugin,
@@ -174,6 +183,12 @@ function decodeToolBeforeResult(
   call: ToolCall,
   ctx: HookContext,
 ): Effect.Effect<Applied, HandlerFailed> {
+  if (rewritesBothForms(value)) {
+    return Effect.fail(
+      invalidResult(plugin, "a rewrite carries either a command or an input, not both"),
+    );
+  }
+
   return Schema.decodeEffect(ToolBeforeResultSchema)(value).pipe(
     Effect.mapError(() => invalidResult(plugin)),
     Effect.flatMap((result) => applyToolBeforeResult(plugin, result, call, ctx)),

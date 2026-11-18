@@ -10,6 +10,7 @@ import {
   checkSessionScenario,
   iterations,
   requireSelection,
+  rowsFor,
   selectedRows,
 } from "./suite.ts";
 import { toolScenarios, toolSessionScenarios } from "./tool-scenarios.ts";
@@ -17,10 +18,10 @@ import { toolScenarios, toolSessionScenarios } from "./tool-scenarios.ts";
 const AGENT = "opencode";
 const PACKAGE = "@opencode/cli";
 
-const scenarioRows = selectedRows(scenarios);
+const scenarioRows = rowsFor(scenarios, AGENT);
 const sessionRows = selectedRows(sessionScenariosFor(AGENT));
-const toolRows = selectedRows(toolScenarios);
-const toolSessionRows = selectedRows(toolSessionScenarios);
+const toolRows = rowsFor(toolScenarios, AGENT);
+const toolSessionRows = rowsFor(toolSessionScenarios, AGENT);
 
 requireSelection(AGENT, [scenarioRows, sessionRows, toolRows, toolSessionRows]);
 
