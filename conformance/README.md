@@ -199,32 +199,32 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 
 ## Scenarios
 
-| Scenario                 | Plugins                       | Passes when                                                                         |
-| ------------------------ | ----------------------------- | ----------------------------------------------------------------------------------- |
-| deny                     | `deny-push`                   | nothing recorded; reason returned                                                   |
-| deny after               | `deny-push`, `observe`        | the same, and `toolAfter` never ran                                                 |
-| fail closed              | `throws`                      | nothing recorded; error returned                                                    |
-| opt out                  | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded                                          |
-| rewrite                  | `safe-push`                   | `push origin main --dry-run`                                                        |
-| combine                  | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded                                                   |
-| combine reversed         | `signed-push`, `safe-push`    | the same, in the other load order                                                   |
-| append                   | `push-note`                   | the note is in the first prompt                                                     |
-| after                    | `safe-push`, `observe`        | the observed command and output                                                     |
-| t2 wake                  | `append-wake`                 | a tool-bearing request carries the text                                             |
-| t2 outside hook          | `append-outside`              | the timer's text lands in a request                                                 |
-| t2 now                   | `append-now`                  | the second tool-bearing request carries it, before the final request                |
-| t2 next                  | `append-next`                 | absent first, present in a later request                                            |
-| t2 permission            | `permission-deny`             | OpenCode denies; Pi never asks                                                      |
-| t2 permission configured | `permission-deny`             | a sandbox deny skips the hook; the call is refused                                  |
-| t2 idle                  | `idle-note`                   | one idle, then Pi's aborted and no more                                             |
-| t2 finished done         | `finished-note`               | every request ends `done`, exactly                                                  |
-| t2 finished aborted      | `finished-note`               | the interrupt ends `aborted` last                                                   |
-| t2 finished error        | `finished-note`, `retry-veto` | the failure ends `error`; the retry hook vetoes it                                  |
-| t2 lifecycle             | `lifecycle-note`              | created; Pi reports `replaced` then `shutdown`; OpenCode's locationless delete ends |
-| t2 lifecycle resumed     | `lifecycle-note`              | OpenCode only: reports `resumed` for a pre-load session                             |
-| t2 interrupt             | `interrupt-action`            | accepted, and the turn settles interrupted                                          |
-| t2 model                 | `model-switch`                | accepted; the stand-in sees `scripted-2`                                            |
-| t2 compact               | `compact-action`              | accepted, and one compaction request arrives                                        |
+| Scenario                 | Plugins                       | Passes when                                                                  |
+| ------------------------ | ----------------------------- | ---------------------------------------------------------------------------- |
+| deny                     | `deny-push`                   | nothing recorded; reason returned                                            |
+| deny after               | `deny-push`, `observe`        | the same, and `toolAfter` never ran                                          |
+| fail closed              | `throws`                      | nothing recorded; error returned                                             |
+| opt out                  | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded                                   |
+| rewrite                  | `safe-push`                   | `push origin main --dry-run`                                                 |
+| combine                  | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded                                            |
+| combine reversed         | `signed-push`, `safe-push`    | the same, in the other load order                                            |
+| append                   | `push-note`                   | the note is in the first prompt                                              |
+| after                    | `safe-push`, `observe`        | the observed command and output                                              |
+| t2 wake                  | `append-wake`                 | a tool-bearing request carries the text                                      |
+| t2 outside hook          | `append-outside`              | the timer's text lands in a request                                          |
+| t2 now                   | `append-now`                  | the second tool-bearing request carries it, before the final request         |
+| t2 next                  | `append-next`                 | absent first, present in a later request                                     |
+| t2 permission            | `permission-deny`             | OpenCode denies; Pi never asks                                               |
+| t2 permission configured | `permission-deny`             | a sandbox deny skips the hook; the call is refused                           |
+| t2 idle                  | `idle-note`                   | one idle, then Pi's aborted and no more                                      |
+| t2 finished done         | `finished-note`               | every request ends `done`, exactly                                           |
+| t2 finished aborted      | `finished-note`               | the interrupt ends `aborted` last                                            |
+| t2 finished error        | `finished-note`, `retry-veto` | the failure ends `error`; the retry hook vetoes it                           |
+| t2 lifecycle             | `lifecycle-note`              | created; Pi: two starts on rebind, replaced, shutdown; OpenCode: delete ends |
+| t2 lifecycle resumed     | `lifecycle-note`              | OpenCode only: reports `resumed` for a pre-load session                      |
+| t2 interrupt             | `interrupt-action`            | accepted, and the turn settles interrupted                                   |
+| t2 model                 | `model-switch`                | accepted; the stand-in sees `scripted-2`                                     |
+| t2 compact               | `compact-action`              | accepted; Pi asks once, OpenCode twice (its summary-template nudge)          |
 
 ## Layout
 

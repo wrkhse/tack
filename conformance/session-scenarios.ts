@@ -678,10 +678,17 @@ const lifecycle: SessionScenario = {
         [
           { event: "created", resumed: false },
           { event: "ended", reason: "replaced" },
+          // Pi 1.5.2's RPC `new_session` binds extensions twice: once from
+          // `AgentSessionRuntime.finishSessionReplacement`, through the runtime's
+          // rebind hook, and once from rpc-mode's own `rebindSession()`. Both
+          // emit `session_start` reason `new` for the one replacement session.
+          { event: "created", resumed: false },
           { event: "created", resumed: false },
           { event: "ended", reason: "shutdown" },
         ],
-        "the rebind must report replaced, and closing stdin must report shutdown\n" + details,
+        "the rebind must report replaced and two starts for the new session, and closing " +
+          "stdin must report shutdown\n" +
+          details,
       );
 
       return;
@@ -862,10 +869,15 @@ const compact: SessionScenario = {
       [{ event: "compact", outcome: "accepted" }],
       "the compaction request must be accepted exactly once\n" + details,
     );
+    // The scripted reply, "summary", fills none of OpenCode 2.3.0's
+    // summary-template headings, so it resends the prompt once with its "fill in
+    // the template" nudge; Pi accepts the same reply without a second request.
     assert.equal(
       compactions.length,
-      1,
-      "the model must receive exactly one compaction request\n" + details,
+      evidence.agent === "pi" ? 1 : 2,
+      "Pi must ask the model to summarise once; OpenCode twice, because the scripted reply " +
+        "skips its summary template and earns one nudge\n" +
+        details,
     );
   },
 };
