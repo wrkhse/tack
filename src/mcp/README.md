@@ -77,6 +77,10 @@ description and unchanged JSON Schema header as `inputSchema`.
 and thrown handlers become text results with `isError: true`.
 `details` stays local; tack declares no MCP `outputSchema`.
 
+The MCP server does not run `toolBefore`: it has no agent session to build a
+`HookContext` from, so a plugin that needs its tool guarded on this path guards
+inside the handler.
+
 - `timeoutMs` defaults to 30 000 ms. A tool's own smaller timeout wins.
   A deadline aborts `ctx.signal` with a `TimeoutError` naming the tool and
   limit, and returns an error result carrying that message.

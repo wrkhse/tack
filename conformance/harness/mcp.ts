@@ -5,6 +5,7 @@ import {
   Client,
   type CallToolResult,
   type DiscoverResult,
+  type JSONRPCMessage,
   type ListToolsResult,
 } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -51,6 +52,8 @@ export interface McpEvidence {
 export interface BrokenMcpEvidence {
   readonly exitCode: number;
   readonly stderr: string;
+  /** Every JSON-RPC message the refused entry sent; refusal precedes any handshake. */
+  readonly messages: ReadonlyArray<JSONRPCMessage>;
 }
 
 /** A bounded stderr tail kept from before the child starts until it closes. */
@@ -170,8 +173,14 @@ export const runBrokenMcpScenario = Effect.fnUntraced(function* (): Effect.fn.Re
 > {
   const process = yield* prepare("mcp-broken");
   const closed = Promise.withResolvers<void>();
+  const messages: JSONRPCMessage[] = [];
 
-  Object.assign(process.transport, { onclose: () => closed.resolve() });
+  Object.assign(process.transport, {
+    onclose: () => closed.resolve(),
+    onmessage: (message: JSONRPCMessage) => {
+      messages.push(message);
+    },
+  });
 
   yield* Effect.promise(() => process.transport.start());
 
@@ -186,5 +195,5 @@ export const runBrokenMcpScenario = Effect.fnUntraced(function* (): Effect.fn.Re
 
   const exitCode = yield* exitStatus(process, pid);
 
-  return { exitCode, stderr: process.stderr() };
+  return { exitCode, stderr: process.stderr(), messages };
 });

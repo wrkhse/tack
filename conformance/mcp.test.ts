@@ -16,9 +16,14 @@ for (const row of rows) {
         if (row.name === "mcp load refusal") {
           const refused = yield* runBrokenMcpScenario();
 
+          const errorLine = refused.stderr.split("\n").find((line) => line.startsWith("error: "));
+
           expect(refused.exitCode).toBe(1);
-          expect(refused.stderr).toContain('tool "monitor_session"');
-          expect(refused.stderr).toContain("needsSession is true");
+          expect(refused.messages).toEqual([]);
+          expect(errorLine).toBe(
+            'error: tack: tool "monitor_session" in plugin "mcp-broken" is invalid: ' +
+              "needsSession is true, but this transport has no agent session",
+          );
 
           return;
         }
