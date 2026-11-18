@@ -339,6 +339,7 @@ const now: SessionScenario = {
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
+    const seen = describeRequests(evidence.requests);
 
     const prompts = evidence.requests.flatMap((request, index) =>
       isUserPrompt(request, PUSH) ? [index] : [],
@@ -349,30 +350,43 @@ const now: SessionScenario = {
     assert.deepEqual(
       observationsOf(evidence, "append-now"),
       [{ event: "append", outcome: "accepted" }],
-      "the steering append must be accepted exactly once\n" + details,
+      "the steering append must be accepted exactly once\n" + details + "\n" + seen,
     );
     assert.equal(
       prompts.length,
       1,
-      "the row sends one prompt, so a second one must not appear\n" + details,
-    );
-    assert.ok(firstPrompt !== undefined, "the first turn must start with a prompt\n" + details);
-
-    const turn = evidence.requests.slice(firstPrompt);
-    const toolRequests = turn.filter(hasTools);
-    const carrying = toolRequests.findIndex((request) => hasText(request, NOW));
-
-    assert.equal(
-      carrying,
-      1,
-      "the steering text must land in the second tool-bearing request of the first turn, not " +
-        carrying +
-        "\n" +
-        details,
+      "the row sends one prompt, so a second one must not appear\n" + details + "\n" + seen,
     );
     assert.ok(
-      carrying < toolRequests.length - 1,
-      "the steering text must land before the first turn's final request\n" + details,
+      firstPrompt !== undefined,
+      "the first turn must start with a prompt\n" + details + "\n" + seen,
+    );
+
+    // Everything from the row's one prompt on is that turn; a second turn
+    // would need a second prompt, which the assertion above excludes.
+    const turn = evidence.requests.slice(firstPrompt);
+    const toolRequests = turn.filter(hasTools);
+    const firstToolRequest = toolRequests[0];
+    const laterToolRequests = toolRequests.slice(1);
+
+    assert.ok(
+      firstToolRequest !== undefined,
+      "the first turn must start with a tool-bearing request\n" + details + "\n" + seen,
+    );
+    assert.ok(
+      !hasText(firstToolRequest, NOW),
+      "the steering text must be absent from the first tool-bearing request, so it was not " +
+        "part of the prompt that started the turn\n" +
+        details +
+        "\n" +
+        seen,
+    );
+    assert.ok(
+      laterToolRequests.some((request) => hasText(request, NOW)),
+      "the steering text must land in a later tool-bearing request of the first turn\n" +
+        details +
+        "\n" +
+        seen,
     );
   },
 };

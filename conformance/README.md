@@ -212,7 +212,7 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 | after                    | `safe-push`, `observe`        | the observed command and output                                              |
 | t2 wake                  | `append-wake`                 | a tool-bearing request carries the text                                      |
 | t2 outside hook          | `append-outside`              | the timer's text lands in a request                                          |
-| t2 now                   | `append-now`                  | the second tool-bearing request carries it, before the final request         |
+| t2 now                   | `append-now`                  | a later tool-bearing request of the first turn carries it, not the prompt    |
 | t2 next                  | `append-next`                 | absent first, present in a later request                                     |
 | t2 permission            | `permission-deny`             | OpenCode denies; Pi never asks                                               |
 | t2 permission configured | `permission-deny`             | a sandbox deny skips the hook; the call is refused                           |
