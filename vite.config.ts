@@ -1,7 +1,7 @@
 import { defineConfig } from "vite-plus";
 
 // Vendored lint policy keeps upstream formatting and is not linted as our code.
-const vendored = "tools/oxlint/anti-slop/**";
+const vendored = ["tools/oxlint/anti-slop/**", "tools/oxlint/landmines/**"];
 
 // tsc and effect-tsgo are Go binaries. Automatic file tracking missed a new
 // source file for them, replaying a stale pass, so their inputs are explicit.
@@ -10,10 +10,10 @@ const typeInputs = ["**/*.ts", "**/tsconfig*.json", "bun.lock", "!node_modules/*
 export default defineConfig({
   fmt: {
     // spike/ is research evidence kept as written (AGENTS.md); oxfmt rewrites its code samples.
-    ignorePatterns: [vendored, "spike/**"],
+    ignorePatterns: [...vendored, "spike/**"],
   },
   lint: {
-    ignorePatterns: [vendored],
+    ignorePatterns: vendored,
     plugins: ["typescript", "unicorn", "oxc", "import"],
     categories: {
       correctness: "error",
@@ -24,6 +24,7 @@ export default defineConfig({
       { name: "vite-plus", specifier: "vite-plus/oxlint-plugin" },
       { name: "anti-slop", specifier: "./tools/oxlint/anti-slop/index.ts" },
       { name: "anti-slop-effect", specifier: "./tools/oxlint/anti-slop/effect/index.ts" },
+      { name: "landmines-testing", specifier: "./tools/oxlint/landmines/index.ts" },
     ],
     options: { typeAware: true, typeCheck: true, denyWarnings: true },
     rules: {
@@ -57,6 +58,17 @@ export default defineConfig({
       "anti-slop-effect/no-manual-tagged-construction": "error",
       "anti-slop-effect/no-service-constructor-imports": "error",
       "anti-slop-effect/prefer-effect-match": "error",
+
+      "landmines-testing/no-fixed-sleep": "error",
+      // Two real child-process tests bound their own elapsed time on purpose: duplex proves a
+      // SIGKILL escalation after a 200 ms grace, and opencode-server proves a readiness fallback
+      // when no listening line arrives. Each keeps one per-test timeout, and this list may only
+      // shrink: the rule reports a stale entry once a file no longer carries one.
+      "landmines-testing/no-flake-masking": [
+        "error",
+        { allow: { "test/duplex.test.ts": 1, "test/opencode-server.test.ts": 1 } },
+      ],
+      "landmines-testing/no-unsignaled-poll": "error",
     },
   },
   test: {
@@ -65,6 +77,13 @@ export default defineConfig({
         test: {
           name: "anti-slop",
           include: ["tools/oxlint/anti-slop/**/*.test.ts"],
+          setupFiles: ["tools/vitest/rule-tester.ts"],
+        },
+      },
+      {
+        test: {
+          name: "landmines",
+          include: ["tools/oxlint/landmines/**/*.test.ts"],
           setupFiles: ["tools/vitest/rule-tester.ts"],
         },
       },

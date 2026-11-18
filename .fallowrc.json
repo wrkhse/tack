@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
   // Vendored lint policy: maintained as upstream code, not analysed as ours.
-  "ignorePatterns": ["tools/oxlint/anti-slop/**"],
+  "ignorePatterns": ["tools/oxlint/anti-slop/**", "tools/oxlint/landmines/**"],
   // @effect/language-service: named by the tsconfig `plugins` block; the diagnostics ship inside
   // the effect-tsgo binary rather than as an installed package.
   // @opencode/cli: the conformance suite spawns it from node_modules/.bin by path, never imports it.
