@@ -146,11 +146,20 @@ function callOf(event: ToolEvent): ToolCall {
   return { tool: "other", name: event.tool, input };
 }
 
-/** Replaces only the command, keeping OpenCode's other input fields. */
+/**
+ * Applies a rewrite by assigning the call's input, which `execute` reads: the
+ * shell keeps OpenCode's other fields, and a whole-input rewrite replaces them.
+ */
 function assignRewrite(event: ToolEvent, call: ToolCall): void {
+  if (call.tool !== "shell") {
+    event.input = call.input;
+
+    return;
+  }
+
   const input = event.input;
 
-  if (call.tool !== "shell" || !Predicate.isObject(input)) {
+  if (!Predicate.isObject(input)) {
     return;
   }
 

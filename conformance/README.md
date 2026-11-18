@@ -10,8 +10,9 @@ A row runs in the mode its steps need. T1's nine rows run one prompt to
 completion in a one-shot CLI; T2's fifteen run one long-lived session, because
 they need a second turn, an action after startup, or an end the suite controls.
 One T2 row runs in OpenCode only, because Pi has no session created before its
-extension loaded. T3's four tool rows also run one prompt to completion, in
-OpenCode only: Pi's adapter registers tools in a later slice.
+extension loaded. T3's seven one-shot rows run one prompt to completion in both
+agents; its withdrawal row runs long-lived, because it needs a second request
+after the tool is removed.
 
 Run it in CI, or in a disposable container. Never on a development machine:
 each test starts the agent CLIs, which are that machine's own agents.
@@ -43,7 +44,9 @@ sequenceDiagram
 The stand-in model answers four ways. A request without tools is a title
 request, so it gets the text `title`. A request that carries a tool result gets
 `done`, which ends the turn. Every other request gets one tool call, the agent's
-own shell tool with `git push origin main`. A marked request answers with the
+own shell tool with `git push origin main`; when a row asks, a request that ends
+with the person's prompt gets a call even though the conversation already holds
+a result. A marked request answers with the
 summary text instead, which is how the compaction row proves its call. A sticky
 error answers every tool-bearing request with the SSE error until the run ends,
 so a retry cannot rescue the turn; Pi's sandbox disables retries, and the error
@@ -92,8 +95,8 @@ where the table says the two agents report one differently.
 
 ## The marker channel
 
-Every T2 plugin writes `t2-marker-<name>.json` in its working directory, which
-is the project directory. The file holds a JSON array of observations, one
+Every long-lived row's plugin writes `t2-marker-<name>.json` in its working
+directory, which is the project directory. The file holds a JSON array of observations, one
 appended per event, such as `{"event":"finished","reason":"done"}`. Each
 append is written to a temporary file and renamed into place, so the suite
 never reads half an observation. After a run, the suite reads every marker into
@@ -231,6 +234,10 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 | t3 call                  | `tool-create`                 | `tack-tool monitor_create PROJ-1` recorded                                   |
 | t3 result                | `tool-create`                 | a tool message's content is `watching PROJ-1`                                |
 | t3 bad input             | `tool-create`                 | a tool message names `key`; nothing recorded                                 |
+| t3 tool deny             | `tool-deny`                   | the deny reason is returned; nothing recorded                                |
+| t3 tool rewrite          | `tool-rewrite`                | `tack-tool monitor_create PROJ-2` recorded                                   |
+| t3 rewrite rejected      | `tool-rewrite-bad`            | the schema rejects the rewrite; nothing recorded                             |
+| t3 withdraw              | `tool-withdraw`               | the next request omits the tool; a call to it answers an error               |
 
 ## Layout
 
@@ -251,7 +258,7 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 | `harness/t2-opencode.ts`     | one long-lived OpenCode scenario                   |
 | `harness/t2-pi.ts`           | one long-lived Pi scenario                         |
 | `plugins/`                   | the tack plugins, entry files, and the load marker |
-| `plugins/t2/`                | one plugin per long-lived row                      |
+| `plugins/t2/`                | one plugin per T2 row                              |
 | `scenarios.ts`               | the one-shot table, as data and checks             |
 | `tool-scenarios.ts`          | T3's tool rows, as data and checks                 |
 | `session-scenarios.ts`       | the long-lived table, as data and checks           |

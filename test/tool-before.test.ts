@@ -10,6 +10,10 @@ import type {
   ToolDecision,
 } from "../src/hooks/tool-before.ts";
 import { ToolDecision as Decision, runToolBefore } from "../src/hooks/tool-before.ts";
+import type { ToolRegistry } from "../src/tools/registry.ts";
+import { createToolRegistry } from "../src/tools/registry.ts";
+import type { ToolDefinition } from "../src/tools/tool.ts";
+import { compileTools, invokeTool, tool } from "../src/tools/tool.ts";
 import { noTools, sessionFor } from "./helpers.ts";
 
 const ctx: HookContext = {
@@ -64,6 +68,56 @@ const signedPush = plugin({
   toolBefore: (call) =>
     call.tool === "shell" ? appendTo(call.input.command, " --signed") : undefined,
 });
+
+/** A registry holding one compiled tool, so a whole-input rewrite has a schema to decode. */
+function registryWith(definition: ToolDefinition): ToolRegistry {
+  const compiled = Effect.runSync(compileTools("test", { [definition.name]: definition }, true));
+
+  return createToolRegistry(
+    {
+      plugin: "test",
+      scope: "test",
+      source: "test",
+      hasSession: true,
+      port: {
+        install: () => undefined,
+        withdraw: () => undefined,
+        settled: () => Promise.resolve(),
+      },
+    },
+    compiled,
+  );
+}
+
+/** The tool a rewrite targets, recording the key its handler saw. */
+function monitorTool(seen: string[]): ToolDefinition {
+  return tool<{ key: string }>({
+    name: "monitor_create",
+    description: "Start watching a Jira issue",
+    input: {
+      type: "object",
+      properties: { key: { type: "string" } },
+      required: ["key"],
+      additionalProperties: false,
+    },
+    run: (input) => {
+      seen.push(input.key);
+
+      return { content: [`watching ${input.key}`] };
+    },
+  });
+}
+
+/** The one tool a registry must hold, or a failure naming what went wrong. */
+function heldTool(tools: ToolRegistry, name: string) {
+  const found = tools.get(name);
+
+  if (found === undefined) {
+    throw new Error(`the registry holds no tool named ${name}`);
+  }
+
+  return found;
+}
 
 function allowOf(decision: ToolDecision) {
   return Decision.$match(decision, {
@@ -186,7 +240,72 @@ it.effect("denies a handler that returns an invalid result", () =>
   }),
 );
 
-it.effect("denies a rewrite on a call that is not the shell tool", () =>
+it.effect("rewrites a tack tool's whole input and runs the handler with it", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+    const tools = registryWith(monitorTool(seen));
+
+    const rewriting = plugin({
+      name: "rewriting",
+      toolBefore: (call) =>
+        call.name === "monitor_create" ? { rewrite: { input: { key: "PROJ-2" } } } : undefined,
+    });
+
+    const call: ToolCall = {
+      tool: "other",
+      name: "monitor_create",
+      input: { key: "PROJ-1" },
+    };
+
+    const decision = allowOf(yield* runToolBefore([rewriting], call, { ...ctx, tools }));
+
+    expect(decision.rewritten).toBe(true);
+
+    const result = yield* invokeTool(
+      heldTool(tools, "monitor_create"),
+      { input: decision.call.input },
+      { callId: "call-1", signal: undefined, session: ctx.session, tools },
+    );
+
+    expect(result).toEqual({ content: ["watching PROJ-2"] });
+    expect(seen).toEqual(["PROJ-2"]);
+  }),
+);
+
+it.effect(
+  "decodes a rewritten input before the handler runs, refusing one the schema rejects",
+  () =>
+    Effect.gen(function* () {
+      const seen: string[] = [];
+      const tools = registryWith(monitorTool(seen));
+
+      const rewriting = plugin({
+        name: "rewriting",
+        toolBefore: () => ({ rewrite: { input: { key: 42 } } }),
+      });
+
+      const call: ToolCall = {
+        tool: "other",
+        name: "monitor_create",
+        input: { key: "PROJ-1" },
+      };
+
+      const decision = allowOf(yield* runToolBefore([rewriting], call, { ...ctx, tools }));
+
+      const result = yield* invokeTool(
+        heldTool(tools, "monitor_create"),
+        { input: decision.call.input },
+        { callId: "call-1", signal: undefined, session: ctx.session, tools },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toHaveLength(1);
+      expect(result.content[0]).toContain('at ["key"]');
+      expect(seen).toEqual([]);
+    }),
+);
+
+it.effect("denies a command rewrite on a call that is not the shell tool, naming it", () =>
   Effect.gen(function* () {
     const rewriting = plugin({
       name: "rewriting",
@@ -195,7 +314,39 @@ it.effect("denies a rewrite on a call that is not the shell tool", () =>
 
     const decision = denyOf(yield* runToolBefore([rewriting], otherCall, ctx));
 
-    expect(decision.reason).toBe("tack: rewriting failed: rewrite applies only to the shell tool");
+    expect(decision.reason).toBe(
+      'tack: rewriting failed: a command rewrite applies only to the shell tool, not "read"',
+    );
+  }),
+);
+
+it.effect("denies an input rewrite on the shell tool", () =>
+  Effect.gen(function* () {
+    const rewriting = plugin({
+      name: "rewriting",
+      toolBefore: () => ({ rewrite: { input: { command: "ls" } } }),
+    });
+
+    const decision = denyOf(yield* runToolBefore([rewriting], shellCall, ctx));
+
+    expect(decision.reason).toBe(
+      "tack: rewriting failed: an input rewrite applies only to a tool tack defines, not the shell",
+    );
+  }),
+);
+
+it.effect("denies an input rewrite of a tool this plugin does not define, naming it", () =>
+  Effect.gen(function* () {
+    const rewriting = plugin({
+      name: "rewriting",
+      toolBefore: () => ({ rewrite: { input: { path: "notes.md" } } }),
+    });
+
+    const decision = denyOf(yield* runToolBefore([rewriting], otherCall, ctx));
+
+    expect(decision.reason).toBe(
+      'tack: rewriting failed: an input rewrite applies only to a tool this plugin defines, and "read" is not one',
+    );
   }),
 );
 

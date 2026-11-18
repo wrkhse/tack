@@ -15,6 +15,10 @@ export type AgentName = "opencode" | "pi";
 /** Every tack plugin the suite loads, by file name. */
 export type PluginName =
   | "tool-create"
+  | "tool-withdraw"
+  | "tool-deny"
+  | "tool-rewrite"
+  | "tool-rewrite-bad"
   | "deny-push"
   | "throws"
   | "throws-allowed"

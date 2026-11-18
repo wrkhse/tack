@@ -22,21 +22,29 @@ result's text parts.
 | tack                 | OpenCode 2.3.0             | Pi 1.5.2                                |
 | -------------------- | -------------------------- | --------------------------------------- |
 | `toolBefore` deny    | `execute.before` throws    | `tool_call` returns `{ block, reason }` |
-| `toolBefore` rewrite | assigns `event.input`      | mutates `event.input.command`           |
+| `toolBefore` rewrite | assigns `event.input`      | mutates `event.input` in place          |
 | `promptSent` append  | `prompt` hook edits `text` | `input` transform                       |
 | `toolAfter`          | `execute.after`            | `tool_result`                           |
-| `tools` register     | one `ctx.tool.transform`   | refused until Pi's slice                |
-| `tools` withdraw     | `editor.remove` transform  | refused until Pi's slice                |
+| `tools` register     | one `ctx.tool.transform`   | one `pi.registerTool`                   |
+| `tools` withdraw     | `editor.remove` transform  | re-register the name hidden             |
 | scope                | `opencode:<location>`      | `pi`, one per process                   |
 | registration ends    | the setup cleanup          | `session_shutdown`                      |
 
 Every tool a definition declares is installed in OpenCode in one transform
 during `setup`, and each tool a plugin adds or withdraws later is one more
-transform. Pi has no tool registration yet: a Pi load refuses a plugin that
-declares tools rather than serving a model a tool whose handler Pi never runs.
+transform. Pi registers each tool with `pi.registerTool` when the first session
+starts: its action methods throw during extension loading, so that is the
+first moment a tool's name can be checked against every name Pi already holds.
+A tool registered there is declared on the first request. Pi has no unregister:
+a withdrawal re-registers the same name with `exposure: "hidden"`, which
+withdraws it from the model, and tack answers a call to the name with an error
+instead of reaching a stale handler.
 
-A rewrite keeps the agent's other input fields. On OpenCode the adapter spreads
-the input and replaces `command`; Pi requires the command to change in place.
+A shell rewrite keeps the agent's other input fields. On OpenCode the adapter
+spreads the input and replaces `command`; Pi requires the command to change in
+place. A whole-input rewrite replaces the call's input on both: OpenCode assigns
+it, and Pi mutates the input object its executor already holds.
+
 OpenCode's after event carries `Tool.Result`, whose model-facing text is
 `content` (a string, or text and file parts); `output` is structured output.
 

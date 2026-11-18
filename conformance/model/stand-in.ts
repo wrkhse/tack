@@ -65,6 +65,13 @@ export interface StandInOptions {
   readonly postToolDelayMs?: number;
   /** The tool a scripted turn calls; absent means the agent's own shell tool. */
   readonly call?: ScriptedCall;
+  /**
+   * Answers a request that ends with the person's prompt with the scripted
+   * call, even when the conversation already holds a tool result. The
+   * withdraw row needs one: its second prompt reaches a conversation that
+   * carries the first turn's result.
+   */
+  readonly callOnPrompt?: boolean;
 }
 
 /** A local OpenAI-compatible model that scripts every turn the suite needs. */
@@ -86,6 +93,7 @@ interface ModelState {
   readonly compactionMarker: string;
   readonly postToolDelayMs: number;
   readonly call: ScriptedCall | undefined;
+  readonly callOnPrompt: boolean;
   readonly requests: Array<ChatRequest>;
 }
 
@@ -196,7 +204,7 @@ const isToolBearing = (request: ChatRequest): boolean => (request.tools ?? []).l
  * marker, compared without case because each agent words its own summary
  * prompt. Every other request is classified by its tools and roles: a title
  * request has no tools, a finished turn carries a tool result, and anything
- * else gets one tool call.
+ * else gets one tool call, as does a prompt after a result when the row asks.
  */
 export const isCompactionRequest = (request: ChatRequest, marker: string): boolean => {
   const last = request.messages[request.messages.length - 1];
@@ -206,6 +214,19 @@ export const isCompactionRequest = (request: ChatRequest, marker: string): boole
   return JSON.stringify(last.content ?? "")
     .toLowerCase()
     .includes(marker.toLowerCase());
+};
+
+/**
+ * Whether this request is answered with another scripted call rather than the
+ * closing text. A conversation that already holds a tool result only gets one
+ * when a row asks for a call after the person's next prompt.
+ */
+const wantsCall = (state: ModelState, request: ChatRequest): boolean => {
+  if (!request.messages.some((message) => message.role === "tool")) {
+    return true;
+  }
+
+  return state.callOnPrompt && request.messages.at(-1)?.role === "user";
 };
 
 const turnFor = (state: ModelState, request: ChatRequest, tool: ShellTool): Turn => {
@@ -223,7 +244,7 @@ const turnFor = (state: ModelState, request: ChatRequest, tool: ShellTool): Turn
     return { lines: textTurn("title"), delayMs: 0 };
   }
 
-  if (request.messages.some((message) => message.role === "tool")) {
+  if (!wantsCall(state, request)) {
     return { lines: textTurn("done"), delayMs: state.postToolDelayMs };
   }
 
@@ -402,6 +423,7 @@ export const standInModel = (
       compactionMarker: options.compactionMarker ?? DEFAULT_COMPACTION_MARKER,
       postToolDelayMs: boundedDelay(options.postToolDelayMs),
       call: options.call,
+      callOnPrompt: options.callOnPrompt === true,
       requests: [],
     };
 

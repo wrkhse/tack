@@ -2,9 +2,11 @@ import { fileURLToPath } from "node:url";
 
 import { Cause, Duration, Effect, Exit, Option, Predicate } from "effect";
 import type {
+  AgentToolResult,
   BashToolCallEvent,
   ExtensionAPI,
   ExtensionContext,
+  ExtensionToolContext,
   InputEvent,
   InputEventResult,
   PowerShellToolCallEvent,
@@ -12,6 +14,7 @@ import type {
   SessionStartEvent,
   ToolCallEvent,
   ToolCallEventResult,
+  ToolDefinition,
   ToolResultEvent,
   TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -29,9 +32,10 @@ import type { HookContext, ToolCall } from "../hooks/tool-before.ts";
 import type { ResolvedPlugin } from "../plugin.ts";
 import type { AppendWhen, ModelRef, Outcome, SessionPort } from "../session.ts";
 import { sessionHandle } from "../session.ts";
-import type { ToolPort, ToolRegistry } from "../tools/registry.ts";
-import { createToolRegistry } from "../tools/registry.ts";
-import type { CompiledTool } from "../tools/tool.ts";
+import type { TakenTool, ToolPort, ToolRegistry } from "../tools/registry.ts";
+import { DuplicateTool, createToolRegistry } from "../tools/registry.ts";
+import type { CompiledTool, ToolCallInput, ToolCallResult, ToolContext } from "../tools/tool.ts";
+import { invokeTool } from "../tools/tool.ts";
 import { runBefore } from "./chain.ts";
 import { joinTextParts } from "./text.ts";
 
@@ -60,6 +64,8 @@ interface Attachment {
   readonly registration: Registration;
   readonly pi: ExtensionAPI;
   readonly tools: ToolRegistry;
+  /** Registers the plugin's tools once Pi's action methods are bound. */
+  readonly ready: () => void;
   readonly isEnded: () => boolean;
 }
 
@@ -98,13 +104,32 @@ function callOf(event: ToolCallEvent | ToolResultEvent): ToolCall {
   return { tool: "other", name, input };
 }
 
-/** Pi requires rewrites in place; no validation runs after the mutation. */
+/**
+ * Pi requires rewrites in place: its executor holds the input object it read,
+ * and no validation runs after the mutation. The shell keeps its other fields;
+ * a whole-input rewrite replaces them.
+ */
 function assignRewrite(event: ToolCallEvent, call: ToolCall): void {
-  if (call.tool !== "shell" || !isShellCall(event)) {
+  if (call.tool === "shell") {
+    if (isShellCall(event)) {
+      event.input.command = call.input.command;
+    }
+
     return;
   }
 
-  event.input.command = call.input.command;
+  const input = event.input;
+  const rewrite = call.input;
+
+  if (!Predicate.isObject(input) || !Predicate.isObject(rewrite)) {
+    return;
+  }
+
+  for (const key of Object.keys(input)) {
+    Reflect.deleteProperty(input, key);
+  }
+
+  Object.assign(input, rewrite);
 }
 
 /** The outcome a native call that resolved reports. */
@@ -277,36 +302,205 @@ function contextOf(attachment: Attachment, context: ExtensionContext): HookConte
   };
 }
 
-/**
- * Pi's own tool registration lands with its slice. Until then a Pi load
- * refuses a plugin that declares tools rather than serving a model a tool
- * whose handler Pi never runs.
- */
-function piTools(plugin: ResolvedPlugin): ToolRegistry {
-  const refuse = (tools: ReadonlyArray<CompiledTool>): void => {
-    const [first] = tools;
+/** Pi's view of one tack tool: the definition unchanged, and an execute that maps the result. */
+function nativePiTool(tool: CompiledTool, scope: () => Attachment): ToolDefinition {
+  return {
+    name: tool.name,
+    label: tool.name,
+    description: tool.description,
+    parameters: tool.input,
+    execute: (toolCallId, params, signal, _onUpdate, context) =>
+      runPiTool(tool, { input: params }, scope(), toolCallId, signal, context),
+  };
+}
 
-    throw new Error(
-      `tack: Pi does not register tools yet, and plugin "${plugin.name}" declares "${first?.name ?? "a tool"}"`,
+/** Runs one tool and maps tack's result onto Pi's. */
+function runPiTool(
+  tool: CompiledTool,
+  call: ToolCallInput,
+  attachment: Attachment,
+  toolCallId: string,
+  signal: AbortSignal | undefined,
+  context: ExtensionToolContext,
+): Promise<AgentToolResult> {
+  const sessionId = context.sessionManager.getSessionId();
+
+  const ctx: ToolContext = {
+    callId: toolCallId,
+    signal,
+    session: sessionHandle(piSessionPort(attachment, context), sessionId),
+    tools: attachment.tools,
+  };
+
+  return Effect.runPromise(invokeTool(tool, call, ctx)).then(toPiResult);
+}
+
+/**
+ * tack's result in Pi's shape: every content string becomes a text block,
+ * `details` stays details, and `isError` reports a failure the model reads.
+ */
+function toPiResult(result: ToolCallResult): AgentToolResult {
+  const content = result.content.map((text) => ({ type: "text" as const, text }));
+  const details = result.details;
+
+  return result.isError === true ? { content, details, isError: true } : { content, details };
+}
+
+/** The result a call to a withdrawn name answers with. */
+function withdrawnResult(name: string): AgentToolResult {
+  return {
+    content: [{ type: "text", text: `tack: tool "${name}" was withdrawn` }],
+    details: undefined,
+    isError: true,
+  };
+}
+
+/**
+ * Pi cannot unregister a tool, so withdrawal re-registers the same name hidden:
+ * the name stays registered, and a call to it answers an error rather than
+ * reaching the definition Pi keeps. Leaving the original in place would leave
+ * a stale handler the model could still reach, so the name must stay
+ * remembered and carry the refusal.
+ */
+function withdrawnTool(tool: CompiledTool): ToolDefinition {
+  return {
+    name: tool.name,
+    label: tool.name,
+    description: tool.description,
+    parameters: tool.input,
+    exposure: "hidden",
+    execute: () => Promise.resolve(withdrawnResult(tool.name)),
+  };
+}
+
+/**
+ * Every name Pi's registry already holds besides the plugin's own: the agent's
+ * built-in tools, any extension loaded before, and every other tack plugin in
+ * the process scope.
+ */
+function takenPiTools(
+  slot: HostSlot,
+  plugin: ResolvedPlugin,
+  existing: ReadonlyArray<{ readonly name: string }> = [],
+): ReadonlyArray<TakenTool> {
+  const fromPlugins = slot
+    .plugins(PI_SCOPE)
+    .filter((other) => other.name !== plugin.name)
+    .flatMap((other) =>
+      other.tools.map((tool) => ({ name: tool.name, source: `plugin "${other.name}"` })),
     );
+
+  const fromAgent = existing.map((tool) => ({ name: tool.name, source: "the agent's own tools" }));
+
+  return [...fromPlugins, ...fromAgent];
+}
+
+/** Refuses a tool whose name Pi's registry already holds, before any `registerTool`. */
+function refuseHeld(tools: ReadonlyArray<CompiledTool>, live: ReadonlyArray<TakenTool>): void {
+  for (const tool of tools) {
+    const held = live.find((other) => other.name === tool.name);
+
+    if (held !== undefined) {
+      throw new DuplicateTool({
+        tool: tool.name,
+        scope: PI_SCOPE,
+        existing: held.source,
+        incoming: SOURCE,
+      });
+    }
+  }
+}
+
+/** One Pi plugin's registry, and the flush that registers its tools. */
+interface PiTools {
+  readonly registry: ToolRegistry;
+  /** Registers every tool the plugin holds; the first call does the work. */
+  readonly ready: () => void;
+}
+
+/**
+ * The registry for one Pi plugin. The declared tools wait for the first
+ * `ready` call, because Pi's action methods throw during extension loading and
+ * only a bound session can report the names its registry holds. After that,
+ * each install is one `registerTool` and a withdrawal re-registers the name
+ * hidden. Pi registers synchronously, so nothing has to settle.
+ */
+function piTools(
+  plugin: ResolvedPlugin,
+  pi: ExtensionAPI,
+  slot: HostSlot,
+  scope: () => Attachment,
+): PiTools {
+  const installed = new Map<string, CompiledTool>();
+  const pending: Array<CompiledTool> = [];
+  let ready = false;
+
+  const register = (tool: CompiledTool): void => {
+    pi.registerTool(nativePiTool(tool, scope));
+    installed.set(tool.name, tool);
+  };
+
+  const drop = (name: string): void => {
+    const index = pending.findIndex((tool) => tool.name === name);
+
+    if (index >= 0) {
+      pending.splice(index, 1);
+    }
   };
 
   const port: ToolPort = {
-    install: refuse,
-    withdraw: () => undefined,
+    install: (tools) => {
+      if (!ready) {
+        pending.push(...tools);
+
+        return;
+      }
+
+      for (const tool of tools) {
+        register(tool);
+      }
+    },
+    withdraw: (name) => {
+      const tool = installed.get(name);
+
+      if (tool === undefined) {
+        drop(name);
+
+        return;
+      }
+
+      pi.registerTool(withdrawnTool(tool));
+    },
     settled: () => Promise.resolve(),
   };
 
-  return createToolRegistry(
+  const registry = createToolRegistry(
     {
       plugin: plugin.name,
       scope: PI_SCOPE,
       source: SOURCE,
       hasSession: true,
       port,
+      taken: takenPiTools(slot, plugin),
     },
     plugin.tools,
   );
+
+  const flush = (): void => {
+    if (ready) {
+      return;
+    }
+
+    ready = true;
+
+    refuseHeld(pending, takenPiTools(slot, plugin, pi.getAllTools()));
+
+    for (const tool of pending) {
+      register(tool);
+    }
+  };
+
+  return { registry, ready: flush };
 }
 
 /** A session Pi started from an existing one is the session tack inherited. */
@@ -328,12 +522,19 @@ function responseReasonOf(outcome: TurnEndEvent["outcome"]): ResponseReason {
   return outcome;
 }
 
-/** Reports the session Pi has just started. */
+/**
+ * Registers the plugin's tools, then reports the session Pi has just started.
+ * Pi has bound its action methods by now, so `getAllTools` names every tool in
+ * the registry and a collision is refused before any `registerTool`; during
+ * the factory that call throws, which is why registration waits for this.
+ */
 function handleSessionStart(
   attachment: Attachment,
   event: SessionStartEvent,
   context: ExtensionContext,
 ): void | Promise<void> {
+  attachment.ready();
+
   if (!attachment.slot.isLeader(attachment.registration)) {
     return;
   }
@@ -488,14 +689,49 @@ function registeredIn(slot: HostSlot, plugin: ResolvedPlugin): Registration {
  * Registers one plugin's hooks for the process scope. Pi's factory is
  * synchronous, so the slot lookup and registration run here; a name already
  * live in the scope throws with the duplicate's message.
+ *
+ * The tools are built on the first session start instead: Pi's action methods
+ * throw during extension loading, so only then can the live tool list refuse a
+ * name before Pi registers anything. A refused tool set also ends the slot
+ * entry, leaving the refused plugin's hooks inert.
  */
 function attach(plugin: ResolvedPlugin, pi: ExtensionAPI): void {
   const slot: HostSlot = Effect.runSync(hostSlot());
-  const tools = piTools(plugin);
   const registration = registeredIn(slot, plugin);
+
+  let attachment: Attachment | undefined;
+
+  const scope = (): Attachment => {
+    if (attachment === undefined) {
+      throw new Error("tack: a Pi tool call arrived before its registration finished");
+    }
+
+    return attachment;
+  };
+
+  let built: PiTools;
+
+  try {
+    built = piTools(plugin, pi, slot, scope);
+  } catch (cause) {
+    registration.dispose();
+
+    throw cause;
+  }
+
+  const ready = (): void => {
+    try {
+      built.ready();
+    } catch (cause) {
+      registration.dispose();
+
+      throw cause;
+    }
+  };
+
   let ended = false;
 
-  const attachment: Attachment = { slot, registration, pi, tools, isEnded: () => ended };
+  attachment = { slot, registration, pi, tools: built.registry, ready, isEnded: () => ended };
 
   // Pi has no permission layer, so nothing is registered for permissionAsked:
   // its fidelity row is `unsupported`.

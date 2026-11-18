@@ -18,7 +18,7 @@ export const monitorInput = {
  * recorder proves the handler ran inside the agent rather than merely that a
  * result arrived.
  */
-const monitorCreate = tool<{ key: string }>({
+export const monitorCreate = tool<{ key: string }>({
   name: "monitor_create",
   description: "Start watching a Jira issue",
   input: monitorInput,
