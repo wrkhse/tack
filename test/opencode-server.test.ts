@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { expect, it } from "@effect/vitest";
-import { Cause, Effect, Exit, Schema, Stream, type Scope } from "effect";
+import { Cause, Effect, Exit, Predicate, Schema, Stream, type Scope } from "effect";
 
+import { waitForEvidence } from "../conformance/harness/driver.ts";
 import { opencodeServer, type OpenCodeServer } from "../conformance/harness/opencode-server.ts";
 import type { Sandbox } from "../conformance/harness/sandbox.ts";
+import { createWatchedSession, watchSession } from "../conformance/harness/t2-opencode.ts";
 
 /**
  * A plain node:http server standing in for `opencode serve`: it records every
@@ -48,6 +50,7 @@ const FAKE = [
   "};",
   "",
   "let pluginPolls = 0;",
+  "const subscribers = new Set();",
   "",
   "const handle = (request, response, body) => {",
   '  const url = new URL(request.url, "http://127.0.0.1");',
@@ -95,6 +98,14 @@ const FAKE = [
   "      return;",
   "    }",
   "",
+  '    if (mode() === "live") {',
+  "      subscribers.add(response);",
+  '      response.on("close", () => subscribers.delete(response));',
+  '      event(response, { type: "server.connected", data: {} });',
+  "",
+  "      return;",
+  "    }",
+  "",
   '    event(response, { type: "session.idle", data: { sessionID: "session-1" } });',
   '    event(response, { type: "session.step.ended", data: { sessionID: "session-1" } });',
   "    response.end();",
@@ -123,6 +134,12 @@ const FAKE = [
   "  }",
   "",
   '  if (request.method === "DELETE" && id !== undefined && action === "") {',
+  '    if (mode() === "live") {',
+  "      for (const subscriber of subscribers) {",
+  '        event(subscriber, { type: "session.deleted", data: { sessionID: id } });',
+  "      }",
+  "    }",
+  "",
   "    response.writeHead(204);",
   "    response.end();",
   "",
@@ -267,7 +284,7 @@ const fakeServer = (
 
 const withServer = <A>(
   env: Readonly<Record<string, string>>,
-  body: (fake: MockServer, server: OpenCodeServer) => Effect.Effect<A>,
+  body: (fake: MockServer, server: OpenCodeServer) => Effect.Effect<A, never, Scope.Scope>,
 ): Effect.Effect<A> =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -288,6 +305,19 @@ const recorded = (log: string): ReadonlyArray<RequestRecord> =>
 /** The user and password a Basic auth header carries. */
 const credentials = (authorization: string): string =>
   Buffer.from(authorization.replace("Basic ", ""), "base64").toString("utf8");
+
+/** One event's type, when it carries one. */
+const eventType = (event: Schema.Json): string | null => {
+  if (!Predicate.isObject(event)) return null;
+
+  const type = event["type"];
+
+  return Predicate.isString(type) ? type : null;
+};
+
+/** Whether the witness holds the server's delete of the session. */
+const sawDelete = (frames: ReadonlyArray<Schema.Json>): boolean =>
+  frames.some((frame) => eventType(frame) === "session.deleted");
 
 it.live("sends Basic auth and the exact request of each action", () =>
   withServer({}, (fake, server) =>
@@ -406,6 +436,63 @@ it.live("streams only the requested event types and ends with the server's reply
         { type: "session.idle", data: { sessionID: "session-1" } },
         { type: "session.step.ended", data: { sessionID: "session-1" } },
       ]);
+    }),
+  ),
+);
+
+it.live("opens the witness before the session, so a delete cannot outrun it", () =>
+  withServer({}, (fake, server) =>
+    Effect.gen(function* () {
+      yield* fake.setMode("live");
+
+      const created = yield* createWatchedSession(server, "/work/project");
+
+      yield* server.deleteSession(created.id);
+
+      yield* waitForEvidence(
+        "the session.deleted frame",
+        Effect.sync(() => ({
+          ready: sawDelete(created.witness.frames()),
+          seen: "frames: " + created.witness.frames().length,
+        })),
+        2_000,
+      );
+
+      expect(created.witness.frames()).toEqual([
+        { type: "session.deleted", data: { sessionID: "session-1" } },
+      ]);
+      expect(recorded(fake.log).map((request) => request.method + " " + request.url)).toEqual([
+        "GET /api/event",
+        "POST /api/session",
+        "DELETE /api/session/session-1",
+      ]);
+    }),
+  ),
+);
+
+it.live("does not replay a delete frame published before the stream opened", () =>
+  withServer({}, (fake, server) =>
+    Effect.gen(function* () {
+      yield* fake.setMode("live");
+
+      const created = yield* server.createSession({ directory: "/work/project" });
+
+      yield* server.deleteSession(created.id);
+
+      const late = yield* watchSession(server);
+
+      const missed = yield* Effect.exit(
+        waitForEvidence(
+          "the session.deleted frame",
+          Effect.sync(() => ({
+            ready: sawDelete(late.frames()),
+            seen: "frames: " + late.frames().length,
+          })),
+          500,
+        ),
+      );
+
+      expect(Exit.isFailure(missed)).toBe(true);
     }),
   ),
 );

@@ -1,4 +1,4 @@
-import { DateTime, Effect, Predicate, Schema, Stream, type Scope } from "effect";
+import { DateTime, Deferred, Effect, Predicate, Schema, Stream, type Scope } from "effect";
 
 import type { StandIn } from "../model/stand-in.ts";
 import type { SessionScenario } from "../session-scenarios.ts";
@@ -44,6 +44,9 @@ const TURN_POLL_MS = 100;
 
 /** How long the delete's own event may take to arrive. */
 const DELETE_TIMEOUT_MS = 10_000;
+
+/** How long the server may take to answer the witness stream. */
+const OPEN_TIMEOUT_MS = 10_000;
 
 /** The most of one frame a failure message quotes. */
 const MAX_QUOTED_CHARS = 400;
@@ -101,10 +104,23 @@ interface WitnessStream {
   deleteAt?: string;
 }
 
-/** Records every connection and every frame of one witness stream. */
-const watchStream = (stream: WitnessStream): EventStreamObserver => ({
+/** The session a witness attributes its frames to; unset until the server creates it. */
+interface WitnessTarget {
+  id?: string;
+}
+
+/**
+ * Records every connection and every frame of one witness stream, and completes
+ * `opened` on the first, so a caller can wait for the subscription to exist.
+ */
+const watchStream = (
+  stream: WitnessStream,
+  opened: Deferred.Deferred<void>,
+): EventStreamObserver => ({
   opened: (at) => {
     stream.connections.push({ openedAt: at });
+
+    Deferred.doneUnsafe(opened, Effect.void);
   },
   closed: (at) => {
     const open = stream.connections.findLast((connection) => connection.closedAt === undefined);
@@ -165,22 +181,100 @@ interface Witness {
  */
 const trackEvents = (
   server: OpenCodeServer,
-  sessionID: string,
+  target: WitnessTarget,
   mine: Array<Schema.Json>,
   recent: Array<Schema.Json>,
   stream: WitnessStream,
+  opened: Deferred.Deferred<void>,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.forkScoped(
-    server.events([...WITNESS_TYPES], watchStream(stream)).pipe(
+    server.events([...WITNESS_TYPES], watchStream(stream, opened)).pipe(
       Stream.runForEach((event) =>
         Effect.sync(() => {
           remember(recent, event);
 
-          if (dataField(event, "sessionID") === sessionID) remember(mine, event);
+          if (target.id !== undefined && dataField(event, "sessionID") === target.id) {
+            remember(mine, event);
+          }
         }),
       ),
     ),
   ).pipe(Effect.asVoid);
+
+/**
+ * A witness the server has answered, carrying the session it attributes later
+ * frames to. It opens before the session exists: the subscription replays
+ * nothing, so a frame published before it registers is lost for good.
+ */
+export interface WatchedSession extends Witness {
+  /** Attributes frames from now on to this session. */
+  readonly attribute: (sessionID: string) => void;
+}
+
+/**
+ * Opens the witness stream and waits until the server has answered it. Call
+ * this before the session, or before the first action that can end one: the
+ * wait is the guarantee that the subscription exists before any frame.
+ */
+export const watchSession = (
+  server: OpenCodeServer,
+): Effect.Effect<WatchedSession, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const target: WitnessTarget = {};
+    const mine: Array<Schema.Json> = [];
+    const recent: Array<Schema.Json> = [];
+    const stream: WitnessStream = { connections: [], frames: 0 };
+    const opened = yield* Deferred.make<void>();
+
+    yield* trackEvents(server, target, mine, recent, stream, opened);
+
+    yield* Deferred.await(opened).pipe(
+      Effect.timeoutOrElse({
+        duration: OPEN_TIMEOUT_MS,
+        orElse: () =>
+          Effect.die(
+            new Error(
+              "tack-conformance: the OpenCode event stream did not open within " +
+                OPEN_TIMEOUT_MS +
+                " ms\n" +
+                describeWitnessStream(stream),
+            ),
+          ),
+      }),
+    );
+
+    return {
+      frames: () => [...mine],
+      recent: () => [...recent],
+      beginDelete: DateTime.now.pipe(
+        Effect.map((now) => {
+          stream.deleteAt = DateTime.formatIso(now);
+        }),
+      ),
+      stream: () => describeWitnessStream(stream),
+      attribute: (sessionID) => {
+        target.id = sessionID;
+      },
+    };
+  });
+
+/**
+ * Creates the session after its witness is open, then attributes it. The order
+ * is the guarantee: no frame about the session can be published before the
+ * subscription exists, and every later frame is kept.
+ */
+export const createWatchedSession = (
+  server: OpenCodeServer,
+  directory: string,
+): Effect.Effect<{ readonly id: string; readonly witness: WatchedSession }, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const witness = yield* watchSession(server);
+    const created = yield* server.createSession({ directory });
+
+    witness.attribute(created.id);
+
+    return { id: created.id, witness };
+  });
 
 /**
  * The outcome the session reports once the turn that began after `before` has
@@ -336,25 +430,10 @@ const runOnSession = (
   sessionID: string,
   prepared: PreparedOpenCode,
   scenario: SessionScenario,
+  witness: WatchedSession,
 ): Effect.Effect<SessionRun, MarkerTimeout, Scope.Scope> =>
   Effect.gen(function* () {
     const settled: Array<SettledSignal> = [];
-    const mine: Array<Schema.Json> = [];
-    const recent: Array<Schema.Json> = [];
-    const stream: WitnessStream = { connections: [], frames: 0 };
-
-    yield* trackEvents(server, sessionID, mine, recent, stream);
-
-    const witness: Witness = {
-      frames: () => [...mine],
-      recent: () => [...recent],
-      beginDelete: DateTime.now.pipe(
-        Effect.map((now) => {
-          stream.deleteAt = DateTime.formatIso(now);
-        }),
-      ),
-      stream: () => describeWitnessStream(stream),
-    };
 
     const driver = driverFor({
       server,
@@ -389,9 +468,11 @@ export const runOpenCodeSessionScenario = (
 
     yield* server.awaitPlugin(prepared.box.projectDir);
 
-    const created = yield* server.createSession({ directory: prepared.box.projectDir });
+    // The witness opens before the session, so the server's subscription is in
+    // place before the first frame about it can be published.
+    const created = yield* createWatchedSession(server, prepared.box.projectDir);
 
-    return yield* runOnSession(server, created.id, prepared, scenario);
+    return yield* runOnSession(server, created.id, prepared, scenario, created.witness);
   });
 
 /**
@@ -410,9 +491,11 @@ export const runOpenCodeResumedScenario = (
     );
 
     const server = yield* opencodeServer(prepared.box);
-    const created = yield* server.createSession({ directory: prepared.box.projectDir });
+
+    // As in the loaded path, the witness is open before the session exists.
+    const created = yield* createWatchedSession(server, prepared.box.projectDir);
 
     yield* loadOpenCodePlugins(prepared, server);
 
-    return yield* runOnSession(server, created.id, prepared, scenario);
+    return yield* runOnSession(server, created.id, prepared, scenario, created.witness);
   });
