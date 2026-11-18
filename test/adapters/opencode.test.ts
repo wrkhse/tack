@@ -1246,6 +1246,56 @@ it.effect("restarts a failed subscription and keeps reporting", () =>
   }),
 );
 
+it.effect("counts subscription failures from zero again after a delivered event", () =>
+  Effect.gen(function* () {
+    const observed = quietConsole();
+    const seen: string[] = [];
+
+    const fake = fakeContext("/work/consecutive");
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: () => {
+        seen.push("created");
+        fake.subscriptionFailures.remaining = 4;
+      },
+    }));
+
+    fake.subscriptionFailures.remaining = 1;
+    fake.events.push({
+      type: "session.created",
+      location: { directory: "/work/consecutive" },
+      data: { sessionID: "s1" },
+    });
+
+    vi.useFakeTimers();
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(3_100));
+
+    vi.useRealTimers();
+
+    const attempts = observed
+      .lines()
+      .filter((line) => line.includes("tack: OpenCode event subscription failed; retrying"))
+      .map((line) => /\(attempt (\d+) of \d+\)/.exec(line)?.[1]);
+
+    // One failure, then a delivered event, then four more: the new run counts
+    // from zero, so its last failure is the fourth attempt, not the fifth, and
+    // reporting continues.
+    expect(attempts).toEqual(["1", "1", "2", "3", "4"]);
+    expect(fake.subscriptions).toHaveLength(6);
+    expect(seen).toEqual(["created"]);
+    expect(
+      observed.lines().filter((line) => line.includes("lifecycle reporting stopped")),
+    ).toHaveLength(0);
+
+    yield* release(cleanup);
+  }),
+);
+
 it.effect("stops restarting after five failed subscriptions, saying so", () =>
   Effect.gen(function* () {
     const observed = quietConsole();

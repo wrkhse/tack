@@ -499,7 +499,7 @@ function afterDelay(ms: number, signal: AbortSignal): Promise<void> {
   return run(Effect.raceFirst(Effect.sleep(Duration.millis(ms)), aborted(signal)));
 }
 
-/** How many times a failed event subscription is restarted before reporting stops. */
+/** How many times in a row a failed event subscription is restarted before reporting stops. */
 const RESUBSCRIBE_ATTEMPTS = 5;
 
 /** The first restart delay; each later attempt doubles it. */
@@ -508,8 +508,9 @@ const RESUBSCRIBE_DELAY_MS = 100;
 /**
  * Subscribes to the session events and owns the abort that ends the stream.
  * A report that fails is logged and the pump continues; a subscription that
- * fails is restarted up to `RESUBSCRIBE_ATTEMPTS` times, so lifecycle
- * reporting resumes after a transient failure instead of ending silently.
+ * fails `RESUBSCRIBE_ATTEMPTS` times in a row is restarted, counting from
+ * zero again after every delivered event, so lifecycle reporting resumes
+ * after a transient failure instead of ending silently.
  */
 function watchEvents(
   reports: SessionReports,
@@ -572,12 +573,14 @@ function watchEvents(
           return;
         }
 
+        // A delivered event proves the subscription healthy again, so a later
+        // failure is the first of a new run rather than the next of this one.
         return Promise.resolve()
           .then(() => reports.event(step.value))
           .catch((cause) =>
             run(Effect.logWarning(`tack: OpenCode event handling failed: ${messageOf(cause)}`)),
           )
-          .then(() => pump(attempt));
+          .then(() => pump(0));
       },
       (cause): void | Promise<void> => resume(cause, attempt + 1),
     );

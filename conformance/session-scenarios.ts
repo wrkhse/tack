@@ -618,9 +618,8 @@ const finishedAborted: SessionScenario = {
 
 /**
  * The retry-veto plugin makes the first failed request terminal. Without it
- * OpenCode spends its retry budget: ten retries at 2, 4 and 8 s, then 10 s
- * each, about 84 s, and jitter can take that to about 101 s
- * (`packages/core/src/model-retry.ts`).
+ * OpenCode spends a retry budget of about 67–101 seconds with jitter
+ * (`packages/core/src/model-retry.ts:23`).
  */
 const finishedError: SessionScenario = {
   name: "t2 finished error",
