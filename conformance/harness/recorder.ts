@@ -7,14 +7,15 @@ import { Effect } from "effect";
 const SHIM = "git";
 
 /**
- * The shim records every push and delegates every other git command to the real
- * git, so a scenario proves what the agent would have run.
+ * The shim records every push and every tool handler's own `tack-tool` call,
+ * and delegates every other git command to the real git, so a scenario proves
+ * what the agent would have run.
  */
 const shimScript = (): string =>
   [
     "#!/bin/sh",
-    "# tack-conformance: a git that records pushes and delegates the rest.",
-    'if [ "$1" = "push" ]; then',
+    "# tack-conformance: a git that records pushes and tool calls and delegates the rest.",
+    'if [ "$1" = "push" ] || [ "$1" = "tack-tool" ]; then',
     '  echo "$*" >> "$TACK_RECORDER"',
     '  echo "recorded"',
     "  exit 0",

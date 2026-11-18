@@ -3,9 +3,14 @@ import { Effect } from "effect";
 
 import { runSessionIdle } from "../src/hooks/session-idle.ts";
 import type { HookContext } from "../src/hooks/tool-before.ts";
-import { logCapture, resolvedPlugin, sessionFor } from "./helpers.ts";
+import { logCapture, noTools, resolvedPlugin, sessionFor } from "./helpers.ts";
 
-const ctx: HookContext = { agent: "pi", sessionId: "session-1", session: sessionFor("s1") };
+const ctx: HookContext = {
+  agent: "pi",
+  sessionId: "session-1",
+  session: sessionFor("s1"),
+  tools: noTools(),
+};
 
 afterEach(() => {
   vi.restoreAllMocks();

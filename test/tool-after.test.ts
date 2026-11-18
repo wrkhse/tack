@@ -5,9 +5,14 @@ import type { ResolvedPlugin } from "../src/plugin.ts";
 import type { HookContext, ToolCall } from "../src/hooks/tool-before.ts";
 import type { ToolResult } from "../src/hooks/tool-after.ts";
 import { runToolAfter } from "../src/hooks/tool-after.ts";
-import { sessionFor } from "./helpers.ts";
+import { noTools, sessionFor } from "./helpers.ts";
 
-const ctx: HookContext = { agent: "opencode", sessionId: "session-1", session: sessionFor("s1") };
+const ctx: HookContext = {
+  agent: "opencode",
+  sessionId: "session-1",
+  session: sessionFor("s1"),
+  tools: noTools(),
+};
 
 const call: ToolCall = {
   tool: "shell",
@@ -32,6 +37,7 @@ function plugin(definition: Partial<ResolvedPlugin> & { readonly name: string })
     responseFinished: undefined,
     sessionIdle: undefined,
     permissionAsked: undefined,
+    tools: [],
     ...definition,
   };
 }

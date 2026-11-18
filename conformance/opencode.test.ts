@@ -12,20 +12,30 @@ import {
   requireSelection,
   selectedRows,
 } from "./suite.ts";
+import { toolScenarios } from "./tool-scenarios.ts";
 
 const AGENT = "opencode";
 const PACKAGE = "@opencode/cli";
 
 const scenarioRows = selectedRows(scenarios);
 const sessionRows = selectedRows(sessionScenariosFor(AGENT));
+const toolRows = selectedRows(toolScenarios);
 
-requireSelection(AGENT, [scenarioRows, sessionRows]);
+requireSelection(AGENT, [scenarioRows, sessionRows, toolRows]);
 
 it.live(AGENT + " reports the pinned version", () =>
   checkPinnedVersion(AGENT, PACKAGE, (box) => box.opencode),
 );
 
 for (const scenario of scenarioRows) {
+  for (const iteration of iterations()) {
+    it.live(iteration.name(AGENT + ": " + scenario.name), () =>
+      checkScenario(AGENT, runOpenCodeScenario, scenario),
+    );
+  }
+}
+
+for (const scenario of toolRows) {
   for (const iteration of iterations()) {
     it.live(iteration.name(AGENT + ": " + scenario.name), () =>
       checkScenario(AGENT, runOpenCodeScenario, scenario),

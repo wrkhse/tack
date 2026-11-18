@@ -3,13 +3,15 @@
 The suite runs the real OpenCode and Pi CLIs and proves that tack's hooks reach
 each agent and combine the same way in both. No real model is called: a
 scripted server on loopback answers every request, and a `git` shim first on
-`PATH` records the commands the agent tried to run.
+`PATH` records the commands the agent tried to run, including a tool handler's
+own `git tack-tool` call.
 
 A row runs in the mode its steps need. T1's nine rows run one prompt to
 completion in a one-shot CLI; T2's fifteen run one long-lived session, because
 they need a second turn, an action after startup, or an end the suite controls.
 One T2 row runs in OpenCode only, because Pi has no session created before its
-extension loaded.
+extension loaded. T3's four tool rows also run one prompt to completion, in
+OpenCode only: Pi's adapter registers tools in a later slice.
 
 Run it in CI, or in a disposable container. Never on a development machine:
 each test starts the agent CLIs, which are that machine's own agents.
@@ -225,6 +227,10 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 | t2 interrupt             | `interrupt-action`            | accepted, and the turn settles interrupted                                   |
 | t2 model                 | `model-switch`                | accepted; the stand-in sees `scripted-2`                                     |
 | t2 compact               | `compact-action`              | accepted; Pi asks once, OpenCode twice (its summary-template nudge)          |
+| t3 list                  | `tool-create`                 | the first request declares `monitor_create` with its description and schema  |
+| t3 call                  | `tool-create`                 | `tack-tool monitor_create PROJ-1` recorded                                   |
+| t3 result                | `tool-create`                 | a tool message's content is `watching PROJ-1`                                |
+| t3 bad input             | `tool-create`                 | a tool message names `key`; nothing recorded                                 |
 
 ## Layout
 
@@ -247,6 +253,7 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 | `plugins/`                   | the tack plugins, entry files, and the load marker |
 | `plugins/t2/`                | one plugin per long-lived row                      |
 | `scenarios.ts`               | the one-shot table, as data and checks             |
+| `tool-scenarios.ts`          | T3's tool rows, as data and checks                 |
 | `session-scenarios.ts`       | the long-lived table, as data and checks           |
 | `suite.ts`                   | the checks both agents' tests share                |
 | `opencode.test.ts`           | the version check and every scenario, in OpenCode  |

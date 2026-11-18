@@ -5,9 +5,15 @@ import type { ResolvedPlugin } from "../src/plugin.ts";
 import type { HookContext } from "../src/hooks/tool-before.ts";
 import type { Prompt } from "../src/hooks/prompt-sent.ts";
 import { APPEND_CAP_BYTES, runPromptSent } from "../src/hooks/prompt-sent.ts";
-import { sessionFor } from "./helpers.ts";
+import { noTools, sessionFor } from "./helpers.ts";
 
-const ctx: HookContext = { agent: "pi", sessionId: "session-1", session: sessionFor("s1") };
+const ctx: HookContext = {
+  agent: "pi",
+  sessionId: "session-1",
+  session: sessionFor("s1"),
+  tools: noTools(),
+};
+
 const prompt: Prompt = { text: "push it" };
 
 function plugin(definition: Partial<ResolvedPlugin> & { readonly name: string }): ResolvedPlugin {
@@ -24,6 +30,7 @@ function plugin(definition: Partial<ResolvedPlugin> & { readonly name: string })
     responseFinished: undefined,
     sessionIdle: undefined,
     permissionAsked: undefined,
+    tools: [],
     ...definition,
   };
 }

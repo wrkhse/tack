@@ -4,6 +4,8 @@ import { Logger } from "effect";
 import type { ResolvedPlugin } from "../src/plugin.ts";
 import type { Outcome, Session, SessionPort } from "../src/session.ts";
 import { sessionHandle } from "../src/session.ts";
+import type { ToolRegistry } from "../src/tools/registry.ts";
+import { createToolRegistry } from "../src/tools/registry.ts";
 
 /** What an action reports when the agent took it. */
 function accepted(): Outcome {
@@ -21,6 +23,24 @@ const accepting: SessionPort = {
 /** The session a runner test's hook context carries; it only passes it through. */
 export function sessionFor(sessionID: string): Session {
   return sessionHandle(accepting, sessionID);
+}
+
+/** A registry over no namespace, for a hook test that never adds a tool. */
+export function noTools(): ToolRegistry {
+  return createToolRegistry(
+    {
+      plugin: "test",
+      scope: "test",
+      source: "test",
+      hasSession: true,
+      port: {
+        install: () => undefined,
+        withdraw: () => undefined,
+        settled: () => Promise.resolve(),
+      },
+    },
+    [],
+  );
 }
 
 interface QuietConsole {
@@ -51,6 +71,7 @@ export function resolvedPlugin(
     responseFinished: undefined,
     sessionIdle: undefined,
     permissionAsked: undefined,
+    tools: [],
     ...definition,
   };
 }

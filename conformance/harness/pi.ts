@@ -81,7 +81,7 @@ const piArgs = (bundles: ReadonlyArray<string>): ReadonlyArray<string> => [
 export const runPiScenario = (scenario: Scenario): Effect.Effect<AgentRun, never, Scope.Scope> =>
   Effect.gen(function* () {
     const box = yield* sandbox;
-    const model = yield* standInModel("bash");
+    const model = yield* standInModel("bash", scenario.standIn);
 
     const bundles = yield* bundleScenarioPlugins(
       box.dir,

@@ -24,6 +24,7 @@ const safePush: ResolvedPlugin = {
   responseFinished: undefined,
   sessionIdle: undefined,
   permissionAsked: undefined,
+  tools: [],
 };
 
 const safePushReplacement: ResolvedPlugin = { ...safePush, priority: 5 };

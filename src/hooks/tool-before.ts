@@ -2,17 +2,19 @@ import { Data, Effect, Schema } from "effect";
 
 import type { Agent, ResolvedPlugin } from "../plugin.ts";
 import type { Session } from "../session.ts";
+import type { ToolRegistry } from "../tools/registry.ts";
 import { HandlerFailed, callHandler } from "./budget.ts";
 import { byPriority } from "./order.ts";
 
 /**
  * What a hook knows about the run it is part of: the agent, the session's id,
- * and the handle that acts on that session.
+ * the handle that acts on that session, and the registry its tools live in.
  */
 export interface HookContext {
   readonly agent: Agent;
   readonly sessionId: string;
   readonly session: Session;
+  readonly tools: ToolRegistry;
 }
 
 /** The shell tool's one normalized input, whatever the agent calls the tool. */

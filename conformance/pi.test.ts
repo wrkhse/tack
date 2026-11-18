@@ -19,6 +19,9 @@ const PACKAGE = "@earendil-works/pi-coding-agent";
 const scenarioRows = selectedRows(scenarios);
 const sessionRows = selectedRows(sessionScenariosFor(AGENT));
 
+// T3's tool rows are OpenCode-only until the Pi adapter registers tools. Pi has
+// none of them on purpose: a filter that selects only one fails loudly here
+// instead of passing with nothing checked.
 requireSelection(AGENT, [scenarioRows, sessionRows]);
 
 it.live(AGENT + " reports the pinned version", () =>

@@ -22,7 +22,7 @@ function resolveFor<Options>(
   options: Options,
   agent: Agent,
 ): ResolvedPlugin {
-  const exit = Effect.runSyncExit(resolvePlugin(factory(options, { agent })));
+  const exit = Effect.runSyncExit(resolvePlugin(factory(options, { agent }), agent));
 
   if (Exit.isSuccess(exit)) {
     return exit.value;
