@@ -35,6 +35,31 @@ export const opencodeFidelity: Fidelity = {
       how: "`execute.after`",
       source: source("packages/core/src/tool.ts#L166-L181"),
     },
+    "tool.register": {
+      fidelity: "native",
+      how: "`ctx.tool.transform((editor) => editor.add(tool))` registers a definition for the next request's snapshot; a transform is synchronous and may run in `setup` (`@opencode/plugin` `dist/promise/tool.d.ts` L22–34, L59–67; Server plugins → API → Tools)",
+      source: source("packages/plugin/src/promise/tool.ts#L22-L34"),
+    },
+    "tool.remove": {
+      fidelity: "native",
+      how: "`editor.remove(id)` in a later transform, or the adding registration's `dispose()`; disposal replays the remaining transforms, so the tool is absent from the next request (`dist/promise/tool.d.ts` L22–34, L59–67; `dist/promise/registration.d.ts` L1–3; Server plugins → API → Tools)",
+      source: source("packages/plugin/src/promise/tool.ts#L59-L67"),
+    },
+    "tool.call": {
+      fidelity: "native",
+      how: "`execute(input, context)` runs with the input `input` declares, and `context.signal` aborts a stopped call (`@opencode/plugin` `dist/promise/tool.d.ts` L19–21; `@opencode/schema` `dist/tool.d.ts` L88–96; Server plugins → API → Tools)",
+      source: source("packages/plugin/src/promise/tool.ts#L19-L21"),
+    },
+    "tool.result": {
+      fidelity: "native",
+      how: "`Tool.Result` carries `content` as a string or content parts and `metadata`; a thrown `Tool.Error` carries the message the model reads (`@opencode/schema` `dist/tool.d.ts` L83–87; `@opencode/plugin` `dist/promise/tool.d.ts` L19–21)",
+      source: source("packages/schema/src/tool.ts#L83-L87"),
+    },
+    "tool.schema": {
+      fidelity: "native",
+      how: "`ValueSchema` is an Effect schema, any Standard Schema, or `JsonSchema.JsonSchema`, so a plain JSON Schema object is accepted (`@opencode/schema` `dist/tool.d.ts` L49)",
+      source: source("packages/schema/src/tool.ts#L49"),
+    },
     "host.sharedRealm": {
       fidelity: "native",
       how: "one process realm; per-location scopes unconfirmed in a run",

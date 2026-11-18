@@ -2,9 +2,9 @@
 
 One tool definition serves every agent. A plugin lists its tools in the
 definition it already returns, and each adapter registers those definitions in
-its own process: OpenCode through `ctx.tool.transform`, and Pi in a later
-slice. The header is plain JSON Schema, so the model, the harness and a later
-core in another language describe and validate the same object.
+its own process: OpenCode through `ctx.tool.transform`, and Pi through
+`pi.registerTool`. The header is plain JSON Schema, so the model, the harness
+and a later core in another language describe and validate the same object.
 
 | Module        | Responsibility                                                      |
 | ------------- | ------------------------------------------------------------------- |
@@ -71,13 +71,16 @@ JSON type the header describes.
 - `needsSession` is refused on a transport with no session, such as the
   generated MCP server.
 - `timeoutMs`, when given, is a positive integer.
-- A name already live in the scope fails the load with `DuplicateTool`, naming
-  the scope and both sources: the agent's own tools, or the plugin that holds
-  it.
+- A name already live in the scope fails with `DuplicateTool`, naming the scope
+  and both sources: the agent's own tools, or the plugin that holds it.
+  OpenCode answers at load; Pi answers at the first session start, because its
+  action methods throw while extensions load.
 
 The check runs before any native registration, because Pi's `registerTool`
 replaces a definition of the same name without an error, and a collision that
-reached it would silently change which handler the model calls.
+reached it would silently change which handler the model calls. Pi therefore
+holds its declared tools until the first session start and reads the live list
+there, before its first `registerTool`.
 
 ## Direct tools
 
@@ -147,5 +150,7 @@ responseFinished: (_response, ctx) => {
 },
 ```
 
-A withdrawn tool is gone from the agent's next tool snapshot, so nothing reaches
-a stale definition.
+A withdrawn tool is gone from the agent's next tool snapshot. OpenCode removes
+the definition; Pi has no unregister, so a withdrawal re-registers the same name
+with `exposure: "hidden"`, and a call to the name answers an error rather than
+reaching a stale handler.

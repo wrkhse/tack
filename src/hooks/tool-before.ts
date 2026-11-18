@@ -41,10 +41,14 @@ export type ToolCall =
     }
   | { readonly tool: "other"; readonly name: string; readonly input: unknown };
 
-/** What a `toolBefore` handler may return. */
+/**
+ * What a `toolBefore` handler may return: a deny reason, or a rewrite of the
+ * shell's command or of a tack tool's whole input.
+ */
 export type ToolBeforeResult =
   | { readonly deny: string }
   | { readonly rewrite: ShellInput }
+  | { readonly rewrite: { readonly input: Schema.JsonObject } }
   | undefined;
 
 /** A handler that may rewrite or deny a tool call. */
@@ -66,6 +70,7 @@ const ToolBeforeResultSchema = Schema.Union([
   Schema.Undefined,
   Schema.Struct({ deny: Schema.String }),
   Schema.Struct({ rewrite: Schema.Struct({ command: Schema.String }) }),
+  Schema.Struct({ rewrite: Schema.Struct({ input: Schema.JsonObject }) }),
 ]);
 
 type DecodedToolBeforeResult = Schema.Schema.Type<typeof ToolBeforeResultSchema>;
@@ -82,14 +87,68 @@ function invalidResult(
   return new HandlerFailed({ plugin: plugin.name, hook: "toolBefore", reason });
 }
 
+/** Applies the shell's command rewrite, or the rule that refuses it. */
+function applyCommandRewrite(
+  plugin: ResolvedPlugin,
+  command: string,
+  call: ToolCall,
+): Effect.Effect<Applied, HandlerFailed> {
+  if (call.tool !== "shell") {
+    return Effect.fail(
+      invalidResult(plugin, `a command rewrite applies only to the shell tool, not "${call.name}"`),
+    );
+  }
+
+  return Effect.succeed<Applied>({
+    kind: "allow",
+    call: { ...call, input: { command } },
+    rewritten: true,
+  });
+}
+
 /**
- * Applies one decoded handler result. A rewrite is only meaningful for the
- * shell tool because `command` is the only field tack normalizes.
+ * Applies a whole-input rewrite to a tool this plugin defines. A built-in keeps
+ * its own definition, so only a tool the registry holds can be rewritten; the
+ * tool's own decode then refuses an input the schema does not admit before
+ * `run` sees it.
+ */
+function applyInputRewrite(
+  plugin: ResolvedPlugin,
+  input: Schema.JsonObject,
+  call: ToolCall,
+  ctx: HookContext,
+): Effect.Effect<Applied, HandlerFailed> {
+  if (call.tool === "shell") {
+    return Effect.fail(
+      invalidResult(plugin, "an input rewrite applies only to a tool tack defines, not the shell"),
+    );
+  }
+
+  if (ctx.tools.resolve(call.name) === undefined) {
+    return Effect.fail(
+      invalidResult(
+        plugin,
+        `an input rewrite applies only to a tool this plugin defines, and "${call.name}" is not one`,
+      ),
+    );
+  }
+
+  return Effect.succeed<Applied>({
+    kind: "allow",
+    call: { ...call, input },
+    rewritten: true,
+  });
+}
+
+/**
+ * Applies one decoded handler result. A rewrite form belongs to one kind of
+ * call, and the wrong form is a handler error that names the tool.
  */
 function applyToolBeforeResult(
   plugin: ResolvedPlugin,
   result: DecodedToolBeforeResult,
   call: ToolCall,
+  ctx: HookContext,
 ): Effect.Effect<Applied, HandlerFailed> {
   if (result === undefined) {
     return Effect.succeed<Applied>({ kind: "allow", call, rewritten: false });
@@ -99,15 +158,22 @@ function applyToolBeforeResult(
     return Effect.succeed<Applied>({ kind: "deny", reason: result.deny });
   }
 
-  if (call.tool !== "shell") {
-    return Effect.fail(invalidResult(plugin, "rewrite applies only to the shell tool"));
+  const rewrite = result.rewrite;
+
+  if ("command" in rewrite) {
+    return applyCommandRewrite(plugin, rewrite.command, call);
   }
 
-  return Effect.succeed<Applied>({
-    kind: "allow",
-    call: { ...call, input: { command: result.rewrite.command } },
-    rewritten: true,
-  });
+  return applyInputRewrite(plugin, rewrite.input, call, ctx);
+}
+
+/** True for a rewrite that names both forms, which no call can satisfy. */
+function rewritesBothForms(value: ToolBeforeResult): boolean {
+  if (value === undefined || "deny" in value) {
+    return false;
+  }
+
+  return "command" in value.rewrite && "input" in value.rewrite;
 }
 
 /** Decodes the untrusted handler value before tack acts on it. */
@@ -115,10 +181,17 @@ function decodeToolBeforeResult(
   plugin: ResolvedPlugin,
   value: ToolBeforeResult,
   call: ToolCall,
+  ctx: HookContext,
 ): Effect.Effect<Applied, HandlerFailed> {
+  if (rewritesBothForms(value)) {
+    return Effect.fail(
+      invalidResult(plugin, "a rewrite carries either a command or an input, not both"),
+    );
+  }
+
   return Schema.decodeEffect(ToolBeforeResultSchema)(value).pipe(
     Effect.mapError(() => invalidResult(plugin)),
-    Effect.flatMap((result) => applyToolBeforeResult(plugin, result, call)),
+    Effect.flatMap((result) => applyToolBeforeResult(plugin, result, call, ctx)),
   );
 }
 
@@ -130,7 +203,7 @@ function applyPlugin(
   ctx: HookContext,
 ): Effect.Effect<Applied> {
   return callHandler(plugin, "toolBefore", () => handler(call, ctx)).pipe(
-    Effect.flatMap((value) => decodeToolBeforeResult(plugin, value, call)),
+    Effect.flatMap((value) => decodeToolBeforeResult(plugin, value, call, ctx)),
     Effect.match({
       onFailure: (failure): Applied => ({ kind: "failed", message: failure.message }),
       onSuccess: (applied) => applied,

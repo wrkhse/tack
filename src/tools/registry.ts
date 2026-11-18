@@ -53,6 +53,12 @@ export interface ToolRegistryOptions {
   readonly port: ToolPort;
   /** Every name already live in the scope, apart from this plugin's own. */
   readonly taken?: ReadonlyArray<TakenTool>;
+  /**
+   * A tool another plugin in this scope declares, by name. A whole-input
+   * rewrite asks for it, so a guard can rewrite a tool its own registry does
+   * not hold; a transport with one tool set leaves it out.
+   */
+  readonly elsewhere?: (name: string) => CompiledTool | undefined;
 }
 
 /**
@@ -61,7 +67,10 @@ export interface ToolRegistryOptions {
  * withdraw one and the agent's next snapshot omits it.
  */
 export interface ToolRegistry {
+  /** One tool this plugin holds, by name. */
   readonly get: (name: string) => CompiledTool | undefined;
+  /** A tool tack defines in this scope, whoever's plugin declares it. */
+  readonly resolve: (name: string) => CompiledTool | undefined;
   readonly add: (definition: ToolDefinition) => ToolHandle;
   readonly remove: (name: string) => void;
   /** Withdraws every tool this registry holds, for the agent's unload path. */
@@ -121,8 +130,12 @@ export function createToolRegistry(
     }
   }
 
+  const resolve = (name: string): CompiledTool | undefined =>
+    entries.get(name) ?? options.elsewhere?.(name);
+
   return {
     get: (name) => entries.get(name),
+    resolve,
     add: (definition) => {
       const built = compileDefinition(
         options.plugin,

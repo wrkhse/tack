@@ -10,7 +10,7 @@ import type {
 } from "@opencode/plugin/promise/tool";
 
 import type { HostSlot, Registration } from "../host/host.ts";
-import { hostSlot } from "../host/host.ts";
+import { hostSlot, scopedTool } from "../host/host.ts";
 import { runSessionCreated, runSessionEnded } from "../hooks/lifecycle.ts";
 import { runPermissionAsked } from "../hooks/permission-asked.ts";
 import { runPromptSent } from "../hooks/prompt-sent.ts";
@@ -146,11 +146,20 @@ function callOf(event: ToolEvent): ToolCall {
   return { tool: "other", name: event.tool, input };
 }
 
-/** Replaces only the command, keeping OpenCode's other input fields. */
+/**
+ * Applies a rewrite by assigning the call's input, which `execute` reads: the
+ * shell keeps OpenCode's other fields, and a whole-input rewrite replaces them.
+ */
 function assignRewrite(event: ToolEvent, call: ToolCall): void {
+  if (call.tool !== "shell") {
+    event.input = call.input;
+
+    return;
+  }
+
   const input = event.input;
 
-  if (call.tool !== "shell" || !Predicate.isObject(input)) {
+  if (!Predicate.isObject(input)) {
     return;
   }
 
@@ -969,6 +978,7 @@ function hookInto(
           hasSession: true,
           port: native,
           taken: takenTools(slot, plugin, registration.scope, existing),
+          elsewhere: (name) => scopedTool(slot, registration.scope, plugin.name, name),
         },
         plugin.tools,
       );

@@ -15,6 +15,12 @@ export type AgentName = "opencode" | "pi";
 /** Every tack plugin the suite loads, by file name. */
 export type PluginName =
   | "tool-create"
+  | "tool-withdraw"
+  | "tool-deny"
+  | "tool-rewrite"
+  | "tool-rewrite-bad"
+  | "tool-collide"
+  | "tool-witness"
   | "deny-push"
   | "throws"
   | "throws-allowed"
@@ -79,6 +85,8 @@ export interface Scenario {
   readonly plugins: ReadonlyArray<PluginName>;
   /** How the scripted model answers this row; absent means the T1 behaviour. */
   readonly standIn?: StandInOptions;
+  /** The one agent a row runs in; absent means both. */
+  readonly only?: AgentName;
   readonly check: (evidence: Evidence) => void;
 }
 

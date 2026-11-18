@@ -10,8 +10,9 @@ A row runs in the mode its steps need. T1's nine rows run one prompt to
 completion in a one-shot CLI; T2's fifteen run one long-lived session, because
 they need a second turn, an action after startup, or an end the suite controls.
 One T2 row runs in OpenCode only, because Pi has no session created before its
-extension loaded. T3's four tool rows also run one prompt to completion, in
-OpenCode only: Pi's adapter registers tools in a later slice.
+extension loaded. T3's eight one-shot rows run one prompt to completion, one of
+them in Pi only; its withdrawal row runs long-lived, because it needs a second
+request after the tool is removed.
 
 Run it in CI, or in a disposable container. Never on a development machine:
 each test starts the agent CLIs, which are that machine's own agents.
@@ -43,7 +44,9 @@ sequenceDiagram
 The stand-in model answers four ways. A request without tools is a title
 request, so it gets the text `title`. A request that carries a tool result gets
 `done`, which ends the turn. Every other request gets one tool call, the agent's
-own shell tool with `git push origin main`. A marked request answers with the
+own shell tool with `git push origin main`; when a row asks, a request that ends
+with the person's prompt gets a call even though the conversation already holds
+a result. A marked request answers with the
 summary text instead, which is how the compaction row proves its call. A sticky
 error answers every tool-bearing request with the SSE error until the run ends,
 so a retry cannot rescue the turn; Pi's sandbox disables retries, and the error
@@ -92,8 +95,8 @@ where the table says the two agents report one differently.
 
 ## The marker channel
 
-Every T2 plugin writes `t2-marker-<name>.json` in its working directory, which
-is the project directory. The file holds a JSON array of observations, one
+Every long-lived row's plugin writes `t2-marker-<name>.json` in its working
+directory, which is the project directory. The file holds a JSON array of observations, one
 appended per event, such as `{"event":"finished","reason":"done"}`. Each
 append is written to a temporary file and renamed into place, so the suite
 never reads half an observation. After a run, the suite reads every marker into
@@ -201,36 +204,41 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 
 ## Scenarios
 
-| Scenario                 | Plugins                       | Passes when                                                                  |
-| ------------------------ | ----------------------------- | ---------------------------------------------------------------------------- |
-| deny                     | `deny-push`                   | nothing recorded; reason returned                                            |
-| deny after               | `deny-push`, `observe`        | the same, and `toolAfter` never ran                                          |
-| fail closed              | `throws`                      | nothing recorded; error returned                                             |
-| opt out                  | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded                                   |
-| rewrite                  | `safe-push`                   | `push origin main --dry-run`                                                 |
-| combine                  | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded                                            |
-| combine reversed         | `signed-push`, `safe-push`    | the same, in the other load order                                            |
-| append                   | `push-note`                   | the note is in the first prompt                                              |
-| after                    | `safe-push`, `observe`        | the observed command and output                                              |
-| t2 wake                  | `append-wake`                 | a tool-bearing request carries the text                                      |
-| t2 outside hook          | `append-outside`              | the timer's text lands in a request                                          |
-| t2 now                   | `append-now`                  | a later tool-bearing request of the first turn carries it, not the prompt    |
-| t2 next                  | `append-next`                 | absent first, present in a later request                                     |
-| t2 permission            | `permission-deny`             | OpenCode denies; Pi never asks                                               |
-| t2 permission configured | `permission-deny`             | a sandbox deny skips the hook; the call is refused                           |
-| t2 idle                  | `idle-note`                   | one idle, then Pi's aborted and no more                                      |
-| t2 finished done         | `finished-note`               | every request ends `done`, exactly                                           |
-| t2 finished aborted      | `finished-note`               | the interrupt ends `aborted` last                                            |
-| t2 finished error        | `finished-note`, `retry-veto` | the failure ends `error`; the retry hook vetoes it                           |
-| t2 lifecycle             | `lifecycle-note`              | created; Pi: two starts on rebind, replaced, shutdown; OpenCode: delete ends |
-| t2 lifecycle resumed     | `lifecycle-note`              | OpenCode only: reports `resumed` for a pre-load session                      |
-| t2 interrupt             | `interrupt-action`            | accepted, and the turn settles interrupted                                   |
-| t2 model                 | `model-switch`                | accepted; the stand-in sees `scripted-2`                                     |
-| t2 compact               | `compact-action`              | accepted; Pi asks once, OpenCode twice (its summary-template nudge)          |
-| t3 list                  | `tool-create`                 | the first request declares `monitor_create` with its description and schema  |
-| t3 call                  | `tool-create`                 | `tack-tool monitor_create PROJ-1` recorded                                   |
-| t3 result                | `tool-create`                 | a tool message's content is `watching PROJ-1`                                |
-| t3 bad input             | `tool-create`                 | a tool message names `key`; nothing recorded                                 |
+| Scenario                 | Plugins                           | Passes when                                                                   |
+| ------------------------ | --------------------------------- | ----------------------------------------------------------------------------- |
+| deny                     | `deny-push`                       | nothing recorded; reason returned                                             |
+| deny after               | `deny-push`, `observe`            | the same, and `toolAfter` never ran                                           |
+| fail closed              | `throws`                          | nothing recorded; error returned                                              |
+| opt out                  | `throws-allowed`, `safe-push`     | the failing guard allows; dry run recorded                                    |
+| rewrite                  | `safe-push`                       | `push origin main --dry-run`                                                  |
+| combine                  | `safe-push`, `signed-push`        | `... --dry-run --signed` recorded                                             |
+| combine reversed         | `signed-push`, `safe-push`        | the same, in the other load order                                             |
+| append                   | `push-note`                       | the note is in the first prompt                                               |
+| after                    | `safe-push`, `observe`            | the observed command and output                                               |
+| t2 wake                  | `append-wake`                     | a tool-bearing request carries the text                                       |
+| t2 outside hook          | `append-outside`                  | the timer's text lands in a request                                           |
+| t2 now                   | `append-now`                      | a later tool-bearing request of the first turn carries it, not the prompt     |
+| t2 next                  | `append-next`                     | absent first, present in a later request                                      |
+| t2 permission            | `permission-deny`                 | OpenCode denies; Pi never asks                                                |
+| t2 permission configured | `permission-deny`                 | a sandbox deny skips the hook; the call is refused                            |
+| t2 idle                  | `idle-note`                       | one idle, then Pi's aborted and no more                                       |
+| t2 finished done         | `finished-note`                   | every request ends `done`, exactly                                            |
+| t2 finished aborted      | `finished-note`                   | the interrupt ends `aborted` last                                             |
+| t2 finished error        | `finished-note`, `retry-veto`     | the failure ends `error`; the retry hook vetoes it                            |
+| t2 lifecycle             | `lifecycle-note`                  | created; Pi: two starts on rebind, replaced, shutdown; OpenCode: delete ends  |
+| t2 lifecycle resumed     | `lifecycle-note`                  | OpenCode only: reports `resumed` for a pre-load session                       |
+| t2 interrupt             | `interrupt-action`                | accepted, and the turn settles interrupted                                    |
+| t2 model                 | `model-switch`                    | accepted; the stand-in sees `scripted-2`                                      |
+| t2 compact               | `compact-action`                  | accepted; Pi asks once, OpenCode twice (its summary-template nudge)           |
+| t3 list                  | `tool-create`                     | the first request declares `monitor_create` with its description and schema   |
+| t3 call                  | `tool-create`                     | `tack-tool monitor_create PROJ-1` recorded                                    |
+| t3 result                | `tool-create`                     | a tool message's content is `watching PROJ-1`                                 |
+| t3 bad input             | `tool-create`                     | a tool message names `key`; nothing recorded                                  |
+| t3 tool deny             | `tool-deny`, `tool-create`        | the deny reason is returned; nothing recorded                                 |
+| t3 tool rewrite          | `tool-rewrite`, `tool-create`     | `tack-tool monitor_create PROJ-2` recorded                                    |
+| t3 rewrite rejected      | `tool-rewrite-bad`, `tool-create` | the schema rejects the rewrite; nothing recorded                              |
+| t3 pi tool collision     | `tool-collide`, `tool-witness`    | Pi only: the refusal is reported and the next plugin still starts the session |
+| t3 withdraw              | `tool-withdraw`                   | the next request omits the tool; a call to it answers an error                |
 
 ## Layout
 
@@ -251,7 +259,7 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 | `harness/t2-opencode.ts`     | one long-lived OpenCode scenario                   |
 | `harness/t2-pi.ts`           | one long-lived Pi scenario                         |
 | `plugins/`                   | the tack plugins, entry files, and the load marker |
-| `plugins/t2/`                | one plugin per long-lived row                      |
+| `plugins/t2/`                | one plugin per T2 row                              |
 | `scenarios.ts`               | the one-shot table, as data and checks             |
 | `tool-scenarios.ts`          | T3's tool rows, as data and checks                 |
 | `session-scenarios.ts`       | the long-lived table, as data and checks           |

@@ -34,6 +34,33 @@ export const piFidelity: Fidelity = {
       how: "`tool_result`",
       source: source("dist/core/extensions/types.d.ts#L1030-L1059"),
     },
+    "tool.register": {
+      fidelity: "native",
+      how: "`pi.registerTool({ name, label, description, parameters, execute })` works during load and after startup; the tool is active and declared on the next request (`dist/core/extensions/types.d.ts` L1271; `docs/extensions.md` L1582–1592)",
+      // The docs name a session_start handler and say the tool is refreshed at
+      // once, which is why tack registers there and the first request carries it.
+      source: source("docs/extensions.md#L1582-L1592"),
+    },
+    "tool.remove": {
+      fidelity: "fallback",
+      how: 'there is no unregister. Re-register the same name with `exposure: "hidden"`, which leaves it registered but withdrawn, and tack refuses a call to it; `setActiveTools` is the other route (`dist/core/extensions/types.d.ts` L1271, L1336; `docs/extensions.md` L2766)',
+      source: source("docs/extensions.md#L2766"),
+    },
+    "tool.call": {
+      fidelity: "native",
+      how: "`execute(toolCallId, params, signal, onUpdate, ctx)` returns the result (`dist/core/extensions/types.d.ts` L534)",
+      source: source("dist/core/extensions/types.d.ts#L534"),
+    },
+    "tool.result": {
+      fidelity: "native",
+      how: "`AgentToolResult` carries `content` blocks, `details`, `structuredContent?`, `isError?` and `terminate?`; `isError` reports a failure the model sees (`@earendil-works/pi-agent-core` `dist/types.d.ts` L370–393; `dist/core/extensions/types.d.ts` L534)",
+      source: "@earendil-works/pi-agent-core@1.5.2/dist/types.d.ts#L370-L393",
+    },
+    "tool.schema": {
+      fidelity: "native",
+      how: "Pi validates arguments as JSON Schema with `@earendil-works/pi-schema`, whatever built the schema, so a plain object is accepted (`docs/extensions.md` L174–184)",
+      source: source("docs/extensions.md#L174-L184"),
+    },
     "host.sharedRealm": {
       fidelity: "native",
       how: "one realm",

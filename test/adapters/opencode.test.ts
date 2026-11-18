@@ -13,6 +13,9 @@ import { quietConsole } from "../helpers.ts";
 
 const DIRECTORY = "/work/app";
 
+/** The module the OpenCode adapter is loaded from, the source a duplicate names. */
+const ADAPTER_SOURCE = fileURLToPath(new URL("../../src/agents/opencode.ts", import.meta.url));
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -1708,7 +1711,7 @@ it.effect("refuses a tool name the agent's namespace already holds", () =>
 
     const shadow = createAgentPlugin(() => ({ name: "shadow", tools: { read } }));
     const fake = fakeContext("/work/tools-duplicate");
-    const source = fileURLToPath(new URL("../../src/agents/opencode.ts", import.meta.url));
+    const source = ADAPTER_SOURCE;
     const scope = opencodeScope(fake.context.location);
 
     fake.tools.set("read", {
@@ -1722,6 +1725,26 @@ it.effect("refuses a tool name the agent's namespace already holds", () =>
 
     expect(failure?.message).toBe(
       `tack: two tools named "read" are registered in ${scope} (the agent's own tools and ${source}); give them different names.`,
+    );
+  }),
+);
+
+it.effect("refuses a tool name another plugin already registered", () =>
+  Effect.gen(function* () {
+    const first = fakeContext("/work/tools-shared");
+    const second = fakeContext("/work/tools-shared");
+
+    yield* attach(monitor, first);
+
+    const shadow = createAgentPlugin(() => ({
+      name: "shadow",
+      tools: { monitor_create: monitorCreate },
+    }));
+
+    const failure = yield* setupFailure(shadow, second);
+
+    expect(failure?.message).toBe(
+      `tack: two tools named "monitor_create" are registered in ${opencodeScope(second.context.location)} (plugin "monitor" and ${ADAPTER_SOURCE}); give them different names.`,
     );
   }),
 );

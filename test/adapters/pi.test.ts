@@ -1,5 +1,7 @@
+import { fileURLToPath } from "node:url";
+
 import { afterEach, expect, it, vi } from "@effect/vitest";
-import { Effect, Predicate } from "effect";
+import { Effect, Predicate, type Schema } from "effect";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { hostSlot } from "../../src/host/host.ts";
@@ -101,6 +103,60 @@ interface FakeSendOptions {
   readonly triggerTurn?: boolean;
 }
 
+/** The result the adapter hands Pi for one call. */
+interface FakeToolResult {
+  readonly content: ReadonlyArray<{ readonly type: string; readonly text?: string }>;
+  readonly details?: unknown;
+  readonly isError?: boolean;
+}
+
+/** The JSON Pi hands a tool before the tool decodes it. */
+type ToolArguments = Schema.Json;
+
+/**
+ * One tool the adapter registered, as the test reads it back. The context is
+ * the fake's own, which carries every member a tack tool reads.
+ */
+interface FakeNativeTool {
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+  readonly parameters: unknown;
+  readonly exposure?: "hidden" | undefined;
+  readonly execute: (
+    toolCallId: string,
+    params: ToolArguments,
+    signal: AbortSignal | undefined,
+    onUpdate: undefined,
+    context: FakePiContext,
+  ) => Promise<FakeToolResult>;
+}
+
+/** Pi's tool registry for the fake: what the adapter registers, and what it reads back. */
+interface FakeToolRegistry {
+  readonly tools: Map<string, FakeNativeTool>;
+  /** Every name Pi was asked to register, in order, duplicates included. */
+  readonly registered: string[];
+  readonly registerTool: (registered: FakeNativeTool) => void;
+  readonly getAllTools: () => ReadonlyArray<{ readonly name: string }>;
+}
+
+/** Pi's tool registry for the fake, and the tools it holds by name. */
+function fakeToolRegistry(): FakeToolRegistry {
+  const tools = new Map<string, FakeNativeTool>();
+  const registered: string[] = [];
+
+  return {
+    tools,
+    registered,
+    registerTool: (held) => {
+      tools.set(held.name, held);
+      registered.push(held.name);
+    },
+    getAllTools: () => [...tools.values()].map((held) => ({ name: held.name })),
+  };
+}
+
 /** One native call the adapter made, as Pi received it. */
 type FakeCall =
   | {
@@ -118,6 +174,10 @@ interface FakePi {
   readonly handlers: Partial<Record<PiEventName, FakeHandler>>;
   readonly unsubscribed: string[];
   readonly calls: FakeCall[];
+  /** Pi's tool registry, by name, as the adapter registered each tool. */
+  readonly tools: Map<string, FakeNativeTool>;
+  /** Every name the adapter asked Pi to register, in order. */
+  readonly registered: string[];
   /** Resolves once the adapter has made a call of this method; never polls. */
   readonly called: (method: FakeCall["method"]) => Promise<void>;
   /** When set, every action throws Pi's stale-context error. */
@@ -140,7 +200,7 @@ const denyPush = createAgentPlugin(() => ({
   toolBefore: (call) => (call.tool === "shell" ? { deny: "blocked by test" } : undefined),
 }));
 
-/** One tool a plugin would ship; Pi refuses it until its adapter registers tools. */
+/** One tool a plugin ships, with the header the conformance plugin uses. */
 const monitorCreate = tool<{ key: string }>({
   name: "monitor_create",
   description: "Start watching a Jira issue",
@@ -148,8 +208,9 @@ const monitorCreate = tool<{ key: string }>({
     type: "object",
     properties: { key: { type: "string" } },
     required: ["key"],
+    additionalProperties: false,
   },
-  run: (input) => ({ content: [`watching ${input.key}`] }),
+  run: (input) => ({ content: [`watching ${input.key}`], details: { id: "m-1" } }),
 });
 
 /** The message one append sends, as Pi's `sendMessage` receives it. */
@@ -190,19 +251,10 @@ function isExtensionApi(value: FakeCandidate): value is ExtensionAPI {
   return Predicate.isFunction(value.on);
 }
 
-function fakePi(modelResult = true): FakePi {
-  const handlers: Partial<Record<PiEventName, FakeHandler>> = {};
-  const unsubscribed: string[] = [];
+/** The calls one fake recorded, and the wait for a method it has not seen yet. */
+function callLog() {
   const calls: FakeCall[] = [];
-  const stale = { active: false };
-
-  const assertFresh = (): void => {
-    if (stale.active) {
-      throw new Error("This extension ctx is stale after session replacement or reload.");
-    }
-  };
-
-  const waiters: { readonly method: FakeCall["method"]; readonly settle: () => void }[] = [];
+  const waiters: Array<{ readonly method: FakeCall["method"]; readonly settle: () => void }> = [];
 
   const record = (call: FakeCall): void => {
     calls.push(call);
@@ -225,6 +277,22 @@ function fakePi(modelResult = true): FakePi {
     return promise;
   };
 
+  return { calls, record, called };
+}
+
+function fakePi(modelResult = true): FakePi {
+  const handlers: Partial<Record<PiEventName, FakeHandler>> = {};
+  const unsubscribed: string[] = [];
+  const log = callLog();
+  const stale = { active: false };
+  const registry = fakeToolRegistry();
+
+  const assertFresh = (): void => {
+    if (stale.active) {
+      throw new Error("This extension ctx is stale after session replacement or reload.");
+    }
+  };
+
   const context: FakePiContext = {
     sessionManager: { getSessionId: () => "s1" },
     modelRegistry: {
@@ -235,11 +303,11 @@ function fakePi(modelResult = true): FakePi {
     },
     compact: (options) => {
       assertFresh();
-      record({ method: "compact", options });
+      log.record({ method: "compact", options });
     },
     abort: () => {
       assertFresh();
-      record({ method: "abort" });
+      log.record({ method: "abort" });
     },
   };
 
@@ -253,21 +321,33 @@ function fakePi(modelResult = true): FakePi {
     },
     sendMessage: (message: FakeAppendMessage, options?: FakeSendOptions) => {
       assertFresh();
-      record({ method: "sendMessage", message, options });
+      log.record({ method: "sendMessage", message, options });
     },
     setModel: (model: FakeModel) => {
       assertFresh();
-      record({ method: "setModel", model });
+      log.record({ method: "setModel", model });
 
       return Promise.resolve(modelResult);
     },
+    registerTool: registry.registerTool,
+    getAllTools: registry.getAllTools,
   };
 
   if (!isExtensionApi(fake)) {
     throw new Error("the test fake is not a Pi extension API");
   }
 
-  const created = { pi: fake, context, handlers, unsubscribed, calls, called, stale };
+  const created = {
+    pi: fake,
+    context,
+    handlers,
+    unsubscribed,
+    calls: log.calls,
+    called: log.called,
+    stale,
+    tools: registry.tools,
+    registered: registry.registered,
+  };
 
   started.push(created);
 
@@ -496,20 +576,148 @@ it.effect("throws when the same name loads twice in the process scope", () =>
   }),
 );
 
-it.effect("refuses a plugin that declares tools, naming the first", () =>
-  Effect.sync(() => {
+/**
+ * Starts the session the adapter registers its tools on. Pi's action methods
+ * throw during extension load, so registration waits for this event.
+ */
+function startSession(fake: FakePi): Effect.Effect<void> {
+  return Effect.promise(() =>
+    Promise.resolve(hookOf(fake.handlers, "session_start")({ reason: "startup" }, fake.context)),
+  ).pipe(Effect.asVoid, Effect.orDie);
+}
+
+/** Starts the session and returns what it threw. */
+function sessionFailure(fake: FakePi): Effect.Effect<Error | undefined> {
+  return Effect.promise(() =>
+    Promise.resolve()
+      .then(() => hookOf(fake.handlers, "session_start")({ reason: "startup" }, fake.context))
+      .then(
+        () => undefined,
+        (cause: Error) => cause,
+      ),
+  );
+}
+
+/** The one tool the adapter registered, or a failure naming what it did instead. */
+function toolOf(fake: FakePi, name: string): FakeNativeTool {
+  const found = fake.tools.get(name);
+
+  if (found === undefined) {
+    throw new Error(`the adapter registered no tool named ${name}`);
+  }
+
+  return found;
+}
+
+/** A definition the test seeds into Pi's registry, or reads back from it. */
+function fakeTool(name: string, exposure?: "hidden"): FakeNativeTool {
+  return {
+    name,
+    label: name,
+    description: "",
+    parameters: {},
+    exposure,
+    execute: () => Promise.resolve({ content: [] }),
+  };
+}
+
+/** The module the Pi adapter is loaded from, the source a duplicate names. */
+const PI_SOURCE = fileURLToPath(new URL("../../src/agents/pi.ts", import.meta.url));
+
+const monitor = createAgentPlugin(() => ({
+  name: "monitor",
+  tools: { monitor_create: monitorCreate },
+}));
+
+it.effect("registers a tool with its label, description, header and result mapping", () =>
+  Effect.gen(function* () {
     const fake = fakePi();
 
-    const monitor = createAgentPlugin(() => ({
-      name: "monitor",
-      tools: { monitor_create: monitorCreate },
-    }));
+    monitor.pi()(fake.pi);
 
-    const failure = thrownBy(() => monitor.pi()(fake.pi));
+    yield* startSession(fake);
 
-    expect(failure?.message).toBe(
-      'tack: Pi does not register tools yet, and plugin "monitor" declares "monitor_create"',
+    const registered = toolOf(fake, "monitor_create");
+
+    expect(registered.label).toBe("monitor_create");
+    expect(registered.description).toBe("Start watching a Jira issue");
+    expect(registered.parameters).toEqual(monitorCreate.input);
+    expect(registered.exposure).toBeUndefined();
+
+    const result = yield* Effect.promise(() =>
+      registered.execute("call-1", { key: "PROJ-1" }, undefined, undefined, fake.context),
     );
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "watching PROJ-1" }],
+      details: { id: "m-1" },
+    });
+  }),
+);
+
+it.effect("registers each declared tool once across session starts", () =>
+  Effect.gen(function* () {
+    const fake = fakePi();
+
+    monitor.pi()(fake.pi);
+
+    yield* startSession(fake);
+    // A new, resumed or forked session binds the same extension again.
+    yield* runHook(() => hookOf(fake.handlers, "session_start")({ reason: "new" }, fake.context));
+
+    expect(fake.registered).toEqual(["monitor_create"]);
+  }),
+);
+
+it.effect("keeps the details and the error flag a handler returns", () =>
+  Effect.gen(function* () {
+    const refuse = tool({
+      name: "monitor_refuse",
+      description: "Refuse a monitor",
+      input: { type: "object", properties: {} },
+      run: () => ({ content: ["no such issue"], details: { code: 404 }, isError: true }),
+    });
+
+    const fake = fakePi();
+
+    createAgentPlugin(() => ({ name: "refuse", tools: { monitor_refuse: refuse } })).pi()(fake.pi);
+
+    yield* startSession(fake);
+
+    const result = yield* Effect.promise(() =>
+      toolOf(fake, "monitor_refuse").execute("call-1", {}, undefined, undefined, fake.context),
+    );
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "no such issue" }],
+      details: { code: 404 },
+      isError: true,
+    });
+  }),
+);
+
+it.effect("reports an input the schema rejects, naming the field", () =>
+  Effect.gen(function* () {
+    const fake = fakePi();
+
+    monitor.pi()(fake.pi);
+
+    yield* startSession(fake);
+
+    const result = yield* Effect.promise(() =>
+      toolOf(fake, "monitor_create").execute("call-1", {}, undefined, undefined, fake.context),
+    );
+
+    expect(result).toEqual({
+      content: [
+        {
+          type: "text",
+          text: 'tack: tool "monitor_create" rejected its input: Missing key\n  at ["key"]',
+        },
+      ],
+      details: undefined,
+      isError: true,
+    });
   }),
 );
 
@@ -528,6 +736,7 @@ function toolsOf(fake: FakePi): Effect.Effect<HookContext["tools"]> {
 
     capture.pi()(fake.pi);
 
+    yield* startSession(fake);
     yield* runHook(() =>
       hookOf(fake.handlers, "input")({ text: "hi", source: "interactive" }, fake.context),
     );
@@ -540,7 +749,7 @@ function toolsOf(fake: FakePi): Effect.Effect<HookContext["tools"]> {
   });
 }
 
-it.effect("refuses a tool added through the Pi context, naming it", () =>
+it.effect("adds a tool and withdraws it by re-registering its name hidden", () =>
   Effect.gen(function* () {
     const fake = fakePi();
     const tools = yield* toolsOf(fake);
@@ -552,12 +761,110 @@ it.effect("refuses a tool added through the Pi context, naming it", () =>
       run: () => ({ content: ["watching"] }),
     });
 
-    const failure = thrownBy(() => tools.add(extra));
+    const handle = tools.add(extra);
+
+    expect(toolOf(fake, "monitor_extra").exposure).toBeUndefined();
+
+    handle.dispose();
+
+    const withdrawn = toolOf(fake, "monitor_extra");
+
+    expect(withdrawn.exposure).toBe("hidden");
+    expect(tools.get("monitor_extra")).toBeUndefined();
+
+    const result = yield* Effect.promise(() =>
+      withdrawn.execute("call-2", {}, undefined, undefined, fake.context),
+    );
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: 'tack: tool "monitor_extra" was withdrawn' }],
+      details: undefined,
+      isError: true,
+    });
+  }),
+);
+
+it.effect("withdraws a declared tool when the plugin removes it", () =>
+  Effect.gen(function* () {
+    const withdraw = createAgentPlugin(() => ({
+      name: "withdraw",
+
+      tools: { monitor_create: monitorCreate },
+
+      promptSent: (_prompt, ctx) => {
+        ctx.tools.remove("monitor_create");
+      },
+    }));
+
+    const fake = fakePi();
+
+    withdraw.pi()(fake.pi);
+
+    yield* startSession(fake);
+    yield* runHook(() =>
+      hookOf(fake.handlers, "input")({ text: "hi", source: "interactive" }, fake.context),
+    );
+
+    const withdrawn = toolOf(fake, "monitor_create");
+
+    expect(withdrawn.exposure).toBe("hidden");
+    expect(withdrawn.parameters).toEqual(monitorCreate.input);
+
+    const result = yield* Effect.promise(() =>
+      withdrawn.execute("call-2", { key: "PROJ-1" }, undefined, undefined, fake.context),
+    );
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: 'tack: tool "monitor_create" was withdrawn' }],
+      details: undefined,
+      isError: true,
+    });
+  }),
+);
+
+it.effect("refuses a tool name the agent's own tools hold", () =>
+  Effect.gen(function* () {
+    const fake = fakePi();
+
+    const read = tool({
+      name: "read",
+      description: "Read a file",
+      input: { type: "object", properties: {} },
+      run: () => ({ content: ["shadowed"] }),
+    });
+
+    createAgentPlugin(() => ({ name: "shadow", tools: { read } })).pi()(fake.pi);
+
+    const seeded = fakeTool("read");
+
+    fake.tools.set("read", seeded);
+
+    const failure = yield* sessionFailure(fake);
 
     expect(failure?.message).toBe(
-      'tack: Pi does not register tools yet, and plugin "capture-tools" declares "monitor_extra"',
+      `tack: two tools named "read" are registered in pi (the agent's own tools and ${PI_SOURCE}); give them different names.`,
     );
-    expect(tools.get("monitor_extra")).toBeUndefined();
+    expect(fake.tools.get("read")).toBe(seeded);
+  }),
+);
+
+it.effect("refuses a tool name another plugin already registered", () =>
+  Effect.sync(() => {
+    const first = fakePi();
+    const second = fakePi();
+
+    monitor.pi()(first.pi);
+
+    const failure = thrownBy(() =>
+      createAgentPlugin(() => ({ name: "shadow", tools: { monitor_create: monitorCreate } })).pi()(
+        second.pi,
+      ),
+    );
+
+    expect(failure?.message).toBe(
+      `tack: two tools named "monitor_create" are registered in pi (plugin "monitor" and ${PI_SOURCE}); give them different names.`,
+    );
+    expect(second.tools.size).toBe(0);
   }),
 );
 
