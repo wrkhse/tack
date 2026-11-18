@@ -97,8 +97,14 @@ export default defineConfig({
       },
       // Compares against the merge base, so a cached result could be stale.
       health: { command: "fallow audit", cache: false },
-      // Reads the live advisory database.
-      audit: { command: "bun audit", cache: false },
+      // Reads the live advisory database. One advisory is ignored, by the owner's decision on
+      // 2026-11-18: GHSA-fc5q-39xc-vjpf, a ReDoS in picomatch <= 4.0.7 with no patched release
+      // (npm's latest is still 4.0.7). It reaches us only through dev chains - vitest's globbing
+      // via tinyglobby/fdir, and @opencode/plugin's pacote - and `bun audit --production` is clean,
+      // because effect is tack's only production dependency; tack globs only its own patterns.
+      // Remove the --ignore when picomatch > 4.0.7 is published, and re-check on every dependency
+      // bump. Nothing else may be ignored.
+      audit: { command: "bun audit --ignore=GHSA-fc5q-39xc-vjpf", cache: false },
     },
   },
 });
