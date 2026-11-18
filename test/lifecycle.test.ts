@@ -4,9 +4,14 @@ import { Effect } from "effect";
 import type { SessionCreatedEvent, SessionEndedEvent } from "../src/hooks/lifecycle.ts";
 import { runSessionCreated, runSessionEnded } from "../src/hooks/lifecycle.ts";
 import type { HookContext } from "../src/hooks/tool-before.ts";
-import { logCapture, resolvedPlugin, sessionFor } from "./helpers.ts";
+import { logCapture, noTools, resolvedPlugin, sessionFor } from "./helpers.ts";
 
-const ctx: HookContext = { agent: "opencode", sessionId: "session-1", session: sessionFor("s1") };
+const ctx: HookContext = {
+  agent: "opencode",
+  sessionId: "session-1",
+  session: sessionFor("s1"),
+  tools: noTools(),
+};
 
 afterEach(() => {
   vi.restoreAllMocks();

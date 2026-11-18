@@ -25,8 +25,15 @@ result's text parts.
 | `toolBefore` rewrite | assigns `event.input`      | mutates `event.input.command`           |
 | `promptSent` append  | `prompt` hook edits `text` | `input` transform                       |
 | `toolAfter`          | `execute.after`            | `tool_result`                           |
+| `tools` register     | one `ctx.tool.transform`   | refused until Pi's slice                |
+| `tools` withdraw     | `editor.remove` transform  | refused until Pi's slice                |
 | scope                | `opencode:<location>`      | `pi`, one per process                   |
 | registration ends    | the setup cleanup          | `session_shutdown`                      |
+
+Every tool a definition declares is installed in OpenCode in one transform
+during `setup`, and each tool a plugin adds or withdraws later is one more
+transform. Pi has no tool registration yet: a Pi load refuses a plugin that
+declares tools rather than serving a model a tool whose handler Pi never runs.
 
 A rewrite keeps the agent's other input fields. On OpenCode the adapter spreads
 the input and replaces `command`; Pi requires the command to change in place.

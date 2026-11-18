@@ -3,9 +3,9 @@ import { Effect, Predicate } from "effect";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { hostSlot } from "../../src/host/host.ts";
-import type { Session, ToolCall, ToolResult } from "../../src/index.ts";
-import { createAgentPlugin } from "../../src/index.ts";
-import { quietConsole } from "../helpers.ts";
+import type { HookContext, Session, ToolCall, ToolResult } from "../../src/index.ts";
+import { createAgentPlugin, tool } from "../../src/index.ts";
+import { quietConsole, thrownBy } from "../helpers.ts";
 
 type PiEventName =
   | "tool_call"
@@ -139,6 +139,18 @@ const denyPush = createAgentPlugin(() => ({
 
   toolBefore: (call) => (call.tool === "shell" ? { deny: "blocked by test" } : undefined),
 }));
+
+/** One tool a plugin would ship; Pi refuses it until its adapter registers tools. */
+const monitorCreate = tool<{ key: string }>({
+  name: "monitor_create",
+  description: "Start watching a Jira issue",
+  input: {
+    type: "object",
+    properties: { key: { type: "string" } },
+    required: ["key"],
+  },
+  run: (input) => ({ content: [`watching ${input.key}`] }),
+});
 
 /** The message one append sends, as Pi's `sendMessage` receives it. */
 function messageOf(text: string): FakeAppendMessage {
@@ -481,6 +493,71 @@ it.effect("throws when the same name loads twice in the process scope", () =>
     yield* runHook(() => hookOf(first.handlers, "tool_call")(event, first.context));
 
     expect(event.input).toEqual({ command: "git push origin main --dry-run" });
+  }),
+);
+
+it.effect("refuses a plugin that declares tools, naming the first", () =>
+  Effect.sync(() => {
+    const fake = fakePi();
+
+    const monitor = createAgentPlugin(() => ({
+      name: "monitor",
+      tools: { monitor_create: monitorCreate },
+    }));
+
+    const failure = thrownBy(() => monitor.pi()(fake.pi));
+
+    expect(failure?.message).toBe(
+      'tack: Pi does not register tools yet, and plugin "monitor" declares "monitor_create"',
+    );
+  }),
+);
+
+/** The tool registry a plugin's ctx carries, captured through an input hook. */
+function toolsOf(fake: FakePi): Effect.Effect<HookContext["tools"]> {
+  return Effect.gen(function* () {
+    let captured: HookContext["tools"] | undefined;
+
+    const capture = createAgentPlugin(() => ({
+      name: "capture-tools",
+
+      promptSent: (_prompt, ctx) => {
+        captured = ctx.tools;
+      },
+    }));
+
+    capture.pi()(fake.pi);
+
+    yield* runHook(() =>
+      hookOf(fake.handlers, "input")({ text: "hi", source: "interactive" }, fake.context),
+    );
+
+    if (captured === undefined) {
+      throw new Error("the adapter gave the hook no tool registry");
+    }
+
+    return captured;
+  });
+}
+
+it.effect("refuses a tool added through the Pi context, naming it", () =>
+  Effect.gen(function* () {
+    const fake = fakePi();
+    const tools = yield* toolsOf(fake);
+
+    const extra = tool({
+      name: "monitor_extra",
+      description: "Watch one more issue",
+      input: { type: "object", properties: {} },
+      run: () => ({ content: ["watching"] }),
+    });
+
+    const failure = thrownBy(() => tools.add(extra));
+
+    expect(failure?.message).toBe(
+      'tack: Pi does not register tools yet, and plugin "capture-tools" declares "monitor_extra"',
+    );
+    expect(tools.get("monitor_extra")).toBeUndefined();
   }),
 );
 

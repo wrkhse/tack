@@ -167,7 +167,7 @@ export const runOpenCodeScenario = (
   scenario: Scenario,
 ): Effect.Effect<AgentRun, never, Scope.Scope> =>
   Effect.gen(function* () {
-    const { box, model } = yield* prepareOpenCode(scenario.plugins);
+    const { box, model } = yield* prepareOpenCode(scenario.plugins, scenario.standIn);
 
     const command = yield* runCommand({
       bin: box.opencode.bin,

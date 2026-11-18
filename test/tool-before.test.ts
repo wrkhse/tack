@@ -10,9 +10,14 @@ import type {
   ToolDecision,
 } from "../src/hooks/tool-before.ts";
 import { ToolDecision as Decision, runToolBefore } from "../src/hooks/tool-before.ts";
-import { sessionFor } from "./helpers.ts";
+import { noTools, sessionFor } from "./helpers.ts";
 
-const ctx: HookContext = { agent: "opencode", sessionId: "session-1", session: sessionFor("s1") };
+const ctx: HookContext = {
+  agent: "opencode",
+  sessionId: "session-1",
+  session: sessionFor("s1"),
+  tools: noTools(),
+};
 
 const shellCall: ToolCall = {
   tool: "shell",
@@ -37,6 +42,7 @@ function plugin(definition: Partial<ResolvedPlugin> & { readonly name: string })
     responseFinished: undefined,
     sessionIdle: undefined,
     permissionAsked: undefined,
+    tools: [],
     ...definition,
   };
 }

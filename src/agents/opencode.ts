@@ -2,7 +2,12 @@ import { fileURLToPath } from "node:url";
 
 import { Duration, Effect, Predicate } from "effect";
 import type * as oc from "@opencode/plugin";
-import type { Result } from "@opencode/plugin/promise/tool";
+import type {
+  Info as NativeTool,
+  Result,
+  ToolContext as NativeToolContext,
+  ToolEditor,
+} from "@opencode/plugin/promise/tool";
 
 import type { HostSlot, Registration } from "../host/host.ts";
 import { hostSlot } from "../host/host.ts";
@@ -18,6 +23,10 @@ import type { HookContext, ShellDialect, ToolCall } from "../hooks/tool-before.t
 import type { ResolvedPlugin } from "../plugin.ts";
 import type { Outcome, SessionPort } from "../session.ts";
 import { sessionHandle } from "../session.ts";
+import type { ToolPort, ToolRegistry, TakenTool } from "../tools/registry.ts";
+import { createToolRegistry } from "../tools/registry.ts";
+import type { CompiledTool, ToolCallInput, ToolCallResult, ToolContext } from "../tools/tool.ts";
+import { invokeTool } from "../tools/tool.ts";
 import { runBefore } from "./chain.ts";
 import { joinTextParts } from "./text.ts";
 
@@ -218,16 +227,23 @@ function opencodeSessionPort(
   };
 }
 
-/** One event's hook context: the session's id and the handle that acts on it. */
-function contextOf(
-  context: oc.Plugin.Context,
-  sessionID: string,
-  ended: (sessionID: string) => boolean,
-): HookContext {
+/**
+ * The scope of one registration: the agent's context, the sessions it reports,
+ * and the tools it registered, which every hook and every tool call shares.
+ */
+interface HookScope {
+  readonly context: oc.Plugin.Context;
+  readonly sessions: SessionStates;
+  readonly tools: ToolRegistry;
+}
+
+/** One event's hook context: the session's id, the handle that acts on it, and the tools. */
+function contextOf(scope: HookScope, sessionID: string): HookContext {
   return {
     agent: "opencode",
     sessionId: sessionID,
-    session: sessionHandle(opencodeSessionPort(context, ended), sessionID),
+    session: sessionHandle(opencodeSessionPort(scope.context, scope.sessions.hasEnded), sessionID),
+    tools: scope.tools,
   };
 }
 
@@ -346,18 +362,17 @@ interface SessionReports {
 function reportSessionEvent(
   slot: HostSlot,
   registration: Registration,
-  context: oc.Plugin.Context,
-  states: SessionStates,
+  scope: HookScope,
   found: SessionEvent,
 ): Promise<void> {
   const { sessionID } = found.data;
-  const ctx = contextOf(context, sessionID, states.hasEnded);
+  const ctx = contextOf(scope, sessionID);
   const plugins = slot.plugins(registration.scope);
 
   if (found.type === "session.deleted" || found.type === "session.archived") {
     return run(runSessionEnded(plugins, { session: ctx.session, reason: "closed" }, ctx)).then(
       () => {
-        states.ended(sessionID);
+        scope.sessions.ended(sessionID);
       },
     );
   }
@@ -380,18 +395,14 @@ function reportSessionEvent(
  * before it. A creation report is kept per session until it settles, so
  * nothing about that session runs before its `sessionCreated` handlers.
  */
-function reportsFor(
-  slot: HostSlot,
-  registration: Registration,
-  context: oc.Plugin.Context,
-  states: SessionStates,
-): SessionReports {
+function reportsFor(slot: HostSlot, registration: Registration, scope: HookScope): SessionReports {
+  const { sessions } = scope;
   const creating = new Map<string, Promise<void>>();
 
   const created = (sessionID: string, resumed: boolean): Promise<void> => {
-    states.began(sessionID);
+    sessions.began(sessionID);
 
-    const ctx = contextOf(context, sessionID, states.hasEnded);
+    const ctx = contextOf(scope, sessionID);
 
     const pending = run(
       runSessionCreated(slot.plugins(registration.scope), { session: ctx.session, resumed }, ctx),
@@ -407,7 +418,7 @@ function reportsFor(
   };
 
   const ensure = (sessionID: string): Promise<void> => {
-    const state = states.stateOf(sessionID);
+    const state = sessions.stateOf(sessionID);
 
     if (state === "ended") {
       return Promise.resolve();
@@ -428,12 +439,12 @@ function reportsFor(
    * `location` and `idle` does not.
    */
   const idle = (sessionID: string): Promise<void> => {
-    if (!slot.isLeader(registration) || states.hasEnded(sessionID)) {
+    if (!slot.isLeader(registration) || sessions.hasEnded(sessionID)) {
       return Promise.resolve();
     }
 
     return ensure(sessionID).then(() => {
-      const ctx = contextOf(context, sessionID, states.hasEnded);
+      const ctx = contextOf(scope, sessionID);
 
       return run(runSessionIdle(slot.plugins(registration.scope), { session: ctx.session }, ctx));
     });
@@ -446,27 +457,25 @@ function reportsFor(
 
     const { sessionID } = found.data;
 
-    if (states.hasEnded(sessionID)) {
+    if (sessions.hasEnded(sessionID)) {
       return Promise.resolve();
     }
 
-    if (found.location !== undefined && !isHere(found.location, context.location)) {
+    if (found.location !== undefined && !isHere(found.location, scope.context.location)) {
       return Promise.resolve();
     }
 
-    if (found.location === undefined && states.stateOf(sessionID) === undefined) {
+    if (found.location === undefined && sessions.stateOf(sessionID) === undefined) {
       return ignoreNoLocation();
     }
 
     if (found.type === "session.created") {
-      return states.stateOf(sessionID) === undefined
+      return sessions.stateOf(sessionID) === undefined
         ? created(sessionID, false)
         : Promise.resolve();
     }
 
-    return ensure(sessionID).then(() =>
-      reportSessionEvent(slot, registration, context, states, found),
-    );
+    return ensure(sessionID).then(() => reportSessionEvent(slot, registration, scope, found));
   };
 
   return { event, idle };
@@ -618,8 +627,7 @@ function registerIdle(
 function handlePermission(
   slot: HostSlot,
   registration: Registration,
-  context: oc.Plugin.Context,
-  states: SessionStates,
+  scope: HookScope,
   event: PermissionEvent,
 ): Promise<void> {
   if (!slot.isLeader(registration) || event.effect === "deny") {
@@ -639,7 +647,7 @@ function handlePermission(
     runPermissionAsked(
       slot.plugins(registration.scope),
       request,
-      contextOf(context, event.sessionID, states.hasEnded),
+      contextOf(scope, event.sessionID),
     ),
   ).then((result) => {
     if (result === undefined) {
@@ -661,15 +669,14 @@ function handlePermission(
 function handleBefore(
   slot: HostSlot,
   registration: Registration,
-  context: oc.Plugin.Context,
-  states: SessionStates,
+  scope: HookScope,
   event: ToolEvent,
 ): void | Promise<void> {
   return runBefore(
     slot,
     registration,
     callOf(event),
-    contextOf(context, event.sessionID, states.hasEnded),
+    contextOf(scope, event.sessionID),
     (reason) => {
       throw new Error(reason);
     },
@@ -681,15 +688,14 @@ function handleBefore(
 function handleAfter(
   slot: HostSlot,
   registration: Registration,
-  context: oc.Plugin.Context,
-  states: SessionStates,
+  scope: HookScope,
   event: AfterEvent,
 ): void | Promise<void> {
   if (!slot.isLeader(registration)) {
     return;
   }
 
-  const ctx = contextOf(context, event.sessionID, states.hasEnded);
+  const ctx = contextOf(scope, event.sessionID);
   const call = callOf(event);
 
   const result: ToolResult =
@@ -704,15 +710,14 @@ function handleAfter(
 function handlePrompt(
   slot: HostSlot,
   registration: Registration,
-  context: oc.Plugin.Context,
-  states: SessionStates,
+  scope: HookScope,
   event: PromptEvent,
 ): void | Promise<void> {
   if (!slot.isLeader(registration)) {
     return;
   }
 
-  const ctx = contextOf(context, event.sessionID, states.hasEnded);
+  const ctx = contextOf(scope, event.sessionID);
 
   return run(
     runPromptSent(slot.plugins(registration.scope), { text: event.prompt.text }, ctx),
@@ -723,17 +728,149 @@ function handlePrompt(
   });
 }
 
-/** Ends the slot registration, every hook registration and the event stream. */
+/**
+ * OpenCode's view of one tack tool: the header unchanged, and an execute that
+ * maps the result. `codemode: false` is what makes it a direct tool: OpenCode
+ * turns Code Mode on for an agent by default, and its tool snapshot offers only
+ * a tool whose `options.codemode` is `false` in the model's list, keeping
+ * every other one inside Code Mode's catalog.
+ */
+function nativeTool(tool: CompiledTool, scope: () => HookScope): NativeTool {
+  return {
+    name: tool.name,
+    description: tool.description,
+    input: tool.input,
+    options: { codemode: false },
+    execute: (input, context) => runTool(tool, { input }, scope(), context),
+  };
+}
+
+/** Runs one tool and maps tack's result onto OpenCode's. */
+function runTool(
+  tool: CompiledTool,
+  call: ToolCallInput,
+  scope: HookScope,
+  context: NativeToolContext,
+): Promise<Result> {
+  const ctx: ToolContext = {
+    callId: String(context.id),
+    signal: context.signal,
+    session: sessionHandle(
+      opencodeSessionPort(scope.context, scope.sessions.hasEnded),
+      context.sessionID,
+    ),
+    tools: scope.tools,
+  };
+
+  return Effect.runPromise(invokeTool(tool, call, ctx), { signal: context.signal }).then(
+    toNativeResult,
+  );
+}
+
+/**
+ * tack's result in OpenCode's shape: every content string becomes a text part
+ * and `details` becomes metadata. An error result leaves through OpenCode's
+ * error path, a throw, because `Tool.Result` has no error flag; OpenCode's
+ * promise adapter reports the throw as `Tool.Error` carrying this message.
+ */
+function toNativeResult(result: ToolCallResult): Result {
+  if (result.isError === true) {
+    throw new Error(result.content.join("\n"));
+  }
+
+  const content = result.content.map((text) => ({ type: "text" as const, text }));
+  const metadata = result.details;
+
+  return metadata === undefined ? { content } : { content, metadata };
+}
+
+/** The port a registry reaches OpenCode's tool namespace through, and its registrations. */
+interface NativeToolPort extends ToolPort {
+  readonly dispose: () => Promise<void>;
+}
+
+/**
+ * Builds the port for one registration. OpenCode applies a transform when it
+ * is registered, so every install and withdrawal is one transform whose
+ * registration the plugin's cleanup disposes.
+ */
+function openCodeToolPort(context: oc.Plugin.Context, scope: () => HookScope): NativeToolPort {
+  const registrations: Array<Promise<HookRegistration>> = [];
+
+  const transform = (callback: (editor: ToolEditor) => void): void => {
+    const pending = context.tool.transform(callback);
+
+    registrations.push(pending);
+
+    // A registration made after setup has no caller to report to, so its
+    // failure is logged rather than becoming an unhandled rejection.
+    pending.catch((cause: unknown) =>
+      run(Effect.logWarning(`tack: OpenCode tool registration failed: ${messageOf(cause)}`)),
+    );
+  };
+
+  return {
+    install: (tools) =>
+      transform((editor) => {
+        for (const tool of tools) {
+          editor.add(nativeTool(tool, scope));
+        }
+      }),
+    withdraw: (name) =>
+      transform((editor) => {
+        editor.remove(name);
+      }),
+    settled: () => Promise.all(registrations).then(() => undefined),
+    dispose: () =>
+      Promise.all(
+        registrations.map((pending) =>
+          pending.then(
+            (registration) => registration.dispose(),
+            () => undefined,
+          ),
+        ),
+      ).then(() => undefined),
+  };
+}
+
+/**
+ * Every name this location's tool namespace already holds besides the
+ * plugin's own: the agent's built-in tools, and those of every other plugin in
+ * the scope, which the host slot carries however many copies of tack
+ * registered them.
+ */
+function takenTools(
+  slot: HostSlot,
+  plugin: ResolvedPlugin,
+  scope: string,
+  existing: ReadonlyArray<{ readonly id: string }>,
+): ReadonlyArray<TakenTool> {
+  const fromPlugins = slot
+    .plugins(scope)
+    .filter((other) => other.name !== plugin.name)
+    .flatMap((other) =>
+      other.tools.map((tool) => ({ name: tool.name, source: `plugin "${other.name}"` })),
+    );
+
+  const fromAgent = existing.map((tool) => ({ name: tool.id, source: "the agent's own tools" }));
+
+  return [...fromPlugins, ...fromAgent];
+}
+
+/** Ends the slot registration, every hook registration, the tools and the event stream. */
 function disposeAll(
   registration: Registration,
   hooks: ReadonlyArray<HookRegistration>,
   watcher: Watcher,
+  tools: NativeToolPort,
 ): Promise<void> {
   registration.dispose();
 
-  return Promise.all([...hooks.map((hook) => hook.dispose()), watcher.dispose()]).then(
-    () => undefined,
-  );
+  return Promise.all([
+    ...hooks.map((hook) => hook.dispose()),
+    watcher.dispose(),
+    tools.dispose(),
+  ]).then(() => undefined);
 }
 
 /** Registers each step's hook in order, so a failure can dispose the earlier ones. */
@@ -752,54 +889,106 @@ function registerInOrder(
   );
 }
 
-/** Registers the plugin's hooks and events, and builds the cleanup that releases them. */
+/** The agent hooks tack registers, each over the scope the plugin's tools share. */
+function hookSteps(
+  slot: HostSlot,
+  registration: Registration,
+  context: oc.Plugin.Context,
+  scope: () => HookScope,
+): ReadonlyArray<() => Promise<HookRegistration>> {
+  return [
+    () =>
+      context.tool.hook("execute.before", (event) =>
+        handleBefore(slot, registration, scope(), event),
+      ),
+    () =>
+      context.tool.hook("execute.after", (event) =>
+        handleAfter(slot, registration, scope(), event),
+      ),
+    () =>
+      context.session.hook("prompt", (event) => handlePrompt(slot, registration, scope(), event)),
+    () =>
+      context.permission.hook("evaluate", (event) =>
+        handlePermission(slot, registration, scope(), event),
+      ),
+  ];
+}
+
+/** Starts the idle hook and the event stream, and returns the cleanup that releases them. */
+function watchScope(
+  slot: HostSlot,
+  registration: Registration,
+  context: oc.Plugin.Context,
+  scope: () => HookScope,
+  port: NativeToolPort,
+  hooks: HookRegistration[],
+): Promise<oc.Plugin.Cleanup> {
+  const reports = reportsFor(slot, registration, scope());
+
+  return registerIdle(reports, context).then((idle) => {
+    if (idle !== undefined) {
+      hooks.push(idle);
+    }
+
+    const watcher = watchEvents(reports, context, idle === undefined);
+
+    return () => disposeAll(registration, hooks, watcher, port);
+  });
+}
+
+/** Registers the plugin's tools, hooks and events, and builds the cleanup that releases them. */
 function hookInto(
+  plugin: ResolvedPlugin,
   slot: HostSlot,
   registration: Registration,
   context: oc.Plugin.Context,
 ): Promise<oc.Plugin.Cleanup> {
   const hooks: HookRegistration[] = [];
-  const states = sessionStates();
+  const sessions = sessionStates();
 
-  const steps: ReadonlyArray<() => Promise<HookRegistration>> = [
-    () =>
-      context.tool.hook("execute.before", (event) =>
-        handleBefore(slot, registration, context, states, event),
-      ),
-    () =>
-      context.tool.hook("execute.after", (event) =>
-        handleAfter(slot, registration, context, states, event),
-      ),
-    () =>
-      context.session.hook("prompt", (event) =>
-        handlePrompt(slot, registration, context, states, event),
-      ),
-    () =>
-      context.permission.hook("evaluate", (event) =>
-        handlePermission(slot, registration, context, states, event),
-      ),
-  ];
+  let scope: HookScope | undefined;
 
-  return registerInOrder(steps, hooks)
-    .then(() => {
-      const reports = reportsFor(slot, registration, context, states);
+  function toolScope(): HookScope {
+    if (scope === undefined) {
+      throw new Error("tack: a tool call arrived before its registration finished");
+    }
 
-      return registerIdle(reports, context).then((idle) => {
-        if (idle !== undefined) {
-          hooks.push(idle);
-        }
+    return scope;
+  }
 
-        const watcher = watchEvents(reports, context, idle === undefined);
+  const native = openCodeToolPort(context, toolScope);
 
-        return () => disposeAll(registration, hooks, watcher);
-      });
+  return context.tool
+    .list()
+    .then((existing) => {
+      const tools = createToolRegistry(
+        {
+          plugin: plugin.name,
+          scope: registration.scope,
+          source: SOURCE,
+          hasSession: true,
+          port: native,
+          taken: takenTools(slot, plugin, registration.scope, existing),
+        },
+        plugin.tools,
+      );
+
+      scope = { context, sessions, tools };
+
+      return native.settled();
     })
+    .then(() => registerInOrder(hookSteps(slot, registration, context, toolScope), hooks))
+    .then(() => watchScope(slot, registration, context, toolScope, native, hooks))
     .catch((cause: Error) => {
       registration.dispose();
 
-      return Promise.all(hooks.map((hook) => hook.dispose())).then(() => {
-        throw cause;
-      });
+      return native
+        .dispose()
+        .catch(() => undefined)
+        .then(() => Promise.all(hooks.map((hook) => hook.dispose())))
+        .then(() => {
+          throw cause;
+        });
     });
 }
 
@@ -815,7 +1004,7 @@ function setupPlugin(
 ): Promise<oc.Plugin.Cleanup> {
   return run(hostSlot()).then((slot) =>
     run(slot.register(scope, plugin, SOURCE)).then((registration) =>
-      hookInto(slot, registration, context),
+      hookInto(plugin, slot, registration, context),
     ),
   );
 }

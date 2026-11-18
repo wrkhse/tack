@@ -6,7 +6,7 @@ import { Effect, Schema } from "effect";
 import { recorded } from "./harness/recorder.ts";
 import type { CommandResult } from "./harness/run.ts";
 import { readOptionalText, type Sandbox } from "./harness/sandbox.ts";
-import type { ChatRequest, StandIn } from "./model/stand-in.ts";
+import type { ChatRequest, StandIn, StandInOptions } from "./model/stand-in.ts";
 import { parseLoaded } from "./plugins/loaded.ts";
 
 /** The agent a scenario ran against. */
@@ -14,6 +14,7 @@ export type AgentName = "opencode" | "pi";
 
 /** Every tack plugin the suite loads, by file name. */
 export type PluginName =
+  | "tool-create"
   | "deny-push"
   | "throws"
   | "throws-allowed"
@@ -76,6 +77,8 @@ export const collectEvidence = (
 export interface Scenario {
   readonly name: string;
   readonly plugins: ReadonlyArray<PluginName>;
+  /** How the scripted model answers this row; absent means the T1 behaviour. */
+  readonly standIn?: StandInOptions;
   readonly check: (evidence: Evidence) => void;
 }
 

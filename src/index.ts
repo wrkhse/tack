@@ -16,6 +16,14 @@ export type { Agent, Meta, PluginDefinition, ResolvedPlugin } from "./plugin.ts"
 
 export { APPEND_CAP_BYTES } from "./hooks/prompt-sent.ts";
 
+export { DEFAULT_TIMEOUT_MS, InvalidTool, MAX_RESULT_BYTES, tool } from "./tools/tool.ts";
+
+export type { CompiledTool, ToolCallResult, ToolContext, ToolDefinition } from "./tools/tool.ts";
+
+export { DuplicateTool } from "./tools/registry.ts";
+
+export type { ToolHandle, ToolRegistry } from "./tools/registry.ts";
+
 export type { Prompt, PromptSent, PromptSentResult } from "./hooks/prompt-sent.ts";
 
 export type {

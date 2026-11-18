@@ -29,6 +29,9 @@ import type { HookContext, ToolCall } from "../hooks/tool-before.ts";
 import type { ResolvedPlugin } from "../plugin.ts";
 import type { AppendWhen, ModelRef, Outcome, SessionPort } from "../session.ts";
 import { sessionHandle } from "../session.ts";
+import type { ToolPort, ToolRegistry } from "../tools/registry.ts";
+import { createToolRegistry } from "../tools/registry.ts";
+import type { CompiledTool } from "../tools/tool.ts";
 import { runBefore } from "./chain.ts";
 import { joinTextParts } from "./text.ts";
 
@@ -56,6 +59,7 @@ interface Attachment {
   readonly slot: HostSlot;
   readonly registration: Registration;
   readonly pi: ExtensionAPI;
+  readonly tools: ToolRegistry;
   readonly isEnded: () => boolean;
 }
 
@@ -269,7 +273,40 @@ function contextOf(attachment: Attachment, context: ExtensionContext): HookConte
     agent: "pi",
     sessionId,
     session: sessionHandle(piSessionPort(attachment, context), sessionId),
+    tools: attachment.tools,
   };
+}
+
+/**
+ * Pi's own tool registration lands with its slice. Until then a Pi load
+ * refuses a plugin that declares tools rather than serving a model a tool
+ * whose handler Pi never runs.
+ */
+function piTools(plugin: ResolvedPlugin): ToolRegistry {
+  const refuse = (tools: ReadonlyArray<CompiledTool>): void => {
+    const [first] = tools;
+
+    throw new Error(
+      `tack: Pi does not register tools yet, and plugin "${plugin.name}" declares "${first?.name ?? "a tool"}"`,
+    );
+  };
+
+  const port: ToolPort = {
+    install: refuse,
+    withdraw: () => undefined,
+    settled: () => Promise.resolve(),
+  };
+
+  return createToolRegistry(
+    {
+      plugin: plugin.name,
+      scope: PI_SCOPE,
+      source: SOURCE,
+      hasSession: true,
+      port,
+    },
+    plugin.tools,
+  );
 }
 
 /** A session Pi started from an existing one is the session tack inherited. */
@@ -454,10 +491,11 @@ function registeredIn(slot: HostSlot, plugin: ResolvedPlugin): Registration {
  */
 function attach(plugin: ResolvedPlugin, pi: ExtensionAPI): void {
   const slot: HostSlot = Effect.runSync(hostSlot());
+  const tools = piTools(plugin);
   const registration = registeredIn(slot, plugin);
   let ended = false;
 
-  const attachment: Attachment = { slot, registration, pi, isEnded: () => ended };
+  const attachment: Attachment = { slot, registration, pi, tools, isEnded: () => ended };
 
   // Pi has no permission layer, so nothing is registered for permissionAsked:
   // its fidelity row is `unsupported`.

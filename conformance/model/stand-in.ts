@@ -34,6 +34,12 @@ const DEFAULT_COMPACTION_MARKER = "tack-conformance: summarize this session";
 /** The short text a compaction request is answered with. */
 const SCRIPTED_SUMMARY = "summary";
 
+/** The one tool call a scripted turn makes. */
+export interface ScriptedCall {
+  readonly name: string;
+  readonly input: Schema.Json;
+}
+
 /** The message in the SSE error a scripted failure answers with. */
 const SCRIPTED_ERROR = "tack-conformance: scripted request failure";
 
@@ -57,6 +63,8 @@ export interface StandInOptions {
    * mid-turn. A test aid, bounded to `MAX_POST_TOOL_DELAY_MS`; default 0.
    */
   readonly postToolDelayMs?: number;
+  /** The tool a scripted turn calls; absent means the agent's own shell tool. */
+  readonly call?: ScriptedCall;
 }
 
 /** A local OpenAI-compatible model that scripts every turn the suite needs. */
@@ -77,6 +85,7 @@ interface ModelState {
   readonly failMode: "next" | "always";
   readonly compactionMarker: string;
   readonly postToolDelayMs: number;
+  readonly call: ScriptedCall | undefined;
   readonly requests: Array<ChatRequest>;
 }
 
@@ -141,7 +150,13 @@ const errorTurn = (): ReadonlyArray<string> => [
   DONE_LINE,
 ];
 
-const toolCallTurn = (tool: ShellTool, turn: number): ReadonlyArray<string> => {
+/** The default scripted turn: the agent's own shell tool, running a push. */
+const shellCall = (tool: ShellTool): ScriptedCall => ({
+  name: tool,
+  input: { command: SCRIPTED_COMMAND },
+});
+
+const toolCallTurn = (call: ScriptedCall, turn: number): ReadonlyArray<string> => {
   const opening: ChunkDelta = {
     role: "assistant",
     content: null,
@@ -150,20 +165,18 @@ const toolCallTurn = (tool: ShellTool, turn: number): ReadonlyArray<string> => {
         index: 0,
         id: "call_" + turn,
         type: "function",
-        function: { name: tool, arguments: "" },
+        function: { name: call.name, arguments: "" },
       },
     ],
   };
 
-  const command: ChunkDelta = {
-    tool_calls: [
-      { index: 0, function: { arguments: JSON.stringify({ command: SCRIPTED_COMMAND }) } },
-    ],
+  const input: ChunkDelta = {
+    tool_calls: [{ index: 0, function: { arguments: JSON.stringify(call.input) } }],
   };
 
   return [
     chunkLine(opening, null),
-    chunkLine(command, null),
+    chunkLine(input, null),
     chunkLine({}, "tool_calls"),
     usageLine(),
     DONE_LINE,
@@ -216,7 +229,7 @@ const turnFor = (state: ModelState, request: ChatRequest, tool: ShellTool): Turn
 
   state.toolTurns += 1;
 
-  return { lines: toolCallTurn(tool, state.toolTurns), delayMs: 0 };
+  return { lines: toolCallTurn(state.call ?? shellCall(tool), state.toolTurns), delayMs: 0 };
 };
 
 const parseChatRequest = (text: string): ChatRequest | null => {
@@ -388,6 +401,7 @@ export const standInModel = (
       failMode: options.failMode ?? "next",
       compactionMarker: options.compactionMarker ?? DEFAULT_COMPACTION_MARKER,
       postToolDelayMs: boundedDelay(options.postToolDelayMs),
+      call: options.call,
       requests: [],
     };
 

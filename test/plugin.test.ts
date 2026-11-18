@@ -17,7 +17,7 @@ const invalidDefinitions: ReadonlyArray<PluginDefinition> = [
 describe("resolvePlugin", () => {
   it.effect("applies the documented defaults", () =>
     Effect.gen(function* () {
-      const resolved = yield* resolvePlugin({ name: "safe-push" });
+      const resolved = yield* resolvePlugin({ name: "safe-push" }, "opencode");
 
       expect(resolved.name).toBe("safe-push");
       expect(resolved.priority).toBe(100);
@@ -37,12 +37,15 @@ describe("resolvePlugin", () => {
 
   it.effect("keeps explicit values", () =>
     Effect.gen(function* () {
-      const resolved = yield* resolvePlugin({
-        name: "signed-push",
-        priority: 20,
-        budgetMs: 250,
-        onError: { toolBefore: "allow", permissionAsked: "deny" },
-      });
+      const resolved = yield* resolvePlugin(
+        {
+          name: "signed-push",
+          priority: 20,
+          budgetMs: 250,
+          onError: { toolBefore: "allow", permissionAsked: "deny" },
+        },
+        "opencode",
+      );
 
       expect(resolved.priority).toBe(20);
       expect(resolved.budgetMs).toBe(250);
@@ -54,7 +57,7 @@ describe("resolvePlugin", () => {
   it.effect("rejects each invalid definition and names the plugin", () =>
     Effect.gen(function* () {
       for (const definition of invalidDefinitions) {
-        const error = yield* Effect.flip(resolvePlugin(definition));
+        const error = yield* Effect.flip(resolvePlugin(definition, "opencode"));
 
         expect(error).toBeInstanceOf(InvalidPlugin);
         expect(error.plugin).toBe(definition.name);
@@ -65,7 +68,7 @@ describe("resolvePlugin", () => {
 
   it.effect("explains the broken rule", () =>
     Effect.gen(function* () {
-      const error = yield* Effect.flip(resolvePlugin({ name: "Bad Name" }));
+      const error = yield* Effect.flip(resolvePlugin({ name: "Bad Name" }, "opencode"));
 
       expect(error.message).toBe('tack: plugin "Bad Name" is invalid: name must match [a-z0-9-]+');
     }),

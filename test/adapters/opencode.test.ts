@@ -2,12 +2,13 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, expect, it, vi } from "@effect/vitest";
 import { Effect, Predicate } from "effect";
+import type { JsonSchema, Schema } from "effect";
 import type * as oc from "@opencode/plugin";
 
 import { opencodeScope } from "../../src/agents/opencode.ts";
 import { hostSlot } from "../../src/host/host.ts";
 import type { AgentPlugin, Session, ToolCall, ToolResult } from "../../src/index.ts";
-import { createAgentPlugin } from "../../src/index.ts";
+import { createAgentPlugin, tool } from "../../src/index.ts";
 import { quietConsole } from "../helpers.ts";
 
 const DIRECTORY = "/work/app";
@@ -111,6 +112,34 @@ interface FakeHandlers {
   idle?: FakeIdleCallback;
 }
 
+/** The fields of OpenCode's tool context tack reads. */
+interface FakeToolCall {
+  readonly id: string;
+  readonly sessionID: string;
+  readonly signal: AbortSignal;
+}
+
+/** The result shape tack maps a call onto, as the test reads it back. */
+interface FakeNativeResult {
+  readonly content?: ReadonlyArray<{ readonly type: "text"; readonly text: string }>;
+  readonly metadata?: Schema.JsonObject;
+}
+
+/** One tool the fake editor holds, as the adapter registered it. */
+interface FakeNativeTool {
+  readonly name: string;
+  readonly description: string;
+  readonly input: JsonSchema.JsonSchema;
+  readonly options?: { readonly codemode?: boolean };
+  readonly execute: (input: Schema.Json, call: FakeToolCall) => Promise<FakeNativeResult>;
+}
+
+/** The two editor methods the adapter calls, over the fake's tool map. */
+interface FakeEditor {
+  readonly add: (tool: FakeNativeTool) => void;
+  readonly remove: (id: string) => void;
+}
+
 interface FakeContext {
   readonly context: oc.Plugin.Context;
   readonly handlers: FakeHandlers;
@@ -121,29 +150,81 @@ interface FakeContext {
   /** What `session.interrupt` reports; the next subscription fails while it counts down. */
   readonly interruptResult: { interrupted: boolean };
   readonly subscriptionFailures: { remaining: number };
+  /** The namespace the adapter registered its tools in, by name. */
+  readonly tools: Map<string, FakeNativeTool>;
+  /** Every name the adapter withdrew, in order. */
+  readonly removed: string[];
 }
 
 interface FakeRegistration {
   readonly dispose: () => Promise<void>;
 }
 
-/** The fake's shape, which the Context members the adapter reads cover. */
+/**
+ * The fake's shape. A real OpenCode context has to be assignable to it for the
+ * guard below to be valid, so the tool members stay wide here and the fake
+ * uses them through `FakeToolDomain`, which holds exactly what the adapter
+ * reads.
+ */
 interface FakeCandidate {
   readonly location: {
     readonly directory: string;
     readonly workspaceID?: string | undefined;
   };
   readonly tool: {
-    readonly hook: (...args: never[]) => Promise<FakeRegistration>;
+    readonly hook: unknown;
+    readonly list: unknown;
+    readonly transform: unknown;
   };
   readonly session: {
     readonly hook: unknown;
   };
   readonly permission: {
-    readonly hook: (...args: never[]) => Promise<FakeRegistration>;
+    readonly hook: unknown;
   };
   readonly event: {
     readonly subscribe: unknown;
+  };
+}
+
+/** The tool domain the adapter reads, over the fake's namespace. */
+interface FakeToolDomain {
+  readonly hook: (
+    name: "execute.before" | "execute.after",
+    callback: FakeToolCallback,
+  ) => Promise<FakeRegistration>;
+  readonly list: () => Promise<ReadonlyArray<{ readonly id: string }>>;
+  readonly transform: (callback: (editor: FakeEditor) => void) => Promise<FakeRegistration>;
+}
+
+function fakeToolDomain(
+  handlers: FakeHandlers,
+  disposed: string[],
+  tools: Map<string, FakeNativeTool>,
+  removed: string[],
+): FakeToolDomain {
+  const editor: FakeEditor = {
+    add: (added) => {
+      tools.set(added.name, added);
+    },
+    remove: (id) => {
+      removed.push(id);
+      tools.delete(id);
+    },
+  };
+
+  return {
+    hook: (name, callback) => {
+      handlers[name] = callback;
+
+      return registration(name, disposed);
+    },
+    list: () => Promise.resolve([...tools.keys()].map((id) => ({ id }))),
+    transform: (callback) => {
+      callback(editor);
+
+      return registration("tool.transform", disposed);
+    },
   };
 }
 
@@ -165,6 +246,8 @@ function isOpenCodeContext(value: FakeCandidate): value is oc.Plugin.Context {
     Predicate.isString(location.directory) &&
     (location.workspaceID === undefined || Predicate.isString(location.workspaceID)) &&
     Predicate.isFunction(value.tool.hook) &&
+    Predicate.isFunction(value.tool.list) &&
+    Predicate.isFunction(value.tool.transform) &&
     Predicate.isFunction(value.session.hook) &&
     Predicate.isFunction(value.permission.hook) &&
     Predicate.isFunction(value.event.subscribe)
@@ -249,6 +332,8 @@ function fakeContext(
   const subscriptions: FakeEventStream[] = [];
   const interruptResult = { interrupted: true };
   const subscriptionFailures = { remaining: 0 };
+  const tools = new Map<string, FakeNativeTool>();
+  const removed: string[] = [];
 
   const answer = (call: FakeSessionCall) => {
     calls.push(call);
@@ -258,13 +343,7 @@ function fakeContext(
 
   const fake = {
     location: { directory, workspaceID },
-    tool: {
-      hook: (name: "execute.before" | "execute.after", callback: FakeToolCallback) => {
-        handlers[name] = callback;
-
-        return registration(name, disposed);
-      },
-    },
+    tool: fakeToolDomain(handlers, disposed, tools, removed),
     permission: {
       hook: (name: "evaluate", callback: FakePermissionCallback) => {
         handlers.evaluate = callback;
@@ -301,6 +380,8 @@ function fakeContext(
     subscriptions,
     interruptResult,
     subscriptionFailures,
+    tools,
+    removed,
   };
 }
 
@@ -1451,5 +1532,207 @@ it.effect("maps permission allow, deny and leave onto the evaluation", () =>
     expect(left.message).toBe("the person's own prompt");
 
     yield* release(cleanup);
+  }),
+);
+
+/** One tack tool with the shape the conformance plugin uses. */
+const monitorCreate = tool<{ key: string }>({
+  name: "monitor_create",
+  description: "Start watching a Jira issue",
+  input: {
+    type: "object",
+    properties: { key: { type: "string" } },
+    required: ["key"],
+    additionalProperties: false,
+  },
+  run: (input) => ({
+    content: [`watching ${input.key}`],
+    details: { id: "m-1" },
+  }),
+});
+
+const monitor = createAgentPlugin(() => ({
+  name: "monitor",
+  tools: { monitor_create: monitorCreate },
+}));
+
+/** The fake's view of one tool call. */
+function toolCall(id = "call-1", sessionID = "s1"): FakeToolCall {
+  return { id, sessionID, signal: new AbortController().signal };
+}
+
+/** The tool the adapter registered under a name. */
+function toolOf(fake: FakeContext, name: string): FakeNativeTool {
+  const found = fake.tools.get(name);
+
+  if (found === undefined) {
+    throw new Error(`the adapter registered no tool named ${name}`);
+  }
+
+  return found;
+}
+
+/** Runs a tool call that must fail and returns the rejection. */
+function callFailure(
+  registered: FakeNativeTool,
+  input: Schema.Json,
+  call: FakeToolCall,
+): Effect.Effect<Error | undefined> {
+  return Effect.promise(() =>
+    registered.execute(input, call).then(
+      () => undefined,
+      (cause: Error) => cause,
+    ),
+  );
+}
+
+it.effect("registers a tool with its header and maps the result", () =>
+  Effect.gen(function* () {
+    const fake = fakeContext("/work/tools");
+
+    yield* attach(monitor, fake);
+
+    const registered = toolOf(fake, "monitor_create");
+
+    expect(registered.options).toEqual({ codemode: false });
+    expect(registered.description).toBe("Start watching a Jira issue");
+    expect(registered.input).toEqual({
+      type: "object",
+      properties: { key: { type: "string" } },
+      required: ["key"],
+      additionalProperties: false,
+    });
+
+    const result = yield* Effect.promise(() => registered.execute({ key: "PROJ-1" }, toolCall()));
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "watching PROJ-1" }],
+      metadata: { id: "m-1" },
+    });
+  }),
+);
+
+it.effect("leaves an error result on OpenCode's error path with its message", () =>
+  Effect.gen(function* () {
+    const refuse = tool({
+      name: "monitor_refuse",
+      description: "Refuse a monitor",
+      input: { type: "object", properties: {} },
+      run: () => ({ content: ["no such issue"], isError: true }),
+    });
+
+    const fake = fakeContext("/work/tools-error");
+
+    yield* attach(
+      createAgentPlugin(() => ({ name: "refuse", tools: { monitor_refuse: refuse } })),
+      fake,
+    );
+
+    const failure = yield* callFailure(toolOf(fake, "monitor_refuse"), {}, toolCall());
+
+    expect(failure?.message).toBe("no such issue");
+  }),
+);
+
+it.effect("reports an input the schema rejects, naming the field", () =>
+  Effect.gen(function* () {
+    const fake = fakeContext("/work/tools-input");
+
+    yield* attach(monitor, fake);
+
+    const failure = yield* callFailure(toolOf(fake, "monitor_create"), {}, toolCall());
+
+    expect(failure?.message).toBe(
+      'tack: tool "monitor_create" rejected its input: Missing key\n  at ["key"]',
+    );
+  }),
+);
+
+it.effect("reports a handler that throws as the model's error result", () =>
+  Effect.gen(function* () {
+    const broken = tool({
+      name: "monitor_broken",
+      description: "Break a monitor",
+      input: { type: "object", properties: {} },
+      run: () => {
+        throw new Error("boom");
+      },
+    });
+
+    const fake = fakeContext("/work/tools-throw");
+
+    yield* attach(
+      createAgentPlugin(() => ({ name: "broken", tools: { monitor_broken: broken } })),
+      fake,
+    );
+
+    const failure = yield* callFailure(toolOf(fake, "monitor_broken"), {}, toolCall());
+
+    expect(failure?.message).toBe('tack: tool "monitor_broken" failed: boom');
+  }),
+);
+
+it.effect("withdraws a tool the plugin removes through its context", () =>
+  Effect.gen(function* () {
+    const withdraw = createAgentPlugin(() => ({
+      name: "withdraw",
+
+      tools: { monitor_create: monitorCreate },
+
+      promptSent: (_prompt, ctx) => {
+        ctx.tools.remove("monitor_create");
+      },
+    }));
+
+    const fake = fakeContext("/work/tools-withdraw");
+
+    yield* attach(withdraw, fake);
+
+    const event: FakePromptEvent = { sessionID: "s1", prompt: { text: "hi" } };
+
+    yield* runHook(() => hookOf(fake.handlers.prompt)(event));
+
+    expect(fake.removed).toEqual(["monitor_create"]);
+    expect(fake.tools.has("monitor_create")).toBe(false);
+  }),
+);
+
+it.effect("refuses a tool name the agent's namespace already holds", () =>
+  Effect.gen(function* () {
+    const read = tool({
+      name: "read",
+      description: "Read a file",
+      input: { type: "object", properties: {} },
+      run: () => ({ content: ["shadowed"] }),
+    });
+
+    const shadow = createAgentPlugin(() => ({ name: "shadow", tools: { read } }));
+    const fake = fakeContext("/work/tools-duplicate");
+    const source = fileURLToPath(new URL("../../src/agents/opencode.ts", import.meta.url));
+    const scope = opencodeScope(fake.context.location);
+
+    fake.tools.set("read", {
+      name: "read",
+      description: "Read a file",
+      input: { type: "object" },
+      execute: () => Promise.resolve({}),
+    });
+
+    const failure = yield* setupFailure(shadow, fake);
+
+    expect(failure?.message).toBe(
+      `tack: two tools named "read" are registered in ${scope} (the agent's own tools and ${source}); give them different names.`,
+    );
+  }),
+);
+
+it.effect("disposes the tool registration with the setup cleanup", () =>
+  Effect.gen(function* () {
+    const fake = fakeContext("/work/tools-cleanup");
+    const cleanup = yield* attach(monitor, fake);
+
+    yield* release(cleanup);
+
+    expect(fake.disposed).toContain("tool.transform");
   }),
 );

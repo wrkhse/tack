@@ -7,9 +7,15 @@ import type { ResponseFinished } from "./hooks/response-finished.ts";
 import type { SessionIdle } from "./hooks/session-idle.ts";
 import type { ToolAfter } from "./hooks/tool-after.ts";
 import type { ToolBefore } from "./hooks/tool-before.ts";
+import type { CompiledTool, InvalidTool, ToolDefinition } from "./tools/tool.ts";
+import { compileTools } from "./tools/tool.ts";
 
-/** The agent a plugin output targets. */
-export type Agent = "opencode" | "pi";
+/**
+ * The agent a plugin output targets. `"mcp"` is the generated server a
+ * harness without in-process tools reaches; its factory runs in the server
+ * process and has no agent session.
+ */
+export type Agent = "opencode" | "pi" | "mcp";
 
 /** Facts the factory receives about the agent loading the plugin. */
 export interface Meta {
@@ -33,6 +39,7 @@ export interface PluginDefinition {
   readonly responseFinished?: ResponseFinished;
   readonly sessionIdle?: SessionIdle;
   readonly permissionAsked?: PermissionAsked;
+  readonly tools?: Readonly<Record<string, ToolDefinition>>;
 }
 
 /**
@@ -53,6 +60,7 @@ export interface ResolvedPlugin {
   readonly responseFinished: ResponseFinished | undefined;
   readonly sessionIdle: SessionIdle | undefined;
   readonly permissionAsked: PermissionAsked | undefined;
+  readonly tools: ReadonlyArray<CompiledTool>;
 }
 
 const DEFAULT_PRIORITY = 100;
@@ -76,15 +84,23 @@ export class InvalidPlugin extends Schema.TaggedError<
   }
 }
 
+/** True only for an agent that runs a tool handler inside the session it serves. */
+function hasSession(agent: Agent): boolean {
+  return agent === "opencode" || agent === "pi";
+}
+
 /**
- * Applies defaults and checks the load-time invariants of a definition.
+ * Applies defaults and checks the load-time invariants of a definition,
+ * including every tool it lists.
  *
  * The factory runs once per agent module load, so this is the single place a
- * definition becomes trusted data for the host slot and the hook runners.
+ * definition becomes trusted data for the host slot and the hook runners. A
+ * tool header is compiled here too, once, so no call pays for it again.
  */
 export function resolvePlugin(
   definition: PluginDefinition,
-): Effect.Effect<ResolvedPlugin, InvalidPlugin> {
+  agent: Agent,
+): Effect.Effect<ResolvedPlugin, InvalidPlugin | InvalidTool> {
   const { name } = definition;
 
   if (!NAME_PATTERN.test(name)) {
@@ -108,19 +124,24 @@ export function resolvePlugin(
     );
   }
 
-  return Effect.succeed({
-    name,
-    priority,
-    budgetMs,
-    toolBeforeOnError: definition.onError?.toolBefore ?? "deny",
-    permissionAskedOnError: definition.onError?.permissionAsked ?? "leave",
-    toolBefore: definition.toolBefore,
-    promptSent: definition.promptSent,
-    toolAfter: definition.toolAfter,
-    sessionCreated: definition.sessionCreated,
-    sessionEnded: definition.sessionEnded,
-    responseFinished: definition.responseFinished,
-    sessionIdle: definition.sessionIdle,
-    permissionAsked: definition.permissionAsked,
+  return Effect.gen(function* () {
+    const tools = yield* compileTools(name, definition.tools, hasSession(agent));
+
+    return {
+      name,
+      priority,
+      budgetMs,
+      toolBeforeOnError: definition.onError?.toolBefore ?? "deny",
+      permissionAskedOnError: definition.onError?.permissionAsked ?? "leave",
+      toolBefore: definition.toolBefore,
+      promptSent: definition.promptSent,
+      toolAfter: definition.toolAfter,
+      sessionCreated: definition.sessionCreated,
+      sessionEnded: definition.sessionEnded,
+      responseFinished: definition.responseFinished,
+      sessionIdle: definition.sessionIdle,
+      permissionAsked: definition.permissionAsked,
+      tools,
+    };
   });
 }

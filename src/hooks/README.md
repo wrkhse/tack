@@ -3,7 +3,8 @@
 The eight hooks tack combines across plugins, plus the budget and ordering
 every handler runs under. All runners are pure Effect programs: they never
 touch the agent, so the adapters can test them directly. A handler acts on the
-agent through `ctx.session`, which the runners only pass through.
+agent through `ctx.session` and on its plugin's tools through `ctx.tools`,
+which the runners only pass through.
 
 | Module                 | Responsibility                                                             |
 | ---------------------- | -------------------------------------------------------------------------- |
