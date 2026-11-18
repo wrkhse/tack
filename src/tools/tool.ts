@@ -316,20 +316,42 @@ function decodeInput(
   );
 }
 
+/**
+ * The handler's context, with one signal that fires when the transport stops
+ * the call or tack's timeout passes. Racing the handler interrupts tack's
+ * fiber, not the promise a handler already started, so the signal is how a
+ * handler that checks it learns to stop.
+ */
+function stoppable(ctx: ToolContext, stop: AbortSignal): ToolContext {
+  const signals = ctx.signal === undefined ? [stop] : [ctx.signal, stop];
+
+  return { ...ctx, signal: AbortSignal.any(signals) };
+}
+
 /** Runs the handler with the decoded input, under the tool's timeout. */
 function runHandler(
   compiled: CompiledTool,
   input: Schema.Json,
   ctx: ToolContext,
 ): Effect.Effect<ToolCallResult> {
-  const attempt = Effect.tryPromise({
-    try: () => Promise.resolve(compiled.run(input, ctx)),
-    catch: (cause) => `tack: tool "${compiled.name}" failed: ${messageOf(cause)}`,
-  }).pipe(Effect.match({ onFailure: failed, onSuccess: (result) => result }));
+  const stop = new AbortController();
 
-  const timeout = Effect.sleep(Duration.millis(compiled.timeoutMs)).pipe(
-    Effect.as(failed(`tack: tool "${compiled.name}" timed out after ${compiled.timeoutMs} ms`)),
+  const attempt = Effect.tryPromise({
+    try: () => Promise.resolve(compiled.run(input, stoppable(ctx, stop.signal))),
+    catch: (cause) => `tack: tool "${compiled.name}" failed: ${messageOf(cause)}`,
+  }).pipe(
+    Effect.match({ onFailure: failed, onSuccess: (result) => result }),
+    // A finished call stops watching both signals, so a long-lived transport
+    // signal collects no listener from a handler that already answered.
+    Effect.ensuring(Effect.sync(() => stop.abort())),
   );
+
+  const timeout = Effect.gen(function* () {
+    yield* Effect.sleep(Duration.millis(compiled.timeoutMs));
+    yield* Effect.sync(() => stop.abort());
+
+    return failed(`tack: tool "${compiled.name}" timed out after ${compiled.timeoutMs} ms`);
+  });
 
   return Effect.raceFirst(attempt, timeout);
 }

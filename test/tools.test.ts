@@ -18,7 +18,7 @@ import {
   invokeTool,
   tool,
 } from "../src/tools/tool.ts";
-import { noTools } from "./helpers.ts";
+import { noTools, thrownBy } from "./helpers.ts";
 
 const ctx: ToolContext = {
   callId: "call-1",
@@ -66,15 +66,20 @@ function oneOf(tools: ReadonlyArray<CompiledTool>): CompiledTool {
   return first;
 }
 
-/** Runs a call that must throw and returns what it threw. */
-function thrownBy(thunk: () => void): Error | undefined {
-  try {
-    thunk();
+/** A caller's stop: the signal the handler sees, and the one way to fire it. */
+interface TransportStop {
+  readonly signal: AbortSignal;
+  readonly abort: () => void;
+}
 
-    return undefined;
-  } catch (cause) {
-    return cause instanceof Error ? cause : undefined;
-  }
+/**
+ * Builds a caller's stop outside Effect's own cancellation: the transport fires
+ * it by hand, not the Effect runtime.
+ */
+function transportStop(): TransportStop {
+  const controller = new AbortController();
+
+  return { signal: controller.signal, abort: () => controller.abort() };
 }
 
 /** A port that keeps what a registry asked of it. */
@@ -301,6 +306,101 @@ it.effect("answers an error result when the handler outlives its timeout", () =>
 
     expect(result).toEqual({
       content: [`tack: tool "monitor_stall" timed out after ${DEFAULT_TIMEOUT_MS} ms`],
+      isError: true,
+    });
+  }),
+);
+
+it.effect("aborts the handler's signal when the timeout fires", () =>
+  Effect.gen(function* () {
+    let stopped = false;
+
+    const slow = tool({
+      name: "monitor_slow",
+      description: "Stop when asked",
+      input: { type: "object", properties: {} },
+      run: (_input, handler) => {
+        handler.signal?.addEventListener(
+          "abort",
+          () => {
+            stopped = true;
+          },
+          { once: true },
+        );
+
+        return Promise.race([]);
+      },
+    });
+
+    const compiled = oneOf(yield* compile({ monitor_slow: slow }));
+
+    const fiber = yield* invokeTool(compiled, { input: {} }, ctx).pipe(Effect.forkChild);
+
+    yield* TestClock.adjust(Duration.millis(DEFAULT_TIMEOUT_MS));
+
+    const result = yield* Fiber.join(fiber);
+
+    expect(result).toEqual({
+      content: [`tack: tool "monitor_slow" timed out after ${DEFAULT_TIMEOUT_MS} ms`],
+      isError: true,
+    });
+    expect(stopped).toBe(true);
+  }),
+);
+
+it.effect("passes the transport's stop to the handler's signal", () =>
+  Effect.gen(function* () {
+    const transport = transportStop();
+    const started = Promise.withResolvers<void>();
+    const notified = Promise.withResolvers<void>();
+    let stopped = false;
+
+    const stop = (): void => {
+      stopped = true;
+      notified.resolve();
+    };
+
+    const slow = tool({
+      name: "monitor_stopped",
+      description: "Stop when the call stops",
+      input: { type: "object", properties: {} },
+      run: (_input, handler) => {
+        const signal = handler.signal;
+
+        if (signal?.aborted === true) {
+          stop();
+        } else {
+          signal?.addEventListener("abort", stop, { once: true });
+        }
+
+        started.resolve();
+
+        return Promise.race([]);
+      },
+    });
+
+    const compiled = oneOf(yield* compile({ monitor_stopped: slow }));
+
+    const fiber = yield* invokeTool(
+      compiled,
+      { input: {} },
+      { ...ctx, signal: transport.signal },
+    ).pipe(Effect.forkChild);
+
+    // Wait for the handler to install its listener before stopping the call.
+    yield* Effect.promise(() => started.promise);
+    yield* Effect.sync(() => transport.abort());
+    yield* Effect.promise(() => notified.promise);
+
+    expect(stopped).toBe(true);
+
+    // The handler never settles on its own, so the call still ends at tack's bound.
+    yield* TestClock.adjust(Duration.millis(DEFAULT_TIMEOUT_MS));
+
+    const result = yield* Fiber.join(fiber);
+
+    expect(result).toEqual({
+      content: [`tack: tool "monitor_stopped" timed out after ${DEFAULT_TIMEOUT_MS} ms`],
       isError: true,
     });
   }),

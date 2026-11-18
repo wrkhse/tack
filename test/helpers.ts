@@ -7,6 +7,17 @@ import { sessionHandle } from "../src/session.ts";
 import type { ToolRegistry } from "../src/tools/registry.ts";
 import { createToolRegistry } from "../src/tools/registry.ts";
 
+/** Runs a call that must throw and returns what it threw. */
+export function thrownBy(thunk: () => void): Error | undefined {
+  try {
+    thunk();
+
+    return undefined;
+  } catch (cause) {
+    return cause instanceof Error ? cause : undefined;
+  }
+}
+
 /** What an action reports when the agent took it. */
 function accepted(): Outcome {
   return { status: "accepted" };

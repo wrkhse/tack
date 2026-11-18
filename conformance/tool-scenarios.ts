@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 
-import { Schema } from "effect";
+import { Option, Predicate, Schema } from "effect";
 
 import type { ChatRequest, StandInOptions } from "./model/stand-in.ts";
+import { monitorInput } from "./plugins/tool-create.ts";
 import type { Evidence, Scenario } from "./scenarios.ts";
 import { describeRun, textFor } from "./scenarios.ts";
 
@@ -29,7 +30,44 @@ const DeclaredToolSchema = Schema.Struct({
 
 type DeclaredTool = Schema.Schema.Type<typeof DeclaredToolSchema>;
 
+type ChatMessage = ChatRequest["messages"][number];
+
 const isDeclaredTool = Schema.is(DeclaredToolSchema);
+
+/** One part of a tool message's content, as an OpenAI-compatible provider sends it. */
+const TextPartSchema = Schema.Struct({
+  type: Schema.String,
+  text: Schema.optional(Schema.String),
+});
+
+/** A tool message's content: one string, or parts whose text is joined. */
+const ToolContentSchema = Schema.Union([Schema.String, Schema.Array(TextPartSchema)]);
+
+/** The text one message carries, whatever shape its content arrived in. */
+function messageText(message: ChatMessage): string {
+  const decoded = Schema.decodeUnknownOption(ToolContentSchema)(message.content);
+
+  return Option.match(decoded, {
+    onNone: () => "",
+    onSome: (value) =>
+      Predicate.isString(value) ? value : value.map((part) => part.text ?? "").join(""),
+  });
+}
+
+/** The exact text of the tool messages in the last request that carried one. */
+function toolTexts(requests: ReadonlyArray<ChatRequest>): ReadonlyArray<string> {
+  const carrier = requests.findLast((request) =>
+    request.messages.some((message) => message.role === "tool"),
+  );
+
+  if (carrier === undefined) {
+    return [];
+  }
+
+  return carrier.messages.flatMap((message) =>
+    message.role === "tool" ? [messageText(message)] : [],
+  );
+}
 
 /** Every tool the first tool-bearing request declared. */
 function declaredTools(requests: ReadonlyArray<ChatRequest>): ReadonlyArray<DeclaredTool> {
@@ -64,9 +102,12 @@ const list: Scenario = {
       DESCRIPTION,
       "the declaration must carry its description\n" + details,
     );
-    assert.ok(
-      JSON.stringify(found.function.parameters).includes('"key"'),
-      "the declaration must carry its input schema\n" + details,
+    // OpenCode hands a plain JSON Schema header to the provider unchanged, so
+    // there is no normalisation to allow for: the declaration is the header.
+    assert.deepEqual(
+      found.function.parameters,
+      monitorInput,
+      "the declaration must carry the header unchanged\n" + details,
     );
   },
 };
@@ -95,9 +136,10 @@ const result: Scenario = {
     const details = describeRun(evidence);
 
     assert.equal(evidence.command.exitCode, 0, details);
-    assert.ok(
-      textFor(evidence.requests, "tool").includes(WATCHING),
-      "the next request must carry the content the handler returned\n" + details,
+    assert.deepEqual(
+      toolTexts(evidence.requests),
+      [WATCHING],
+      "the next request must carry exactly the content the handler returned\n" + details,
     );
   },
 };

@@ -79,6 +79,16 @@ The check runs before any native registration, because Pi's `registerTool`
 replaces a definition of the same name without an error, and a collision that
 reached it would silently change which handler the model calls.
 
+## Direct tools
+
+A tack tool is a direct tool on every agent: the model calls it by name, and the
+harness validates its arguments against the header. On OpenCode that means
+registering with `options: { codemode: false }`, so the tool never appears in
+Code Mode's catalog. That is the right default for a tool a plugin ships: its
+name, description and header are the contract every transport describes the same
+way, and Code Mode's catalog exists in one harness, so a tool reachable only
+there would not be the same tool in Pi or over MCP.
+
 ## One call
 
 ```mermaid
@@ -102,9 +112,12 @@ tool and its message. A handler that returns the wrong shape becomes one too.
 
 ## Limits
 
-`timeoutMs` bounds the handler: one that runs past it is interrupted, and the
-model reads an error result naming the tool and the timeout. The default is
-30 000 ms.
+`timeoutMs` bounds the handler: one that runs past it has `ctx.signal`
+aborted and is interrupted, and the model reads an error result naming the tool
+and the timeout. The default is 30 000 ms. `ctx.signal` also fires when the
+transport stops the call. Racing the handler interrupts tack's fiber, not a
+promise the handler already started, so a handler that does slow work listens to
+the signal and stops.
 
 A result whose content totals over `MAX_RESULT_BYTES` (262 144 UTF-8 bytes) is
 refused with an error result naming the tool, the size and the limit. Tack does
@@ -118,6 +131,10 @@ compiles the definition, installs it in one native registration, and returns a
 handle whose `dispose()` withdraws it; `remove(name)` is the same by name. A
 definition `add` refuses throws its tagged error, which the hook's own failure
 path reports.
+
+`add` checks against the names live when the registry was built — the agent's
+tool list, the host slot's declared tools, and every tool this registry has
+added — so a tool another plugin adds after load is outside that snapshot.
 
 ```ts
 responseFinished: (_response, ctx) => {
