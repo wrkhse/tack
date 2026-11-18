@@ -79,6 +79,8 @@ export interface OpenCodeServer {
   readonly events: (types: ReadonlyArray<string>) => Stream.Stream<Schema.Json>;
   /** Waits until a tack plugin is listed for `directory`. */
   readonly awaitPlugin: (directory: string) => Effect.Effect<void>;
+  /** Reloads every location's configuration, keeping its running sessions. */
+  readonly reloadLocations: () => Effect.Effect<void>;
   /** Asks the child to quit and waits for it, bounded. */
   readonly stop: () => Effect.Effect<void>;
 }
@@ -337,9 +339,9 @@ const interrupt = (client: Client, sessionID: string): Effect.Effect<void> =>
     .json({ method: "POST", path: sessionPath(sessionID) + "/interrupt" }, InterruptSchema)
     .pipe(Effect.asVoid);
 
-const deleteSession = (client: Client, sessionID: string): Effect.Effect<void> =>
+/** Sends one request that must answer 204 No Content. */
+const expectNoContent = (client: Client, input: HttpRequest): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const input: HttpRequest = { method: "DELETE", path: sessionPath(sessionID) };
     const response = yield* client.request(input, REQUEST_TIMEOUT_MS);
     const text = yield* readText(input, response.body);
 
@@ -349,6 +351,12 @@ const deleteSession = (client: Client, sessionID: string): Effect.Effect<void> =
 
     return yield* Effect.void;
   });
+
+const reloadLocations = (client: Client): Effect.Effect<void> =>
+  expectNoContent(client, { method: "POST", path: "/api/location/reload" });
+
+const deleteSession = (client: Client, sessionID: string): Effect.Effect<void> =>
+  expectNoContent(client, { method: "DELETE", path: sessionPath(sessionID) });
 
 const session = (client: Client, sessionID: string): Effect.Effect<SessionTurn> =>
   client
@@ -655,6 +663,10 @@ export const opencodeServer = (box: Sandbox): Effect.Effect<OpenCodeServer, neve
       cwd: box.projectDir,
       env: { ...box.opencode.env, OPENCODE_PASSWORD: password },
       timeoutMs: EXIT_TIMEOUT_MS,
+      // The server spawns helpers of its own; killing only the child leaves
+      // them behind. This suite runs in CI or a disposable container, never on
+      // a developer's Mac.
+      detached: true,
     }).pipe(Scope.provide(lifetime));
 
     const client = httpClient(port, password);
@@ -690,6 +702,7 @@ export const opencodeServer = (box: Sandbox): Effect.Effect<OpenCodeServer, neve
       session: (sessionID) => session(client, sessionID),
       events: (types) => events(client, types),
       awaitPlugin: (directory) => awaitPlugin(client, directory),
+      reloadLocations: () => reloadLocations(client),
       stop,
     };
   });

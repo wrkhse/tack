@@ -1,7 +1,7 @@
 import { clearTimeout, setTimeout } from "node:timers";
 
 import { createAgentPlugin } from "../../../src/index.ts";
-import { markHere } from "../../harness/markers.ts";
+import { appendAndMark } from "./append.ts";
 
 export const NAME = "append-outside";
 
@@ -20,9 +20,7 @@ export const appendOutside = createAgentPlugin(() => {
       // host's timer rather than an Effect fiber the agent would own.
       // @effect-diagnostics globalTimers:off
       timer = setTimeout(() => {
-        void session
-          .append(OUTSIDE, { when: "wake" })
-          .then((outcome) => markHere(NAME, { event: "append", outcome: outcome.status }));
+        appendAndMark(NAME, session, OUTSIDE, "wake");
       }, DELAY_MS);
     },
 

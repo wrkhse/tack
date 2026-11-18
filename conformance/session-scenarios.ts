@@ -29,7 +29,13 @@ export interface SessionScenario {
   readonly plugins: ReadonlyArray<PluginName>;
   /** How the scripted model answers this row; absent means the T1 behaviour. */
   readonly standIn?: StandInOptions;
-  readonly run: (driver: Driver) => Effect.Effect<void, MarkerTimeout>;
+  /** The shell permission OpenCode's sandbox config carries; default `allow`. */
+  readonly shellPermission?: "allow" | "deny";
+  /** The one agent a row runs in; absent means both. */
+  readonly only?: AgentName;
+  /** Creates the session before the plugin loads; OpenCode only. */
+  readonly beforePlugin?: boolean;
+  readonly run: (driver: Driver, agent: AgentName) => Effect.Effect<void, MarkerTimeout>;
   readonly check: (evidence: SessionEvidence) => void;
 }
 
@@ -63,25 +69,37 @@ const MID_TURN_MS = 2_000;
  */
 const SLOW_TURN_MS = MAX_POST_TOOL_DELAY_MS;
 
-/**
- * How long OpenCode's retry budget may run: ten retries at 2, 4 and 8 s, then
- * 10 s each, about 84 s, and its jitter can take that to about 101 s.
- */
-const ERROR_SETTLE_MS = 120_000;
-
 /** Matches a request the way the conformance table describes one. */
 const hasText = (request: ChatRequest, text: string): boolean =>
   JSON.stringify(request.messages).includes(text);
 
+/** A request whose body carries tools. */
+const hasTools = (request: ChatRequest): boolean => (request.tools ?? []).length > 0;
+
 /** A request whose body has tools and a message with role tool. */
 const isToolBearing = (request: ChatRequest): boolean =>
-  (request.tools ?? []).length > 0 && request.messages.some((message) => message.role === "tool");
+  hasTools(request) && request.messages.some((message) => message.role === "tool");
 
 /** A tool-bearing request that carries `text`. */
 const carries =
   (text: string) =>
   (request: ChatRequest): boolean =>
     isToolBearing(request) && hasText(request, text);
+
+/**
+ * A request that starts a new turn: the agent loop carries tools, and its last
+ * message is the person's prompt. A title request has no tools, and a synthetic
+ * append carries its own text, so neither counts as a second prompt.
+ */
+const isUserPrompt = (request: ChatRequest, text: string): boolean => {
+  const last = request.messages.at(-1);
+
+  return (
+    (request.tools ?? []).length > 0 &&
+    last?.role === "user" &&
+    JSON.stringify(last.content ?? "").includes(text)
+  );
+};
 
 const listed = (names: ReadonlyArray<string>): string =>
   names.length === 0 ? "none" : names.join(", ");
@@ -170,6 +188,36 @@ const interruptSlowTurn = (driver: Driver): Effect.Effect<void> =>
     yield* driver.interrupt();
   });
 
+/** Asserts the permission plugin loaded and was never asked. */
+const assertPermissionRegisteredOnly = (
+  observations: ReadonlyArray<MarkerObservation>,
+  details: string,
+  message: string,
+): void => {
+  assert.deepEqual(observations, [{ event: "registered" }], message + "\n" + details);
+};
+
+/** Asserts Pi's push reached the recorder, which has no permission layer. */
+const assertPiPushRecorded = (evidence: SessionEvidence, details: string): void => {
+  assert.deepEqual(
+    evidence.recorded,
+    ["push origin main"],
+    "Pi's push must reach the recorder\n" + details,
+  );
+};
+
+/** Ends the lifecycle row's session and waits for its ended observation. */
+const endLifecycleSession = (driver: Driver): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    yield* driver.endSession();
+    yield* waitForObservation(
+      driver,
+      "lifecycle-note",
+      (observation) => observation["event"] === "ended",
+      "the ended session reported ended",
+    );
+  });
+
 /** Names what a failed assertion saw, across every channel the run left. */
 export const describeSession = (evidence: SessionEvidence): string =>
   [
@@ -198,15 +246,13 @@ const observed = (
 ): ReadonlyArray<MarkerObservation> =>
   observations.filter((observation) => observation["event"] === event);
 
-const hasValue = (
-  observations: ReadonlyArray<MarkerObservation>,
-  key: string,
-  value: string | boolean,
-): boolean => observations.some((observation) => observation[key] === value);
-
-const lastReason = (
-  observations: ReadonlyArray<MarkerObservation>,
-): MarkerObservation[string] | undefined => observations.at(-1)?.["reason"];
+/** Every observation's event name, sorted, so an extra event fails the row. */
+const eventNames = (observations: ReadonlyArray<MarkerObservation>): ReadonlyArray<string> =>
+  observations
+    .flatMap((observation) =>
+      Predicate.isString(observation["event"]) ? [observation["event"]] : [],
+    )
+    .toSorted((left, right) => left.localeCompare(right));
 
 /** One stream frame's type, when it carries one. */
 const frameType = (frame: Schema.Json): string | null => {
@@ -221,23 +267,6 @@ const frameType = (frame: Schema.Json): string | null => {
 const frameLocated = (frame: Schema.Json): boolean =>
   Predicate.isObject(frame) && frame["location"] !== undefined;
 
-/** A finished-note check: some request must have ended the given way. */
-const assertFinished = (evidence: SessionEvidence, reason: "aborted" | "error"): void => {
-  const details = describeSession(evidence);
-  const finished = observationsOf(evidence, "finished-note");
-  const reasons = finished.map((observation) => String(observation["reason"]));
-
-  assert.ok(
-    finished.some((observation) => observation["reason"] === reason),
-    "a request must be reported " +
-      reason +
-      "\nreported reasons: " +
-      listed(reasons) +
-      "\n" +
-      details,
-  );
-};
-
 const wake: SessionScenario = {
   name: "t2 wake",
   plugins: ["append-wake"],
@@ -250,11 +279,11 @@ const wake: SessionScenario = {
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
-    const observations = observationsOf(evidence, "append-wake");
 
-    assert.ok(
-      hasValue(observations, "outcome", "accepted"),
-      "the wake append must be accepted\n" + details,
+    assert.deepEqual(
+      observationsOf(evidence, "append-wake"),
+      [{ event: "append", outcome: "accepted" }],
+      "the wake append must be accepted exactly once\n" + details,
     );
     assert.ok(
       evidence.requests.some(carries(WAKE)),
@@ -280,11 +309,11 @@ const outside: SessionScenario = {
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
-    const observations = observationsOf(evidence, "append-outside");
 
-    assert.ok(
-      hasValue(observations, "outcome", "accepted"),
-      "the timer's append must be accepted\n" + details,
+    assert.deepEqual(
+      observationsOf(evidence, "append-outside"),
+      [{ event: "append", outcome: "accepted" }],
+      "the timer's append must be accepted exactly once\n" + details,
     );
     assert.ok(
       evidence.requests.some(carries(OUTSIDE)),
@@ -304,21 +333,46 @@ const now: SessionScenario = {
       yield* driver.waitMarker("append-now");
       yield* waitForRequest(
         driver,
-        carries(NOW),
+        (request) => hasTools(request) && hasText(request, NOW),
         "a tool-bearing request carrying the steering text",
       );
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
-    const observations = observationsOf(evidence, "append-now");
 
-    assert.ok(
-      hasValue(observations, "outcome", "accepted"),
-      "the steering append must be accepted\n" + details,
+    const prompts = evidence.requests.flatMap((request, index) =>
+      isUserPrompt(request, PUSH) ? [index] : [],
+    );
+
+    const firstPrompt = prompts[0];
+
+    assert.deepEqual(
+      observationsOf(evidence, "append-now"),
+      [{ event: "append", outcome: "accepted" }],
+      "the steering append must be accepted exactly once\n" + details,
+    );
+    assert.equal(
+      prompts.length,
+      1,
+      "the row sends one prompt, so a second one must not appear\n" + details,
+    );
+    assert.ok(firstPrompt !== undefined, "the first turn must start with a prompt\n" + details);
+
+    const turn = evidence.requests.slice(firstPrompt);
+    const toolRequests = turn.filter(hasTools);
+    const carrying = toolRequests.findIndex((request) => hasText(request, NOW));
+
+    assert.equal(
+      carrying,
+      1,
+      "the steering text must land in the second tool-bearing request of the first turn, not " +
+        carrying +
+        "\n" +
+        details,
     );
     assert.ok(
-      evidence.requests.some(carries(NOW)),
-      "a tool-bearing request must carry the steering text\n" + details,
+      carrying < toolRequests.length - 1,
+      "the steering text must land before the first turn's final request\n" + details,
     );
   },
 };
@@ -336,17 +390,21 @@ const next: SessionScenario = {
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
-    const observations = observationsOf(evidence, "append-next");
-    const first = evidence.requests.find(isToolBearing);
+    const first = evidence.requests.findIndex(isToolBearing);
+    const firstRequest = evidence.requests[first];
 
-    assert.ok(
-      hasValue(observations, "outcome", "accepted"),
-      "the queued append must be accepted\n" + details,
+    assert.deepEqual(
+      observationsOf(evidence, "append-next"),
+      [{ event: "append", outcome: "accepted" }],
+      "the queued append must be accepted exactly once\n" + details,
     );
-    assert.ok(first !== undefined, "a tool-bearing request must exist\n" + details);
-    assert.ok(!hasText(first, NEXT), "the queued text must not reach the running turn\n" + details);
+    assert.ok(firstRequest !== undefined, "a tool-bearing request must exist\n" + details);
+    assert.ok(
+      !hasText(firstRequest, NEXT),
+      "the queued text must not reach the running turn\n" + details,
+    );
 
-    const afterFirst = evidence.requests.slice(evidence.requests.indexOf(first) + 1);
+    const afterFirst = evidence.requests.slice(first + 1);
 
     assert.ok(
       afterFirst.some(carries(NEXT)),
@@ -355,46 +413,78 @@ const next: SessionScenario = {
   },
 };
 
+/** Prompts once and waits for the permission plugin's load marker. */
+const runPermission = (driver: Driver): Effect.Effect<void, MarkerTimeout> =>
+  Effect.gen(function* () {
+    yield* driver.prompt(PUSH);
+    yield* driver.settle();
+    yield* driver.waitMarker("permission-deny");
+  });
+
 const permission: SessionScenario = {
   name: "t2 permission",
   plugins: ["permission-deny"],
-  run: (driver) =>
-    Effect.gen(function* () {
-      yield* driver.prompt(PUSH);
-      yield* driver.settle();
-      yield* driver.waitMarker("permission-deny");
-    }),
+  run: runPermission,
   check: (evidence) => {
     const details = describeSession(evidence);
     const observations = observationsOf(evidence, "permission-deny");
 
     if (evidence.agent === "pi") {
-      assert.ok(
-        hasValue(observations, "event", "registered"),
-        "the plugin must load and mark itself registered\n" + details,
+      assertPermissionRegisteredOnly(
+        observations,
+        details,
+        "Pi has no permission layer, so the plugin loads and is never asked",
       );
-      assert.equal(
-        observed(observations, "asked").length,
-        0,
-        "Pi has no permission layer, so permissionAsked must never run\n" + details,
-      );
-      assert.deepEqual(
-        evidence.recorded,
-        ["push origin main"],
-        "Pi's push must reach the recorder\n" + details,
-      );
+      assertPiPushRecorded(evidence, details);
 
       return;
     }
 
-    assert.ok(
-      hasValue(observations, "event", "asked"),
-      "OpenCode must ask the plugin about the shell call\n" + details,
+    const asked = observed(observations, "asked");
+
+    assert.deepEqual(
+      observations.map((observation) => observation["event"]),
+      ["registered", "asked"],
+      "OpenCode must load the plugin and ask it about exactly the shell call\n" + details,
+    );
+    assert.equal(asked.length, 1, "one shell call must ask the plugin once\n" + details);
+    assert.equal(
+      asked[0]?.["action"],
+      "shell",
+      "the request must name the shell action\n" + details,
     );
     assert.deepEqual(evidence.recorded, [], "a denied push must not reach git\n" + details);
     assert.ok(
       textFor(evidence.requests, "tool").includes(DENIED),
       "the model must receive the deny reason\n" + details,
+    );
+  },
+};
+
+const permissionConfigured: SessionScenario = {
+  name: "t2 permission configured",
+  plugins: ["permission-deny"],
+  shellPermission: "deny",
+  run: runPermission,
+  check: (evidence) => {
+    const details = describeSession(evidence);
+
+    assertPermissionRegisteredOnly(
+      observationsOf(evidence, "permission-deny"),
+      details,
+      "a configured deny must skip permissionAsked entirely",
+    );
+
+    if (evidence.agent === "pi") {
+      assertPiPushRecorded(evidence, details);
+
+      return;
+    }
+
+    assert.deepEqual(
+      evidence.recorded,
+      [],
+      "OpenCode's configured deny must refuse the push before git runs\n" + details,
     );
   },
 };
@@ -413,31 +503,44 @@ const idle: SessionScenario = {
   check: (evidence) => {
     const details = describeSession(evidence);
     const observations = observationsOf(evidence, "idle-note");
-    const idles = observed(observations, "idle");
 
     if (evidence.agent === "pi") {
-      const settles = observed(observations, "agent_settled");
-
-      assert.equal(idles.length, 2, "Pi must report both idle transitions\n" + details);
-      assert.equal(settles.length, 2, "Pi must report both settled runs\n" + details);
-      assert.equal(
-        settles.at(-1)?.["aborted"],
-        true,
-        "the interrupted run must settle aborted\n" + details,
+      assert.deepEqual(
+        observed(observations, "idle"),
+        [{ event: "idle" }, { event: "idle" }],
+        "Pi must report one idle per run\n" + details,
+      );
+      assert.deepEqual(
+        observed(observations, "agent_settled"),
+        [
+          { event: "agent_settled", aborted: false },
+          { event: "agent_settled", aborted: true },
+        ],
+        "Pi must settle a completed run and then an aborted one\n" + details,
+      );
+      assert.deepEqual(
+        eventNames(observations),
+        ["agent_settled", "agent_settled", "idle", "idle"],
+        "Pi must report no other idle observation\n" + details,
       );
 
       return;
     }
 
-    assert.equal(
-      idles.length,
-      1,
-      "OpenCode's idle hook must stay silent for the interrupted turn\n" + details,
+    assert.deepEqual(
+      observed(observations, "idle"),
+      [{ event: "idle" }],
+      "OpenCode's idle hook must fire once for the completed turn\n" + details,
     );
-    assert.equal(
-      observed(observations, "agent_settled").length,
-      0,
+    assert.deepEqual(
+      observed(observations, "agent_settled"),
+      [],
       "only Pi records agent_settled\n" + details,
+    );
+    assert.deepEqual(
+      eventNames(observations),
+      ["idle"],
+      "OpenCode must stay silent for the interrupted turn\n" + details,
     );
   },
 };
@@ -458,12 +561,14 @@ const finishedDone: SessionScenario = {
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
-    const finished = observationsOf(evidence, "finished-note");
 
-    assert.ok(finished.length > 0, "a finished request must be recorded\n" + details);
-    assert.ok(
-      finished.every((observation) => observation["reason"] === "done"),
-      "every finished request must be done\n" + details,
+    assert.deepEqual(
+      observationsOf(evidence, "finished-note"),
+      [
+        { event: "finished", reason: "done" },
+        { event: "finished", reason: "done" },
+      ],
+      "both model requests in the turn must be reported done exactly once\n" + details,
     );
   },
 };
@@ -485,23 +590,32 @@ const finishedAborted: SessionScenario = {
   check: (evidence) => {
     const details = describeSession(evidence);
 
-    assertFinished(evidence, "aborted");
-    assert.equal(
-      lastReason(observationsOf(evidence, "finished-note")),
-      "aborted",
-      "the last request must be the interrupted one\n" + details,
+    assert.deepEqual(
+      observationsOf(evidence, "finished-note"),
+      [
+        { event: "finished", reason: "done" },
+        { event: "finished", reason: "aborted" },
+      ],
+      "the interrupted request must be reported aborted exactly once, after the finished one\n" +
+        details,
     );
   },
 };
 
+/**
+ * The retry-veto plugin makes the first failed request terminal. Without it
+ * OpenCode spends its retry budget: ten retries at 2, 4 and 8 s, then 10 s
+ * each, about 84 s, and jitter can take that to about 101 s
+ * (`packages/core/src/model-retry.ts`).
+ */
 const finishedError: SessionScenario = {
   name: "t2 finished error",
-  plugins: ["finished-note"],
+  plugins: ["finished-note", "retry-veto"],
   standIn: { failMode: "always" },
   run: (driver) =>
     Effect.gen(function* () {
       yield* driver.prompt(PUSH);
-      yield* driver.settle(ERROR_SETTLE_MS);
+      yield* driver.settle();
       yield* waitForObservation(
         driver,
         "finished-note",
@@ -510,46 +624,77 @@ const finishedError: SessionScenario = {
       );
     }),
   check: (evidence) => {
-    assertFinished(evidence, "error");
+    const details = describeSession(evidence);
+
+    assert.deepEqual(
+      observationsOf(evidence, "finished-note"),
+      [{ event: "finished", reason: "error" }],
+      "the sticky failure must be reported error exactly once\n" + details,
+    );
+
+    if (evidence.agent === "pi") {
+      assert.equal(
+        evidence.markers.has("retry-veto"),
+        false,
+        "Pi disables retries, so the retry hook must not run\n" + details,
+      );
+
+      return;
+    }
+
+    assert.deepEqual(
+      observationsOf(evidence, "retry-veto"),
+      [{ event: "retry", attempt: 2 }],
+      "OpenCode must offer exactly one retry, and the veto must refuse it\n" + details,
+    );
   },
 };
 
 const lifecycle: SessionScenario = {
   name: "t2 lifecycle",
   plugins: ["lifecycle-note"],
-  run: (driver) =>
+  run: (driver, agent) =>
     Effect.gen(function* () {
       yield* driver.waitMarker("lifecycle-note");
-      yield* driver.endSession();
-      yield* waitForObservation(
-        driver,
-        "lifecycle-note",
-        (observation) => observation["event"] === "ended",
-        "the deleted session reported ended",
-      );
+
+      if (agent === "pi") {
+        yield* driver.rebind();
+        yield* waitForObservation(
+          driver,
+          "lifecycle-note",
+          (observation) => observation["event"] === "ended" && observation["reason"] === "replaced",
+          "the rebound session reported replaced",
+        );
+      }
+
+      yield* endLifecycleSession(driver);
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
-    const observations = observationsOf(evidence, "lifecycle-note");
-    const created = observed(observations, "created");
-    const ended = observed(observations, "ended");
-
-    assert.ok(
-      created.some((observation) => observation["resumed"] === false),
-      "the session must be created after the plugin loads\n" + details,
-    );
-    assert.equal(created.length, 1, "one session must be reported created\n" + details);
 
     if (evidence.agent === "pi") {
-      assert.equal(ended.length, 1, "one session must be reported ended\n" + details);
-      assert.equal(
-        ended[0]?.["reason"],
-        "shutdown",
-        "Pi's end reason must match the harness\n" + details,
+      assert.deepEqual(
+        observationsOf(evidence, "lifecycle-note"),
+        [
+          { event: "created", resumed: false },
+          { event: "ended", reason: "replaced" },
+          { event: "created", resumed: false },
+          { event: "ended", reason: "shutdown" },
+        ],
+        "the rebind must report replaced, and closing stdin must report shutdown\n" + details,
       );
 
       return;
     }
+
+    assert.deepEqual(
+      observationsOf(evidence, "lifecycle-note"),
+      [
+        { event: "created", resumed: false },
+        { event: "ended", reason: "closed" },
+      ],
+      "the session created after load must report created once and closed once\n" + details,
+    );
 
     const deletes = evidence.trail.filter((frame) => frameType(frame) === "session.deleted");
 
@@ -564,8 +709,38 @@ const lifecycle: SessionScenario = {
         "needs that rule\n" +
         details,
     );
-    assert.equal(ended.length, 1, "one session must be reported ended\n" + details);
-    assert.equal(ended[0]?.["reason"], "closed", "the delete must report closed\n" + details);
+  },
+};
+
+/**
+ * A session created before the plugin loaded has no `session.created` to
+ * report, so its first event must report `sessionCreated` with `resumed: true`.
+ * The OpenCode runner creates the session, then writes the plugin config and
+ * reloads the location before prompting it.
+ */
+const lifecycleResumed: SessionScenario = {
+  name: "t2 lifecycle resumed",
+  plugins: ["lifecycle-note"],
+  only: "opencode",
+  beforePlugin: true,
+  run: (driver) =>
+    Effect.gen(function* () {
+      yield* driver.prompt(PUSH);
+      yield* driver.settle();
+      yield* driver.waitMarker("lifecycle-note");
+      yield* endLifecycleSession(driver);
+    }),
+  check: (evidence) => {
+    const details = describeSession(evidence);
+
+    assert.deepEqual(
+      observationsOf(evidence, "lifecycle-note"),
+      [
+        { event: "created", resumed: true },
+        { event: "ended", reason: "closed" },
+      ],
+      "a session created before the plugin loaded must report resumed once\n" + details,
+    );
   },
 };
 
@@ -581,11 +756,11 @@ const interrupt: SessionScenario = {
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
-    const observations = observationsOf(evidence, "interrupt-action");
 
-    assert.ok(
-      hasValue(observations, "outcome", "accepted"),
-      "the plugin's interrupt must be accepted\n" + details,
+    assert.deepEqual(
+      observationsOf(evidence, "interrupt-action"),
+      [{ event: "interrupt", outcome: "accepted" }],
+      "the plugin's interrupt must be accepted exactly once\n" + details,
     );
 
     const aborted = evidence.settled.some((signal) =>
@@ -616,22 +791,45 @@ const model: SessionScenario = {
     const details = describeSession(evidence);
     const observations = observationsOf(evidence, "model-switch");
 
-    assert.ok(
-      hasValue(observations, "outcome", "accepted"),
-      "the model switch must be accepted\n" + details,
+    const turns = [
+      { event: "turn", reason: "done" },
+      { event: "turn", reason: "done" },
+    ];
+
+    const selected =
+      evidence.agent === "pi"
+        ? [{ event: "model_select", provider: "fake", model: "scripted-2" }]
+        : [];
+
+    assert.deepEqual(
+      observed(observations, "model_select"),
+      selected,
+      "only Pi records the model it selected, once, as scripted-2\n" + details,
     );
-    assert.ok(
-      observed(observations, "turn").length > 0,
-      "a turn must finish after the switch\n" + details,
+    assert.deepEqual(
+      observed(observations, "switch"),
+      [{ event: "switch", outcome: "accepted" }],
+      "the switch must be accepted once\n" + details,
+    );
+    assert.deepEqual(
+      observed(observations, "turn"),
+      turns,
+      "every later request must finish\n" + details,
+    );
+    assert.deepEqual(
+      eventNames(observations),
+      evidence.agent === "pi"
+        ? ["model_select", "switch", "turn", "turn"]
+        : ["switch", "turn", "turn"],
+      "no model-switch observation may appear outside the switch and its turns\n" + details,
     );
 
-    if (evidence.agent !== "pi") return;
+    const used = evidence.requests.findLast(isToolBearing);
 
-    assert.ok(
-      observed(observations, "model_select").some(
-        (observation) => observation["model"] === "scripted-2",
-      ),
-      "Pi must report the model switch it saw\n" + details,
+    assert.equal(
+      used?.model,
+      "scripted-2",
+      "the stand-in must see the second model on a later request\n" + details,
     );
   },
 };
@@ -654,32 +852,43 @@ const compact: SessionScenario = {
     }),
   check: (evidence) => {
     const details = describeSession(evidence);
-    const observations = observationsOf(evidence, "compact-action");
 
-    assert.ok(
-      hasValue(observations, "outcome", "accepted"),
-      "the compaction request must be accepted\n" + details,
+    const compactions = evidence.requests.filter((request) =>
+      isCompactionRequest(request, COMPACTION_MARKER),
     );
-    assert.ok(
-      evidence.requests.some((request) => isCompactionRequest(request, COMPACTION_MARKER)),
-      "the model must receive a compaction request\n" + details,
+
+    assert.deepEqual(
+      observationsOf(evidence, "compact-action"),
+      [{ event: "compact", outcome: "accepted" }],
+      "the compaction request must be accepted exactly once\n" + details,
+    );
+    assert.equal(
+      compactions.length,
+      1,
+      "the model must receive exactly one compaction request\n" + details,
     );
   },
 };
 
-/** T2's table: every long-lived scenario, run in both agents. */
-export const sessionScenarios: ReadonlyArray<SessionScenario> = [
+/** T2's table: every long-lived scenario, run in both agents unless `only` says one. */
+const sessionScenarios: ReadonlyArray<SessionScenario> = [
   wake,
   outside,
   now,
   next,
   permission,
+  permissionConfigured,
   idle,
   finishedDone,
   finishedAborted,
   finishedError,
   lifecycle,
+  lifecycleResumed,
   interrupt,
   model,
   compact,
 ];
+
+/** The rows one agent's test runs, in table order. */
+export const sessionScenariosFor = (agent: AgentName): ReadonlyArray<SessionScenario> =>
+  sessionScenarios.filter((scenario) => scenario.only === undefined || scenario.only === agent);

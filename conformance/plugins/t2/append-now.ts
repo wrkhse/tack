@@ -1,5 +1,5 @@
 import { createAgentPlugin } from "../../../src/index.ts";
-import { markHere } from "../../harness/markers.ts";
+import { appendAndMark } from "./append.ts";
 
 export const NAME = "append-now";
 
@@ -12,8 +12,6 @@ export const appendNow = createAgentPlugin(() => ({
   toolAfter: (call, _result, ctx) => {
     if (call.tool !== "shell") return;
 
-    void ctx.session
-      .append(NOW, { when: "now" })
-      .then((outcome) => markHere(NAME, { event: "append", outcome: outcome.status }));
+    appendAndMark(NAME, ctx.session, NOW, "now");
   },
 }));

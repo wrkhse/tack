@@ -27,7 +27,8 @@ export const interruptAction = createAgentPlugin(() => {
       timer = setTimeout(() => {
         void ctx.session
           .interrupt()
-          .then((outcome) => markHere(NAME, { event: "interrupt", outcome: outcome.status }));
+          .then((outcome) => markHere(NAME, { event: "interrupt", outcome: outcome.status }))
+          .catch((cause: Error) => markHere(NAME, { event: "interrupt", error: String(cause) }));
       }, DELAY_MS);
     },
 

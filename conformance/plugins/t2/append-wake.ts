@@ -1,5 +1,5 @@
 import { createAgentPlugin } from "../../../src/index.ts";
-import { markHere } from "../../harness/markers.ts";
+import { appendAndMark } from "./append.ts";
 
 export const NAME = "append-wake";
 
@@ -20,9 +20,7 @@ export const appendWake = createAgentPlugin(() => {
 
       appended = true;
 
-      void ctx.session
-        .append(WAKE, { when: "wake" })
-        .then((outcome) => markHere(NAME, { event: "append", outcome: outcome.status }));
+      appendAndMark(NAME, ctx.session, WAKE, "wake");
     },
   };
 });

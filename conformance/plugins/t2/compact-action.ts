@@ -26,7 +26,8 @@ export const compactAction = createAgentPlugin(() => {
 
       void ctx.session
         .compact()
-        .then((outcome) => markHere(NAME, { event: "compact", outcome: outcome.status }));
+        .then((outcome) => markHere(NAME, { event: "compact", outcome: outcome.status }))
+        .catch((cause: Error) => markHere(NAME, { event: "compact", error: String(cause) }));
     },
   };
 });

@@ -163,6 +163,7 @@ const driverFor = (input: PiDriverInput): Driver => {
         Effect.andThen(nextSignal(input.signals)),
         Effect.asVoid,
       ),
+    rebind: () => request({ type: "new_session" }).pipe(Effect.flatMap(refused), Effect.asVoid),
     endSession: () =>
       input.rpc.end().pipe(
         Effect.andThen(input.rpc.exited),
@@ -218,7 +219,7 @@ export const runPiSessionScenario = (
 
     const driver = driverFor({ rpc, projectDir: box.projectDir, signals, log, model, settled });
 
-    yield* scenario.run(driver).pipe(Effect.ensuring(rpc.end()));
+    yield* scenario.run(driver, "pi").pipe(Effect.ensuring(rpc.end()));
 
     return yield* collectSessionRun(box, model, settled, log.trail());
   });

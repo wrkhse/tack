@@ -28,6 +28,7 @@ export type PluginName =
   | "permission-deny"
   | "idle-note"
   | "finished-note"
+  | "retry-veto"
   | "lifecycle-note"
   | "interrupt-action"
   | "model-switch"

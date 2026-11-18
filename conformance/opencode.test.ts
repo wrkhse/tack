@@ -1,9 +1,9 @@
 import { it } from "@effect/vitest";
 
 import { runOpenCodeScenario } from "./harness/opencode.ts";
-import { runOpenCodeSessionScenario } from "./harness/t2-opencode.ts";
+import { runOpenCodeResumedScenario, runOpenCodeSessionScenario } from "./harness/t2-opencode.ts";
 import { scenarios } from "./scenarios.ts";
-import { sessionScenarios } from "./session-scenarios.ts";
+import { sessionScenariosFor } from "./session-scenarios.ts";
 import { checkPinnedVersion, checkScenario, checkSessionScenario } from "./suite.ts";
 
 const AGENT = "opencode";
@@ -17,8 +17,12 @@ for (const scenario of scenarios) {
   it.live(AGENT + ": " + scenario.name, () => checkScenario(AGENT, runOpenCodeScenario, scenario));
 }
 
-for (const scenario of sessionScenarios) {
+for (const scenario of sessionScenariosFor(AGENT)) {
   it.live(AGENT + ": " + scenario.name, () =>
-    checkSessionScenario(AGENT, runOpenCodeSessionScenario, scenario),
+    checkSessionScenario(
+      AGENT,
+      scenario.beforePlugin === true ? runOpenCodeResumedScenario : runOpenCodeSessionScenario,
+      scenario,
+    ),
   );
 }

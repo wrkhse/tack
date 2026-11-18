@@ -20,7 +20,12 @@ import {
   type SessionOutcome,
   type SessionTurn,
 } from "./opencode-server.ts";
-import { prepareOpenCode } from "./opencode.ts";
+import {
+  loadOpenCodePlugins,
+  prepareOpenCode,
+  prepareOpenCodeUnloaded,
+  type PreparedOpenCode,
+} from "./opencode.ts";
 
 /** The events a session's turns, its start and its end are told through. */
 const WITNESS_TYPES = [
@@ -241,6 +246,8 @@ const driverFor = (input: OpenCodeDriverInput): Driver => {
       }),
     settle,
     interrupt: () => input.server.interrupt(input.sessionID).pipe(Effect.andThen(settle())),
+    rebind: () =>
+      Effect.die(new Error("tack-conformance: OpenCode has no session rebind for a row to use")),
     endSession: () =>
       input.server
         .deleteSession(input.sessionID)
@@ -251,6 +258,36 @@ const driverFor = (input: OpenCodeDriverInput): Driver => {
   };
 };
 
+/** Runs one scenario on a server session and collects what the run left. */
+const runOnSession = (
+  server: OpenCodeServer,
+  sessionID: string,
+  prepared: PreparedOpenCode,
+  scenario: SessionScenario,
+): Effect.Effect<SessionRun, MarkerTimeout, Scope.Scope> =>
+  Effect.gen(function* () {
+    const settled: Array<SettledSignal> = [];
+    const mine: Array<Schema.Json> = [];
+    const recent: Array<Schema.Json> = [];
+
+    yield* trackEvents(server, sessionID, mine, recent);
+
+    const witness: Witness = { frames: () => [...mine], recent: () => [...recent] };
+
+    const driver = driverFor({
+      server,
+      sessionID,
+      projectDir: prepared.box.projectDir,
+      model: prepared.model,
+      settled,
+      witness,
+    });
+
+    yield* scenario.run(driver, "opencode").pipe(Effect.ensuring(server.stop()));
+
+    return yield* collectSessionRun(prepared.box, prepared.model, settled, witness.frames());
+  });
+
 /**
  * Runs one scenario against a private OpenCode server: the scripted model, one
  * bundle per plugin, a session created after the plugin loads, and the actions
@@ -260,31 +297,40 @@ export const runOpenCodeSessionScenario = (
   scenario: SessionScenario,
 ): Effect.Effect<SessionRun, MarkerTimeout, Scope.Scope> =>
   Effect.gen(function* () {
-    const { box, model } = yield* prepareOpenCode(scenario.plugins, scenario.standIn);
+    const prepared = yield* prepareOpenCode(
+      scenario.plugins,
+      scenario.standIn,
+      scenario.shellPermission,
+    );
 
-    const server = yield* opencodeServer(box);
+    const server = yield* opencodeServer(prepared.box);
 
-    yield* server.awaitPlugin(box.projectDir);
+    yield* server.awaitPlugin(prepared.box.projectDir);
 
-    const created = yield* server.createSession({ directory: box.projectDir });
-    const settled: Array<SettledSignal> = [];
-    const mine: Array<Schema.Json> = [];
-    const recent: Array<Schema.Json> = [];
+    const created = yield* server.createSession({ directory: prepared.box.projectDir });
 
-    yield* trackEvents(server, created.id, mine, recent);
+    return yield* runOnSession(server, created.id, prepared, scenario);
+  });
 
-    const witness: Witness = { frames: () => [...mine], recent: () => [...recent] };
+/**
+ * Runs one scenario on a session created before its plugin loaded: start the
+ * server without the plugin, create the session, then write the plugin config
+ * and reload the location before the scenario's first action.
+ */
+export const runOpenCodeResumedScenario = (
+  scenario: SessionScenario,
+): Effect.Effect<SessionRun, MarkerTimeout, Scope.Scope> =>
+  Effect.gen(function* () {
+    const prepared = yield* prepareOpenCodeUnloaded(
+      scenario.plugins,
+      scenario.standIn,
+      scenario.shellPermission,
+    );
 
-    const driver = driverFor({
-      server,
-      sessionID: created.id,
-      projectDir: box.projectDir,
-      model,
-      settled,
-      witness,
-    });
+    const server = yield* opencodeServer(prepared.box);
+    const created = yield* server.createSession({ directory: prepared.box.projectDir });
 
-    yield* scenario.run(driver).pipe(Effect.ensuring(server.stop()));
+    yield* loadOpenCodePlugins(prepared, server);
 
-    return yield* collectSessionRun(box, model, settled, witness.frames());
+    return yield* runOnSession(server, created.id, prepared, scenario);
   });

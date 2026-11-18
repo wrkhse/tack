@@ -6,8 +6,10 @@ scripted server on loopback answers every request, and a `git` shim first on
 `PATH` records the commands the agent tried to run.
 
 A row runs in the mode its steps need. T1's nine rows run one prompt to
-completion in a one-shot CLI; T2's thirteen run one long-lived session, because
+completion in a one-shot CLI; T2's fifteen run one long-lived session, because
 they need a second turn, an action after startup, or an end the suite controls.
+One T2 row runs in OpenCode only, because Pi has no session created before its
+extension loaded.
 
 Run it in CI, or in a disposable container. Never on a development machine:
 each test starts the agent CLIs, which are that machine's own agents.
@@ -42,8 +44,9 @@ request, so it gets the text `title`. A request that carries a tool result gets
 own shell tool with `git push origin main`. A marked request answers with the
 summary text instead, which is how the compaction row proves its call. A sticky
 error answers every tool-bearing request with the SSE error until the run ends,
-so a retry cannot rescue the turn; Pi's sandbox disables retries, and OpenCode
-spends its own retry budget before it reports the failure.
+so a retry cannot rescue the turn; Pi's sandbox disables retries, and the error
+row's OpenCode plugin vetoes its retry. Without that veto OpenCode would spend
+about 67–101 seconds of retries before reporting the failure.
 
 ## The long-lived modes
 
@@ -79,9 +82,10 @@ answer rather than a `session_start` record. The driver writes `prompt` and
 session, which reports `session_shutdown` reason `quit` to the plugins.
 
 Both drivers expose the same `Driver` to a row: `prompt`, `settle`,
-`interrupt`, `endSession`, `waitMarker`, `events`, `trail`, and the three
-reads a check's evidence comes from: `requests`, `observations` and
-`signals`. A row's steps and its check never name a harness event, except
+`interrupt`, `rebind`, `endSession`, `waitMarker`, `events`, `trail`, and
+the three reads a check's evidence comes from: `requests`, `observations` and
+`signals`. Only Pi implements `rebind`, which starts a fresh session and
+reports the previous one `replaced`. A row's steps and its check never name a harness event, except
 where the table says the two agents report one differently.
 
 ## The marker channel
@@ -112,7 +116,7 @@ session's model switch. They append them to the same plugin's marker.
 ## What it proves
 
 - Each row of the table below runs in both agents, from a fresh `HOME`, against
-  the pinned CLI version.
+  the pinned CLI version, unless the table names it OpenCode-only.
 - Each plugin is bundled on its own, with its own copy of tack. Two plugins in
   one run therefore prove the host slot works across copies.
 - Every plugin a scenario names is proven loaded, not assumed: the run records
@@ -195,30 +199,32 @@ docker run --rm -it -v "$PWD":/work -w /work oven/bun:1 \
 
 ## Scenarios
 
-| Scenario            | Plugins                       | Passes when                                           |
-| ------------------- | ----------------------------- | ----------------------------------------------------- |
-| deny                | `deny-push`                   | nothing recorded; reason returned                     |
-| deny after          | `deny-push`, `observe`        | the same, and `toolAfter` never ran                   |
-| fail closed         | `throws`                      | nothing recorded; error returned                      |
-| opt out             | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded            |
-| rewrite             | `safe-push`                   | `push origin main --dry-run`                          |
-| combine             | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded                     |
-| combine reversed    | `signed-push`, `safe-push`    | the same, in the other load order                     |
-| append              | `push-note`                   | the note is in the first prompt                       |
-| after               | `safe-push`, `observe`        | the observed command and output                       |
-| t2 wake             | `append-wake`                 | a tool-bearing request carries the text               |
-| t2 outside hook     | `append-outside`              | the timer's text lands in a request                   |
-| t2 now              | `append-now`                  | a running turn's next step carries it                 |
-| t2 next             | `append-next`                 | absent first, present in a later request              |
-| t2 permission       | `permission-deny`             | OpenCode denies; Pi never asks                        |
-| t2 idle             | `idle-note`                   | one idle, then Pi's aborted and no more               |
-| t2 finished done    | `finished-note`               | every request ends `done`                             |
-| t2 finished aborted | `finished-note`               | the interrupt ends `aborted` last                     |
-| t2 finished error   | `finished-note`               | the sticky failure ends `error`; no retry rescues it  |
-| t2 lifecycle        | `lifecycle-note`              | created; Pi ends, OpenCode's locationless delete ends |
-| t2 interrupt        | `interrupt-action`            | accepted, and the turn settles interrupted            |
-| t2 model            | `model-switch`                | accepted; Pi records `scripted-2`                     |
-| t2 compact          | `compact-action`              | accepted, and a compaction request arrives            |
+| Scenario                 | Plugins                       | Passes when                                                                         |
+| ------------------------ | ----------------------------- | ----------------------------------------------------------------------------------- |
+| deny                     | `deny-push`                   | nothing recorded; reason returned                                                   |
+| deny after               | `deny-push`, `observe`        | the same, and `toolAfter` never ran                                                 |
+| fail closed              | `throws`                      | nothing recorded; error returned                                                    |
+| opt out                  | `throws-allowed`, `safe-push` | the failing guard allows; dry run recorded                                          |
+| rewrite                  | `safe-push`                   | `push origin main --dry-run`                                                        |
+| combine                  | `safe-push`, `signed-push`    | `... --dry-run --signed` recorded                                                   |
+| combine reversed         | `signed-push`, `safe-push`    | the same, in the other load order                                                   |
+| append                   | `push-note`                   | the note is in the first prompt                                                     |
+| after                    | `safe-push`, `observe`        | the observed command and output                                                     |
+| t2 wake                  | `append-wake`                 | a tool-bearing request carries the text                                             |
+| t2 outside hook          | `append-outside`              | the timer's text lands in a request                                                 |
+| t2 now                   | `append-now`                  | the second tool-bearing request carries it, before the final request                |
+| t2 next                  | `append-next`                 | absent first, present in a later request                                            |
+| t2 permission            | `permission-deny`             | OpenCode denies; Pi never asks                                                      |
+| t2 permission configured | `permission-deny`             | a sandbox deny skips the hook; the call is refused                                  |
+| t2 idle                  | `idle-note`                   | one idle, then Pi's aborted and no more                                             |
+| t2 finished done         | `finished-note`               | every request ends `done`, exactly                                                  |
+| t2 finished aborted      | `finished-note`               | the interrupt ends `aborted` last                                                   |
+| t2 finished error        | `finished-note`, `retry-veto` | the failure ends `error`; the retry hook vetoes it                                  |
+| t2 lifecycle             | `lifecycle-note`              | created; Pi reports `replaced` then `shutdown`; OpenCode's locationless delete ends |
+| t2 lifecycle resumed     | `lifecycle-note`              | OpenCode only: reports `resumed` for a pre-load session                             |
+| t2 interrupt             | `interrupt-action`            | accepted, and the turn settles interrupted                                          |
+| t2 model                 | `model-switch`                | accepted; the stand-in sees `scripted-2`                                            |
+| t2 compact               | `compact-action`              | accepted, and one compaction request arrives                                        |
 
 ## Layout
 

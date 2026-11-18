@@ -61,6 +61,8 @@ export interface Driver {
   readonly settle: (timeoutMs?: number) => Effect.Effect<void>;
   /** Stops the running turn and waits for it to end. */
   readonly interrupt: () => Effect.Effect<void>;
+  /** Rebinds the extension to a fresh session; Pi only. */
+  readonly rebind: () => Effect.Effect<void>;
   /** DELETE on OpenCode, stdin close on Pi. */
   readonly endSession: () => Effect.Effect<void>;
   /** Waits for a plugin's marker file and returns its text. */

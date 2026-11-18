@@ -35,6 +35,11 @@ export interface DuplexSpec {
    * Default 5 seconds; a test that proves the escalation shortens it.
    */
   readonly graceMs?: number;
+  /**
+   * Starts the child in its own process group, so the helpers it spawns end
+   * with it. Only the OpenCode server driver asks for this.
+   */
+  readonly detached?: boolean;
 }
 
 /**
@@ -204,6 +209,7 @@ const start = (spec: DuplexSpec): Effect.Effect<PipedChild> =>
       cwd: spec.cwd,
       env: { ...spec.env },
       stdio: ["pipe", "pipe", "pipe"],
+      detached: spec.detached ?? false,
     }),
   );
 
@@ -241,6 +247,27 @@ const waitForExit = (state: ChildState, spec: DuplexSpec): Effect.Effect<number>
   );
 
 /**
+ * Sends one signal. A detached child is signalled through its process group,
+ * whose id is the child's pid. The guard keeps 0 and -1 from reaching every
+ * process the runner can see.
+ */
+const signalChild = (child: PipedChild, signal: NodeJS.Signals, group: boolean): void => {
+  const pid = child.pid;
+
+  if (group && pid !== undefined && Number.isInteger(pid) && pid > 1) {
+    try {
+      process.kill(-pid, signal);
+
+      return;
+    } catch {
+      // The group is gone; the child may still be alive, so fall through.
+    }
+  }
+
+  child.kill(signal);
+};
+
+/**
  * Asks the child to stop, then kills it. A child that ignores SIGTERM gets
  * SIGKILL after the grace; the second grace bounds teardown even then.
  */
@@ -248,20 +275,31 @@ const terminate = (
   child: PipedChild,
   exit: Deferred.Deferred<number>,
   graceMs: number,
+  group: boolean,
 ): Effect.Effect<void> =>
   Effect.suspend(() => {
-    if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) {
+    if (child.pid === undefined) return Effect.void;
+
+    const attached = group && Number.isInteger(child.pid) && child.pid > 1;
+
+    // A server that already exited can still leave helpers in its group, so a
+    // detached group always gets the final signal; the child alone does not.
+    if (child.exitCode !== null || child.signalCode !== null) {
+      if (attached) signalChild(child, "SIGKILL", true);
+
       return Effect.void;
     }
 
-    child.kill("SIGTERM");
+    signalChild(child, "SIGTERM", group);
 
     return Deferred.await(exit).pipe(
       Effect.timeoutOption(graceMs),
       Effect.flatMap((stopped) => {
-        if (Option.isSome(stopped)) return Effect.void;
-
-        child.kill("SIGKILL");
+        if (attached) {
+          signalChild(child, "SIGKILL", true);
+        } else if (Option.isNone(stopped)) {
+          signalChild(child, "SIGKILL", false);
+        }
 
         return Deferred.await(exit).pipe(Effect.timeoutOption(graceMs), Effect.asVoid);
       }),
@@ -274,8 +312,9 @@ const shutdown = (
   state: ChildState,
   watchers: Watchers,
   graceMs: number,
+  group: boolean,
 ): Effect.Effect<void> =>
-  terminate(child, state.exit, graceMs).pipe(
+  terminate(child, state.exit, graceMs, group).pipe(
     Effect.ensuring(
       Effect.sync(() => {
         child.stdout.off("data", watchers.onStdout);
@@ -313,7 +352,7 @@ export const duplexChild = (spec: DuplexSpec): Effect.Effect<Duplex, never, Scop
     };
 
     const child = yield* Effect.acquireRelease(start(spec), (started) =>
-      shutdown(started, state, watchers, spec.graceMs ?? KILL_GRACE_MS),
+      shutdown(started, state, watchers, spec.graceMs ?? KILL_GRACE_MS, spec.detached === true),
     );
 
     child.stdout.on("data", watchers.onStdout);

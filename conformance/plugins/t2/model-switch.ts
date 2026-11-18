@@ -12,7 +12,8 @@ export const modelSwitch = createAgentPlugin(() => ({
   sessionCreated: ({ session }) =>
     session
       .setModel(MODEL)
-      .then((outcome) => markHere(NAME, { event: "switch", outcome: outcome.status })),
+      .then((outcome) => markHere(NAME, { event: "switch", outcome: outcome.status }))
+      .catch((cause: Error) => markHere(NAME, { event: "switch", error: String(cause) })),
 
   responseFinished: (response) => {
     markHere(NAME, { event: "turn", reason: response.reason });
