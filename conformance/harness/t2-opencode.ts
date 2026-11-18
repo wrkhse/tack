@@ -1,4 +1,15 @@
-import { DateTime, Deferred, Effect, Predicate, Schema, Stream, type Scope } from "effect";
+import {
+  type Cause,
+  DateTime,
+  Deferred,
+  Effect,
+  Exit,
+  Predicate,
+  Queue,
+  Schema,
+  Stream,
+  type Scope,
+} from "effect";
 
 import type { StandIn } from "../model/stand-in.ts";
 import type { SessionScenario } from "../session-scenarios.ts";
@@ -45,8 +56,11 @@ const TURN_POLL_MS = 100;
 /** How long the delete's own event may take to arrive. */
 const DELETE_TIMEOUT_MS = 10_000;
 
-/** How long the server may take to answer the witness stream. */
+/** How long the server may take to send a stream its first frame, which proves its subscription. */
 const OPEN_TIMEOUT_MS = 10_000;
+
+/** The most events one driver stream holds while its reader catches up. */
+const EVENT_CAPACITY = 1_000;
 
 /** The most of one frame a failure message quotes. */
 const MAX_QUOTED_CHARS = 400;
@@ -109,18 +123,26 @@ interface WitnessTarget {
   id?: string;
 }
 
+/** The instants of one witness a caller can wait on, instead of polling for them. */
+interface WitnessSignals {
+  /** Completes when the stream's first frame arrives, the proof that its subscription exists. */
+  readonly opened: Deferred.Deferred<void>;
+  /** Completes on the first frame the witness attributes to its session. */
+  readonly arrived: Deferred.Deferred<void>;
+  /** Completes when the stream ends, so a caller can say what it never carried. */
+  readonly ended: Deferred.Deferred<void>;
+}
+
 /**
  * Records every connection and every frame of one witness stream, and completes
- * `opened` on the first, so a caller can wait for the subscription to exist.
+ * `signals.opened` when the stream reports its first frame, so a caller can wait
+ * for the subscription to exist.
  */
-const watchStream = (
-  stream: WitnessStream,
-  opened: Deferred.Deferred<void>,
-): EventStreamObserver => ({
+const watchStream = (stream: WitnessStream, signals: WitnessSignals): EventStreamObserver => ({
   opened: (at) => {
     stream.connections.push({ openedAt: at });
 
-    Deferred.doneUnsafe(opened, Effect.void);
+    Deferred.doneUnsafe(signals.opened, Effect.void);
   },
   closed: (at) => {
     const open = stream.connections.findLast((connection) => connection.closedAt === undefined);
@@ -185,17 +207,24 @@ const trackEvents = (
   mine: Array<Schema.Json>,
   recent: Array<Schema.Json>,
   stream: WitnessStream,
-  opened: Deferred.Deferred<void>,
+  signals: WitnessSignals,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.forkScoped(
-    server.events([...WITNESS_TYPES], watchStream(stream, opened)).pipe(
+    server.events([...WITNESS_TYPES], watchStream(stream, signals)).pipe(
       Stream.runForEach((event) =>
         Effect.sync(() => {
           remember(recent, event);
 
           if (target.id !== undefined && dataField(event, "sessionID") === target.id) {
             remember(mine, event);
+
+            Deferred.doneUnsafe(signals.arrived, Effect.void);
           }
+        }),
+      ),
+      Effect.onExit(() =>
+        Effect.sync(() => {
+          Deferred.doneUnsafe(signals.ended, Effect.void);
         }),
       ),
     ),
@@ -209,12 +238,40 @@ const trackEvents = (
 export interface WatchedSession extends Witness {
   /** Attributes frames from now on to this session. */
   readonly attribute: (sessionID: string) => void;
+  /** Completes on the first frame this witness attributes to its session. */
+  readonly arrived: Effect.Effect<void>;
+  /** Completes when the server ends the stream, so a caller can say what it never carried. */
+  readonly ended: Effect.Effect<void>;
 }
 
 /**
- * Opens the witness stream and waits until the server has answered it. Call
- * this before the session, or before the first action that can end one: the
- * wait is the guarantee that the subscription exists before any frame.
+ * Waits for a stream's first frame, the signal that its subscription exists.
+ * Response headers arrive before the server registers the subscriber, so a
+ * stream that has only answered is not yet listening.
+ */
+const openedWithin = (
+  opened: Deferred.Deferred<void>,
+  describe: () => string,
+): Effect.Effect<void> =>
+  Deferred.await(opened).pipe(
+    Effect.timeoutOrElse({
+      duration: OPEN_TIMEOUT_MS,
+      orElse: () =>
+        Effect.die(
+          new Error(
+            "tack-conformance: the OpenCode event stream did not open within " +
+              OPEN_TIMEOUT_MS +
+              " ms" +
+              describe(),
+          ),
+        ),
+    }),
+  );
+
+/**
+ * Opens the witness stream and waits until its first frame arrives. Call this
+ * before the session, or before the first action that can end one: the wait is
+ * the guarantee that the subscription exists before any frame.
  */
 export const watchSession = (
   server: OpenCodeServer,
@@ -224,24 +281,16 @@ export const watchSession = (
     const mine: Array<Schema.Json> = [];
     const recent: Array<Schema.Json> = [];
     const stream: WitnessStream = { connections: [], frames: 0 };
-    const opened = yield* Deferred.make<void>();
 
-    yield* trackEvents(server, target, mine, recent, stream, opened);
+    const signals: WitnessSignals = {
+      opened: yield* Deferred.make<void>(),
+      arrived: yield* Deferred.make<void>(),
+      ended: yield* Deferred.make<void>(),
+    };
 
-    yield* Deferred.await(opened).pipe(
-      Effect.timeoutOrElse({
-        duration: OPEN_TIMEOUT_MS,
-        orElse: () =>
-          Effect.die(
-            new Error(
-              "tack-conformance: the OpenCode event stream did not open within " +
-                OPEN_TIMEOUT_MS +
-                " ms\n" +
-                describeWitnessStream(stream),
-            ),
-          ),
-      }),
-    );
+    yield* trackEvents(server, target, mine, recent, stream, signals);
+
+    yield* openedWithin(signals.opened, () => "\n" + describeWitnessStream(stream));
 
     return {
       frames: () => [...mine],
@@ -255,6 +304,8 @@ export const watchSession = (
       attribute: (sessionID) => {
         target.id = sessionID;
       },
+      arrived: Deferred.await(signals.arrived),
+      ended: Deferred.await(signals.ended),
     };
   });
 
@@ -366,6 +417,49 @@ const waitForDeleted = (witness: Witness): Effect.Effect<void> =>
     DELETE_TIMEOUT_MS,
   );
 
+/**
+ * Opens the agent's own event stream for a scenario and returns it once its
+ * first frame has arrived, so the subscription exists before any action can
+ * publish to it. The bounded queue keeps a slow reader from losing an event,
+ * and the returned stream ends or fails as the server's own stream does.
+ */
+const openEvents = (
+  server: OpenCodeServer,
+  types: ReadonlyArray<string>,
+): Effect.Effect<Stream.Stream<Schema.Json, Error>, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const opened = yield* Deferred.make<void>();
+    const queue = yield* Queue.bounded<Schema.Json, Cause.Done | Error>(EVENT_CAPACITY);
+
+    yield* Effect.forkScoped(
+      server
+        .events(types, {
+          opened: () => Deferred.doneUnsafe(opened, Effect.void),
+          closed: () => {},
+          frame: () => {},
+        })
+        .pipe(
+          Stream.runForEach((event) => Queue.offer(queue, event)),
+          Effect.asVoid,
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              if (Exit.isSuccess(exit)) {
+                Queue.endUnsafe(queue);
+
+                return;
+              }
+
+              Queue.failCauseUnsafe(queue, exit.cause);
+            }),
+          ),
+        ),
+    );
+
+    yield* openedWithin(opened, () => "");
+
+    return Stream.fromQueue(queue);
+  });
+
 /** One turn's end: the terminal event the session's outcome names, and its abort. */
 const signalOf = (outcome: SessionOutcome): SettledSignal => ({
   kind: "session.execution." + outcome,
@@ -419,7 +513,7 @@ const driverFor = (input: OpenCodeDriverInput): Driver => {
         yield* waitForDeleted(input.witness);
       }),
     waitMarker: (name, timeoutMs) => waitForMarker(input.projectDir, name, timeoutMs),
-    events: (types) => input.server.events(types),
+    events: (types) => openEvents(input.server, types),
     trail: () => input.witness.frames(),
   };
 };

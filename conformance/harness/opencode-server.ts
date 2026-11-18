@@ -57,11 +57,15 @@ export type SessionOutcome = typeof SessionOutcomeSchema.Type;
 
 /**
  * What a caller hears about the event stream it opened. A connection that never
- * opens reports nothing at all, which is what tells a dead subscription apart
- * from one that merely stayed quiet.
+ * delivers a frame reports nothing at all, which is what tells a dead
+ * subscription apart from one that merely stayed quiet.
  */
 export interface EventStreamObserver {
-  /** The server answered with a stream, at this wall-clock instant (ISO 8601, milliseconds). */
+  /**
+   * The stream's first frame arrived, at this wall-clock instant (ISO 8601,
+   * milliseconds). Response headers come earlier, before the server subscribes
+   * its subscriber, so only the frame proves the subscription exists.
+   */
   readonly opened: (at: string) => void;
   /** The stream ended, failed or was interrupted, at this wall-clock instant. */
   readonly closed: (at: string) => void;
@@ -89,7 +93,9 @@ export interface OpenCodeServer {
   /**
    * Streams the server's events of the given types; an empty list takes every
    * event. The stream ends when the server closes the connection. `observer`
-   * hears when the connection opened and closed, and every frame it carried.
+   * hears when the first frame arrived, when the stream closed, and every frame
+   * it carried; OpenCode opens with `server.connected`, which it writes only
+   * after it has registered the subscriber.
    */
   readonly events: (
     types: ReadonlyArray<string>,
@@ -538,12 +544,24 @@ const events = (
         );
       }
 
-      yield* streamOpened(observer);
+      // Headers reach us before the server pulls its response stream, so the
+      // first frame is the proof: OpenCode writes `server.connected` only
+      // after EventFeed.subscribe has registered this subscriber.
+      let open = false;
 
       return response.body.pipe(
         Stream.decodeText(),
         frames(input),
         Stream.mapEffect((text) => readEvent(input, text)),
+        Stream.tap(() =>
+          Effect.suspend(() => {
+            if (open) return Effect.void;
+
+            open = true;
+
+            return streamOpened(observer);
+          }),
+        ),
         Stream.tap(() => Effect.sync(() => observer?.frame())),
         Stream.filter((event) => types.length === 0 || types.includes(event.type)),
         Stream.map((event) => event.json),

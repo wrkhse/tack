@@ -44,6 +44,37 @@ export const selectedRows = <A extends { readonly name: string }>(
   rows: ReadonlyArray<A>,
 ): ReadonlyArray<A> => rows.filter((row) => rowSelected(row.name));
 
+/** A filtered run that selected no row: it would check nothing but a version. */
+class EmptySelection extends Error {
+  override name = "EmptySelection";
+
+  constructor(agent: string, only: string) {
+    super(
+      "tack-conformance: TACK_CONFORMANCE_ONLY " +
+        JSON.stringify(only) +
+        " selected no " +
+        agent +
+        " row",
+    );
+  }
+}
+
+/**
+ * Refuses a filtered run that selected nothing, where the pinned-version test
+ * would be the whole run. Each group is one table's selected rows, so a filter
+ * may name a row in any of them.
+ */
+export const requireSelection = (
+  agent: string,
+  groups: ReadonlyArray<ReadonlyArray<{ readonly name: string }>>,
+): void => {
+  const only = onlySetting();
+
+  if (only === "" || groups.some((rows) => rows.length > 0)) return;
+
+  throw new EmptySelection(agent, only);
+};
+
 /** One run of a row: a test of its own, named for its place when the row repeats. */
 export interface Iteration {
   /** The row's test name, numbered only when the row runs more than once. */

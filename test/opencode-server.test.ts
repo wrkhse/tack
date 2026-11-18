@@ -4,9 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { expect, it } from "@effect/vitest";
-import { Cause, Effect, Exit, Predicate, Schema, Stream, type Scope } from "effect";
+import { Cause, Effect, Exit, Schema, Stream, type Scope } from "effect";
 
-import { waitForEvidence } from "../conformance/harness/driver.ts";
 import { opencodeServer, type OpenCodeServer } from "../conformance/harness/opencode-server.ts";
 import type { Sandbox } from "../conformance/harness/sandbox.ts";
 import { createWatchedSession, watchSession } from "../conformance/harness/t2-opencode.ts";
@@ -14,7 +13,8 @@ import { createWatchedSession, watchSession } from "../conformance/harness/t2-op
 /**
  * A plain node:http server standing in for `opencode serve`: it records every
  * request, refuses a wrong password, and answers the routes the driver uses.
- * The "huge" mode makes the event stream carry one event over 1 MiB.
+ * The "huge" mode makes the event stream carry one event over 1 MiB; "live"
+ * keeps it open for pushed events, and "one-shot" announces itself and ends.
  */
 const FAKE = [
   'import { appendFileSync, readFileSync, writeFileSync } from "node:fs";',
@@ -93,6 +93,13 @@ const FAKE = [
   "",
   '    if (mode() === "huge") {',
   '      event(response, { type: "session.huge", data: "x".repeat(1048577) });',
+  "      response.end();",
+  "",
+  "      return;",
+  "    }",
+  "",
+  '    if (mode() === "one-shot") {',
+  '      event(response, { type: "server.connected", data: {} });',
   "      response.end();",
   "",
   "      return;",
@@ -306,19 +313,6 @@ const recorded = (log: string): ReadonlyArray<RequestRecord> =>
 const credentials = (authorization: string): string =>
   Buffer.from(authorization.replace("Basic ", ""), "base64").toString("utf8");
 
-/** One event's type, when it carries one. */
-const eventType = (event: Schema.Json): string | null => {
-  if (!Predicate.isObject(event)) return null;
-
-  const type = event["type"];
-
-  return Predicate.isString(type) ? type : null;
-};
-
-/** Whether the witness holds the server's delete of the session. */
-const sawDelete = (frames: ReadonlyArray<Schema.Json>): boolean =>
-  frames.some((frame) => eventType(frame) === "session.deleted");
-
 it.live("sends Basic auth and the exact request of each action", () =>
   withServer({}, (fake, server) =>
     Effect.gen(function* () {
@@ -449,14 +443,9 @@ it.live("opens the witness before the session, so a delete cannot outrun it", ()
 
       yield* server.deleteSession(created.id);
 
-      yield* waitForEvidence(
-        "the session.deleted frame",
-        Effect.sync(() => ({
-          ready: sawDelete(created.witness.frames()),
-          seen: "frames: " + created.witness.frames().length,
-        })),
-        2_000,
-      );
+      // The delete answers only after it published the frame, so the witness's
+      // own arrival is the wait: a pause would guess when the frame lands.
+      yield* created.witness.arrived;
 
       expect(created.witness.frames()).toEqual([
         { type: "session.deleted", data: { sessionID: "session-1" } },
@@ -470,7 +459,7 @@ it.live("opens the witness before the session, so a delete cannot outrun it", ()
   ),
 );
 
-it.live("does not replay a delete frame published before the stream opened", () =>
+it.live("loses the delete frame when the witness opens after the delete", () =>
   withServer({}, (fake, server) =>
     Effect.gen(function* () {
       yield* fake.setMode("live");
@@ -479,20 +468,21 @@ it.live("does not replay a delete frame published before the stream opened", () 
 
       yield* server.deleteSession(created.id);
 
+      // This is the order the fix rules out: the delete is published before the
+      // stream exists, and the server replays nothing. The stream announces
+      // itself and ends, so its whole life, not a deadline, bounds the check.
+      yield* fake.setMode("one-shot");
+
       const late = yield* watchSession(server);
 
-      const missed = yield* Effect.exit(
-        waitForEvidence(
-          "the session.deleted frame",
-          Effect.sync(() => ({
-            ready: sawDelete(late.frames()),
-            seen: "frames: " + late.frames().length,
-          })),
-          500,
-        ),
-      );
+      yield* late.ended;
 
-      expect(Exit.isFailure(missed)).toBe(true);
+      expect(recorded(fake.log).map((request) => request.method + " " + request.url)).toEqual([
+        "POST /api/session",
+        "DELETE /api/session/session-1",
+        "GET /api/event",
+      ]);
+      expect(late.recent()).toEqual([]);
     }),
   ),
 );

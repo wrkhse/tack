@@ -1,4 +1,4 @@
-import { Effect, Queue, Schema, type Stream } from "effect";
+import { Effect, Queue, Schema, type Scope, type Stream } from "effect";
 
 import type { ChatRequest, StandIn } from "../model/stand-in.ts";
 import { parseLoaded } from "../plugins/loaded.ts";
@@ -73,8 +73,14 @@ export interface Driver {
   readonly observations: (name: string) => Effect.Effect<ReadonlyArray<MarkerObservation>>;
   /** The terminal signals collected so far, in order. */
   readonly signals: () => ReadonlyArray<SettledSignal>;
-  /** Streams the agent's own events of the given types; empty takes every type. */
-  readonly events: (types: ReadonlyArray<string>) => Stream.Stream<Schema.Json>;
+  /**
+   * Opens the agent's own event stream and returns it once its subscription
+   * exists; empty takes every type. Open it before the first action that can
+   * publish an event: a stream opened later is not replayed.
+   */
+  readonly events: (
+    types: ReadonlyArray<string>,
+  ) => Effect.Effect<Stream.Stream<Schema.Json, Error>, never, Scope.Scope>;
   /**
    * The last few events the agent's own stream showed of this session, for a
    * wait that has to say what it saw instead of reporting silence.
