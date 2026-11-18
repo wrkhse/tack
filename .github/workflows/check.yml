@@ -30,6 +30,7 @@ jobs:
           node-version-file: .node-version
           run-install: false
       - run: bun install --frozen-lockfile
+      # Gate ignores GHSA-fc5q-39xc-vjpf (picomatch, unpatched, dev chains only); removed at 4.0.8.
       - run: bun run check
 
   conformance:
