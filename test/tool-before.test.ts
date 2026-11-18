@@ -10,8 +10,9 @@ import type {
   ToolDecision,
 } from "../src/hooks/tool-before.ts";
 import { ToolDecision as Decision, runToolBefore } from "../src/hooks/tool-before.ts";
+import { sessionFor } from "./helpers.ts";
 
-const ctx: HookContext = { agent: "opencode", sessionId: "session-1" };
+const ctx: HookContext = { agent: "opencode", sessionId: "session-1", session: sessionFor("s1") };
 
 const shellCall: ToolCall = {
   tool: "shell",
@@ -27,9 +28,15 @@ function plugin(definition: Partial<ResolvedPlugin> & { readonly name: string })
     priority: 100,
     budgetMs: 5000,
     toolBeforeOnError: "deny",
+    permissionAskedOnError: "leave",
     toolBefore: undefined,
     promptSent: undefined,
     toolAfter: undefined,
+    sessionCreated: undefined,
+    sessionEnded: undefined,
+    responseFinished: undefined,
+    sessionIdle: undefined,
+    permissionAsked: undefined,
     ...definition,
   };
 }

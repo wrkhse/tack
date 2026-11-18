@@ -15,9 +15,15 @@ const safePush: ResolvedPlugin = {
   priority: 10,
   budgetMs: 5000,
   toolBeforeOnError: "deny",
+  permissionAskedOnError: "leave",
   toolBefore: undefined,
   promptSent: undefined,
   toolAfter: undefined,
+  sessionCreated: undefined,
+  sessionEnded: undefined,
+  responseFinished: undefined,
+  sessionIdle: undefined,
+  permissionAsked: undefined,
 };
 
 const safePushReplacement: ResolvedPlugin = { ...safePush, priority: 5 };

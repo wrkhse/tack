@@ -10,6 +10,18 @@ export const capabilities = [
   "promptSent.append",
   "toolAfter.observe",
   "host.sharedRealm",
+  "session.append.now",
+  "session.append.next",
+  "session.append.wake",
+  "session.compact",
+  "session.interrupt",
+  "session.model",
+  "event.responseFinished",
+  "event.sessionCreated",
+  "event.sessionEnded",
+  "event.sessionIdle",
+  "event.permissionAsked",
+  "session.actOutsideHook",
 ] as const;
 
 export type Capability = (typeof capabilities)[number];

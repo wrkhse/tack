@@ -35,6 +35,13 @@ describe("fidelity tables", () => {
     }),
   );
 
+  it.effect("carries every capability in both tables", () =>
+    Effect.sync(() => {
+      expect(Object.keys(fidelity.opencode.cells).toSorted()).toEqual(capabilities.toSorted());
+      expect(Object.keys(fidelity.pi.cells).toSorted()).toEqual(capabilities.toSorted());
+    }),
+  );
+
   it.effect("pins the version range and the verified version", () =>
     Effect.sync(() => {
       expect(fidelity.opencode.versions).toBe(">=2.3.0 <2.4.0");

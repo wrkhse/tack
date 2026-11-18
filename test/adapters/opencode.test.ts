@@ -1,15 +1,21 @@
 import { fileURLToPath } from "node:url";
 
-import { expect, it } from "@effect/vitest";
+import { afterEach, expect, it, vi } from "@effect/vitest";
 import { Effect, Predicate } from "effect";
 import type * as oc from "@opencode/plugin";
 
 import { opencodeScope } from "../../src/agents/opencode.ts";
 import { hostSlot } from "../../src/host/host.ts";
-import type { AgentPlugin, ToolCall, ToolResult } from "../../src/index.ts";
+import type { AgentPlugin, Session, ToolCall, ToolResult } from "../../src/index.ts";
 import { createAgentPlugin } from "../../src/index.ts";
+import { quietConsole } from "../helpers.ts";
 
 const DIRECTORY = "/work/app";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 interface FakeToolEvent {
   readonly tool: string;
@@ -26,36 +32,118 @@ type FakeToolCallback = (event: FakeToolEvent) => void | Promise<void>;
 
 type FakePromptCallback = (event: FakePromptEvent) => void | Promise<void>;
 
+/** The synthetic message the adapter asks OpenCode to admit. */
+interface FakeSynthetic {
+  readonly sessionID: string;
+  readonly text: string;
+  readonly delivery?: "steer" | "queue";
+  readonly resume?: boolean;
+}
+
+interface FakeSwitchModel {
+  readonly sessionID: string;
+  readonly model: { readonly providerID: string; readonly id: string };
+}
+
+/** One session action the adapter performed, as OpenCode received it. */
+type FakeSessionCall =
+  | { readonly method: "synthetic"; readonly input: FakeSynthetic }
+  | { readonly method: "compact"; readonly input: { readonly sessionID: string } }
+  | { readonly method: "interrupt"; readonly input: { readonly sessionID: string } }
+  | { readonly method: "switchModel"; readonly input: FakeSwitchModel };
+
+/** One session lifecycle event the fake subscription delivers. */
+interface FakeLifecycleEvent {
+  readonly type:
+    | "session.created"
+    | "session.deleted"
+    | "session.archived"
+    | "session.step.ended"
+    | "session.step.failed"
+    | "session.idle";
+  readonly location?: {
+    readonly directory: string;
+    readonly workspaceID?: string | undefined;
+  };
+  readonly data: {
+    readonly sessionID: string;
+    readonly error?: { readonly type: string } | undefined;
+  };
+}
+
+interface FakeSubscribeOptions {
+  readonly types?: ReadonlyArray<string>;
+  readonly signal?: AbortSignal;
+}
+
+/** The options one subscription received and when it has consumed its events. */
+interface FakeEventStream {
+  readonly options: FakeSubscribeOptions | undefined;
+  readonly settled: Promise<void>;
+}
+
+interface FakePermissionEvent {
+  readonly sessionID: string;
+  readonly action: string;
+  readonly resources: ReadonlyArray<string>;
+  readonly message?: string | undefined;
+  effect: "allow" | "ask" | "deny";
+}
+
+interface FakeIdleEvent {
+  readonly sessionID: string;
+}
+
+type FakePermissionCallback = (event: FakePermissionEvent) => void | Promise<void>;
+
+type FakeIdleCallback = (event: FakeIdleEvent) => void | Promise<void>;
+
+/** The session hook's two callbacks, discriminated by the hook's name. */
+type FakeSessionHookArgs =
+  | [name: "prompt", callback: FakePromptCallback]
+  | [name: "experimental.idle", callback: FakeIdleCallback];
+
 interface FakeHandlers {
   "execute.before"?: FakeToolCallback;
   "execute.after"?: FakeToolCallback;
   prompt?: FakePromptCallback;
+  evaluate?: FakePermissionCallback;
+  idle?: FakeIdleCallback;
 }
 
 interface FakeContext {
   readonly context: oc.Plugin.Context;
   readonly handlers: FakeHandlers;
   readonly disposed: string[];
+  readonly calls: FakeSessionCall[];
+  readonly events: FakeLifecycleEvent[];
+  readonly subscriptions: FakeEventStream[];
+  /** What `session.interrupt` reports; the next subscription fails while it counts down. */
+  readonly interruptResult: { interrupted: boolean };
+  readonly subscriptionFailures: { remaining: number };
 }
 
 interface FakeRegistration {
   readonly dispose: () => Promise<void>;
 }
 
-/** The fake's shape, which the adapter's three Context members cover. */
+/** The fake's shape, which the Context members the adapter reads cover. */
 interface FakeCandidate {
   readonly location: {
     readonly directory: string;
     readonly workspaceID?: string | undefined;
   };
   readonly tool: {
-    readonly hook: (
-      name: "execute.before" | "execute.after",
-      callback: FakeToolCallback,
-    ) => Promise<FakeRegistration>;
+    readonly hook: (...args: never[]) => Promise<FakeRegistration>;
   };
   readonly session: {
-    readonly hook: (name: "prompt", callback: FakePromptCallback) => Promise<FakeRegistration>;
+    readonly hook: unknown;
+  };
+  readonly permission: {
+    readonly hook: (...args: never[]) => Promise<FakeRegistration>;
+  };
+  readonly event: {
+    readonly subscribe: unknown;
   };
 }
 
@@ -69,7 +157,7 @@ function registration(name: string, disposed: string[]): Promise<FakeRegistratio
   });
 }
 
-/** The fake implements the three Context members the adapter reads. */
+/** The fake implements every Context member the adapter reads. */
 function isOpenCodeContext(value: FakeCandidate): value is oc.Plugin.Context {
   const { location } = value;
 
@@ -77,13 +165,96 @@ function isOpenCodeContext(value: FakeCandidate): value is oc.Plugin.Context {
     Predicate.isString(location.directory) &&
     (location.workspaceID === undefined || Predicate.isString(location.workspaceID)) &&
     Predicate.isFunction(value.tool.hook) &&
-    Predicate.isFunction(value.session.hook)
+    Predicate.isFunction(value.session.hook) &&
+    Predicate.isFunction(value.permission.hook) &&
+    Predicate.isFunction(value.event.subscribe)
   );
 }
 
-function fakeContext(directory: string, workspaceID?: string): FakeContext {
+/** One subscription over the events queued at subscribe time, then an abort wait. */
+function subscribeTo(
+  events: ReadonlyArray<FakeLifecycleEvent>,
+  options: FakeSubscribeOptions | undefined,
+  subscriptions: FakeEventStream[],
+  failures: { remaining: number },
+): AsyncIterable<FakeLifecycleEvent> {
+  const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
+  const queued = [...events];
+  let index = 0;
+
+  subscriptions.push({ options, settled });
+
+  const iterator: AsyncIterator<FakeLifecycleEvent> = {
+    next: () => {
+      if (failures.remaining > 0) {
+        failures.remaining -= 1;
+
+        return Promise.reject(new Error("the stream dropped"));
+      }
+
+      const value = queued[index];
+
+      if (value === undefined) {
+        settle();
+
+        return Promise.resolve({ done: true, value: undefined });
+      }
+
+      index += 1;
+
+      return Promise.resolve({ done: false, value });
+    },
+  };
+
+  return { [Symbol.asyncIterator]: () => iterator };
+}
+
+/** The session hook a fake context offers: prompt, and idle unless the hook is absent. */
+function sessionHook(
+  handlers: FakeHandlers,
+  disposed: string[],
+  failIdle: boolean,
+): (...args: FakeSessionHookArgs) => Promise<FakeRegistration> {
+  return (...args) => {
+    if (args[0] === "prompt") {
+      const [name, callback] = args;
+
+      handlers.prompt = callback;
+
+      return registration(name, disposed);
+    }
+
+    if (failIdle) {
+      throw new Error("no experimental.idle in this OpenCode");
+    }
+
+    const [name, callback] = args;
+
+    handlers.idle = callback;
+
+    return registration(name, disposed);
+  };
+}
+
+function fakeContext(
+  directory: string,
+  workspaceID?: string,
+  failure?: Error,
+  failIdle = false,
+): FakeContext {
   const disposed: string[] = [];
   const handlers: FakeHandlers = {};
+  const calls: FakeSessionCall[] = [];
+  const events: FakeLifecycleEvent[] = [];
+  const subscriptions: FakeEventStream[] = [];
+  const interruptResult = { interrupted: true };
+  const subscriptionFailures = { remaining: 0 };
+
+  const answer = (call: FakeSessionCall) => {
+    calls.push(call);
+
+    return failure === undefined ? Promise.resolve(undefined) : Promise.reject(failure);
+  };
 
   const fake = {
     location: { directory, workspaceID },
@@ -94,12 +265,26 @@ function fakeContext(directory: string, workspaceID?: string): FakeContext {
         return registration(name, disposed);
       },
     },
-    session: {
-      hook: (name: "prompt", callback: FakePromptCallback) => {
-        handlers.prompt = callback;
+    permission: {
+      hook: (name: "evaluate", callback: FakePermissionCallback) => {
+        handlers.evaluate = callback;
 
         return registration(name, disposed);
       },
+    },
+    event: {
+      subscribe: (options?: FakeSubscribeOptions) =>
+        subscribeTo(events, options, subscriptions, subscriptionFailures),
+    },
+    session: {
+      hook: sessionHook(handlers, disposed, failIdle),
+      synthetic: (input: FakeSynthetic) => answer({ method: "synthetic", input }),
+      compact: (input: { readonly sessionID: string }) => answer({ method: "compact", input }),
+      interrupt: (input: { readonly sessionID: string }) =>
+        answer({ method: "interrupt", input }).then(() => ({
+          interrupted: interruptResult.interrupted,
+        })),
+      switchModel: (input: FakeSwitchModel) => answer({ method: "switchModel", input }),
     },
   };
 
@@ -107,7 +292,16 @@ function fakeContext(directory: string, workspaceID?: string): FakeContext {
     throw new Error("the test fake is not an OpenCode context");
   }
 
-  return { context: fake, handlers, disposed };
+  return {
+    context: fake,
+    handlers,
+    disposed,
+    calls,
+    events,
+    subscriptions,
+    interruptResult,
+    subscriptionFailures,
+  };
 }
 
 function hookOf<T>(hook: T | undefined): T {
@@ -155,6 +349,35 @@ function setupFailure(
 
 function release(cleanup: oc.Plugin.Cleanup): Effect.Effect<void> {
   return Effect.promise(() => Promise.resolve(cleanup()));
+}
+
+/** Loads a plugin that keeps the handle its hook receives, and returns that handle. */
+function handleOf(fake: FakeContext): Effect.Effect<Session> {
+  return Effect.gen(function* () {
+    let captured: Session | undefined;
+
+    const capture = createAgentPlugin(() => ({
+      name: "capture",
+
+      promptSent: (_prompt, ctx) => {
+        captured = ctx.session;
+
+        return undefined;
+      },
+    }));
+
+    yield* attach(capture, fake);
+
+    const event: FakePromptEvent = { sessionID: "s1", prompt: { text: "hi" } };
+
+    yield* runHook(() => hookOf(fake.handlers.prompt)(event));
+
+    if (captured === undefined) {
+      throw new Error("the adapter gave the hook no session handle");
+    }
+
+    return captured;
+  });
 }
 
 /** Loads two plugins in one scope and returns the event their chain rewrites. */
@@ -447,5 +670,736 @@ it.effect("removes the slot registration in the setup cleanup", () =>
     yield* release(cleanup);
 
     expect(slot.plugins(scope)).toEqual([]);
+  }),
+);
+
+it.effect("appends a synthetic message with the delivery its when names", () =>
+  Effect.gen(function* () {
+    const fake = fakeContext("/work/append");
+    const session = yield* handleOf(fake);
+
+    const outcomes = [
+      yield* Effect.promise(() => session.append("note", { when: "now" })),
+      yield* Effect.promise(() => session.append("note", { when: "next" })),
+      yield* Effect.promise(() => session.append("note", { when: "wake" })),
+    ];
+
+    expect(outcomes).toEqual([
+      { status: "accepted" },
+      { status: "accepted" },
+      { status: "accepted" },
+    ]);
+    expect(fake.calls).toEqual([
+      {
+        method: "synthetic",
+        input: { sessionID: "s1", text: "note", delivery: "steer", resume: false },
+      },
+      {
+        method: "synthetic",
+        input: { sessionID: "s1", text: "note", delivery: "queue", resume: false },
+      },
+      {
+        method: "synthetic",
+        input: { sessionID: "s1", text: "note", delivery: "steer", resume: true },
+      },
+    ]);
+  }),
+);
+
+it.effect("compacts the session", () =>
+  Effect.gen(function* () {
+    const fake = fakeContext("/work/compact");
+    const session = yield* handleOf(fake);
+
+    const outcome = yield* Effect.promise(() => session.compact());
+
+    expect(outcome).toEqual({ status: "accepted" });
+    expect(fake.calls).toEqual([{ method: "compact", input: { sessionID: "s1" } }]);
+  }),
+);
+
+it.effect("interrupts the session", () =>
+  Effect.gen(function* () {
+    const fake = fakeContext("/work/interrupt");
+    const session = yield* handleOf(fake);
+
+    const outcome = yield* Effect.promise(() => session.interrupt());
+
+    expect(outcome).toEqual({ status: "accepted" });
+    expect(fake.calls).toEqual([{ method: "interrupt", input: { sessionID: "s1" } }]);
+  }),
+);
+
+it.effect("refuses an interrupt that found nothing to stop", () =>
+  Effect.gen(function* () {
+    const observed = quietConsole();
+    const fake = fakeContext("/work/no-interrupt");
+    const session = yield* handleOf(fake);
+
+    fake.interruptResult.interrupted = false;
+
+    const outcome = yield* Effect.promise(() => session.interrupt());
+
+    expect(outcome).toEqual({ status: "refused", reason: "nothing to interrupt" });
+    expect(fake.calls).toEqual([{ method: "interrupt", input: { sessionID: "s1" } }]);
+    expect(
+      observed.lines().filter((line) => line.includes("interrupt refused: nothing to interrupt")),
+    ).toHaveLength(1);
+  }),
+);
+
+it.effect("switches to the model the handle names", () =>
+  Effect.gen(function* () {
+    const fake = fakeContext("/work/model");
+    const session = yield* handleOf(fake);
+    const model = { providerID: "anthropic", id: "claude-sonnet-4-5" };
+
+    const outcome = yield* Effect.promise(() => session.setModel(model));
+
+    expect(outcome).toEqual({ status: "accepted" });
+    expect(fake.calls).toEqual([{ method: "switchModel", input: { sessionID: "s1", model } }]);
+  }),
+);
+
+it.effect("refuses an action the harness rejects, naming its message", () =>
+  Effect.gen(function* () {
+    const observed = quietConsole();
+    const fake = fakeContext("/work/rejected", undefined, new Error("no such session"));
+    const session = yield* handleOf(fake);
+
+    const outcome = yield* Effect.promise(() => session.compact());
+
+    expect(outcome).toEqual({ status: "refused", reason: "no such session" });
+    expect(fake.calls).toEqual([{ method: "compact", input: { sessionID: "s1" } }]);
+    expect(
+      observed.lines().filter((line) => line.includes("compact refused: no such session")),
+    ).toHaveLength(1);
+  }),
+);
+
+it.effect("reports every action on an ended session as ended, with no harness call", () =>
+  Effect.gen(function* () {
+    let captured: Session | undefined;
+
+    const capture = createAgentPlugin(() => ({
+      name: "capture",
+
+      promptSent: (_prompt, ctx) => {
+        captured = ctx.session;
+
+        return undefined;
+      },
+    }));
+
+    const fake = fakeContext("/work/ended");
+
+    fake.events.push({
+      type: "session.deleted",
+      location: { directory: "/work/ended" },
+      data: { sessionID: "s1" },
+    });
+
+    const cleanup = yield* attach(capture, fake);
+
+    yield* runHook(() => hookOf(fake.handlers.prompt)({ sessionID: "s1", prompt: { text: "hi" } }));
+
+    const session = captured;
+
+    if (session === undefined) {
+      throw new Error("the adapter gave the hook no session handle");
+    }
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    const outcomes = [
+      yield* Effect.promise(() => session.append("note")),
+      yield* Effect.promise(() => session.compact()),
+      yield* Effect.promise(() => session.interrupt()),
+      yield* Effect.promise(() =>
+        session.setModel({ providerID: "anthropic", id: "claude-sonnet-4-5" }),
+      ),
+    ];
+
+    expect(outcomes).toEqual([
+      { status: "ended" },
+      { status: "ended" },
+      { status: "ended" },
+      { status: "ended" },
+    ]);
+    expect(fake.calls).toEqual([]);
+
+    yield* release(cleanup);
+  }),
+);
+
+/** The one subscription a fake recorded. */
+function streamOf(fake: FakeContext): FakeEventStream {
+  const stream = fake.subscriptions[0];
+
+  if (stream === undefined) {
+    throw new Error("the adapter subscribed to no events");
+  }
+
+  return stream;
+}
+
+/** The lifecycle, step and idle events one location's subscription must sort through. */
+function lifecycleEvents(directory: string): FakeLifecycleEvent[] {
+  return [
+    {
+      type: "session.created",
+      location: { directory: "/work/elsewhere" },
+      data: { sessionID: "other" },
+    },
+    {
+      type: "session.created",
+      location: { directory },
+      data: { sessionID: "s1" },
+    },
+    {
+      type: "session.step.ended",
+      location: { directory },
+      data: { sessionID: "s1" },
+    },
+    {
+      type: "session.step.failed",
+      location: { directory },
+      data: { sessionID: "s1", error: { type: "aborted" } },
+    },
+    {
+      type: "session.step.failed",
+      location: { directory },
+      data: { sessionID: "s1", error: { type: "api_error" } },
+    },
+    {
+      type: "session.deleted",
+      location: { directory },
+      data: { sessionID: "s1" },
+    },
+    {
+      type: "session.archived",
+      location: { directory },
+      data: { sessionID: "s1" },
+    },
+  ];
+}
+
+it.effect("reports this location's lifecycle and step events", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: (event) => {
+        seen.push(`created:${event.resumed}`);
+      },
+
+      sessionEnded: (event) => {
+        seen.push(`ended:${event.reason}`);
+      },
+
+      responseFinished: (event) => {
+        seen.push(`finished:${event.reason}`);
+      },
+    }));
+
+    const fake = fakeContext("/work/events");
+
+    fake.events.push(...lifecycleEvents("/work/events"));
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    expect(streamOf(fake).options?.types).toEqual([
+      "session.created",
+      "session.deleted",
+      "session.archived",
+      "session.step.ended",
+      "session.step.failed",
+    ]);
+    expect(seen).toEqual([
+      "created:false",
+      "finished:done",
+      "finished:aborted",
+      "finished:error",
+      "ended:closed",
+    ]);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("drops an event for a session it reported ended", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: (event) => {
+        seen.push(`created:${event.resumed}`);
+      },
+
+      sessionEnded: (event) => {
+        seen.push(`ended:${event.reason}`);
+      },
+
+      responseFinished: (event) => {
+        seen.push(`finished:${event.reason}`);
+      },
+
+      sessionIdle: () => {
+        seen.push("idle");
+      },
+    }));
+
+    const fake = fakeContext("/work/dropped");
+
+    fake.events.push(
+      {
+        type: "session.created",
+        location: { directory: "/work/dropped" },
+        data: { sessionID: "s1" },
+      },
+      {
+        type: "session.deleted",
+        location: { directory: "/work/dropped" },
+        data: { sessionID: "s1" },
+      },
+      {
+        type: "session.archived",
+        location: { directory: "/work/dropped" },
+        data: { sessionID: "s1" },
+      },
+      {
+        type: "session.step.ended",
+        location: { directory: "/work/dropped" },
+        data: { sessionID: "s1" },
+      },
+      {
+        type: "session.idle",
+        location: { directory: "/work/dropped" },
+        data: { sessionID: "s1" },
+      },
+    );
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    expect(seen).toEqual(["created:false", "ended:closed"]);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("forgets the oldest ended session past the cap", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: (event) => {
+        seen.push(`created:${event.session.id}:${event.resumed}`);
+      },
+
+      sessionEnded: () => {
+        seen.push("ended");
+      },
+
+      responseFinished: () => {
+        seen.push("finished");
+      },
+    }));
+
+    const fake = fakeContext("/work/cap");
+    const location = { directory: "/work/cap" };
+
+    for (let index = 0; index <= 1024; index += 1) {
+      fake.events.push(
+        { type: "session.created", location, data: { sessionID: `s${index}` } },
+        { type: "session.deleted", location, data: { sessionID: `s${index}` } },
+      );
+    }
+
+    fake.events.push({ type: "session.step.ended", location, data: { sessionID: "s0" } });
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    expect(seen.slice(-2)).toEqual(["created:s0:true", "finished"]);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("reports a session it first sees later with resumed true", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+      sessionCreated: (event) => {
+        seen.push(`created:${event.resumed}`);
+      },
+      responseFinished: (event) => {
+        seen.push(`finished:${event.reason}`);
+      },
+    }));
+
+    const fake = fakeContext("/work/resumed");
+
+    fake.events.push({
+      type: "session.step.ended",
+      location: { directory: "/work/resumed" },
+      data: { sessionID: "old" },
+    });
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    expect(seen).toEqual(["created:true", "finished:done"]);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("ignores an event with no location and warns once per process", () =>
+  Effect.gen(function* () {
+    const observed = quietConsole();
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+      sessionCreated: (event) => {
+        seen.push(`created:${event.resumed}`);
+      },
+      responseFinished: (event) => {
+        seen.push(`finished:${event.reason}`);
+      },
+    }));
+
+    const fake = fakeContext("/work/no-location");
+
+    fake.events.push(
+      { type: "session.created", data: { sessionID: "lost" } },
+      { type: "session.step.ended", data: { sessionID: "lost" } },
+      {
+        type: "session.step.ended",
+        location: { directory: "/work/no-location" },
+        data: { sessionID: "s1" },
+      },
+    );
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    expect(seen).toEqual(["created:true", "finished:done"]);
+    expect(
+      observed
+        .lines()
+        .filter((line) =>
+          line.includes("tack: an OpenCode event carried no location; tack ignores it"),
+        ),
+    ).toHaveLength(1);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("attributes a locationless event to a session it has already reported", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: (event) => {
+        seen.push(`created:${event.resumed}`);
+      },
+
+      sessionEnded: (event) => {
+        seen.push(`ended:${event.reason}`);
+      },
+
+      responseFinished: (event) => {
+        seen.push(`finished:${event.reason}`);
+      },
+    }));
+
+    const fake = fakeContext("/work/attributed");
+
+    fake.events.push(
+      {
+        type: "session.created",
+        location: { directory: "/work/attributed" },
+        data: { sessionID: "s1" },
+      },
+      { type: "session.step.ended", data: { sessionID: "s1" } },
+      { type: "session.deleted", data: { sessionID: "s1" } },
+    );
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    expect(seen).toEqual(["created:false", "finished:done", "ended:closed"]);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("waits for a session's creation report before running its idle", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+    const started = Promise.withResolvers<void>();
+    let finish: (() => void) | undefined;
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: () => {
+        seen.push("created");
+        started.resolve();
+
+        const { promise, resolve } = Promise.withResolvers<void>();
+
+        finish = () => {
+          seen.push("created:done");
+          resolve();
+        };
+
+        return promise;
+      },
+
+      sessionIdle: () => {
+        seen.push("idle");
+      },
+    }));
+
+    const fake = fakeContext("/work/race");
+    const cleanup = yield* attach(watch, fake);
+
+    const pending = Promise.resolve(hookOf(fake.handlers.idle)({ sessionID: "s1" }));
+
+    yield* Effect.promise(() => started.promise);
+
+    expect(seen).toEqual(["created"]);
+
+    if (finish === undefined) {
+      throw new Error("the creation report never started");
+    }
+
+    finish();
+
+    yield* Effect.promise(() => pending);
+
+    expect(seen).toEqual(["created", "created:done", "idle"]);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("restarts a failed subscription and keeps reporting", () =>
+  Effect.gen(function* () {
+    const observed = quietConsole();
+    const seen: string[] = [];
+    const reported = Promise.withResolvers<void>();
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: (event) => {
+        seen.push(`created:${event.resumed}`);
+        reported.resolve();
+      },
+    }));
+
+    const fake = fakeContext("/work/resume");
+
+    fake.subscriptionFailures.remaining = 1;
+    fake.events.push({
+      type: "session.created",
+      location: { directory: "/work/resume" },
+      data: { sessionID: "s1" },
+    });
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => reported.promise);
+
+    expect(fake.subscriptions).toHaveLength(2);
+    expect(seen).toEqual(["created:false"]);
+    expect(
+      observed
+        .lines()
+        .filter((line) => line.includes("tack: OpenCode event subscription failed; retrying")),
+    ).toHaveLength(1);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("stops restarting after five failed subscriptions, saying so", () =>
+  Effect.gen(function* () {
+    const observed = quietConsole();
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+
+      sessionCreated: () => {
+        seen.push("created");
+      },
+    }));
+
+    const fake = fakeContext("/work/give-up");
+
+    fake.subscriptionFailures.remaining = 6;
+
+    vi.useFakeTimers();
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(3_100));
+
+    vi.useRealTimers();
+
+    expect(
+      observed
+        .lines()
+        .filter((line) => line.includes("lifecycle reporting stopped: the stream dropped")),
+    ).toHaveLength(1);
+    expect(fake.subscriptions).toHaveLength(6);
+    expect(seen).toEqual([]);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("reports idle through the experimental hook", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+      sessionIdle: () => {
+        seen.push("idle");
+      },
+    }));
+
+    const fake = fakeContext("/work/idle");
+    const cleanup = yield* attach(watch, fake);
+
+    yield* runHook(() => hookOf(fake.handlers.idle)({ sessionID: "s1" }));
+
+    expect(seen).toEqual(["idle"]);
+    expect(streamOf(fake).options?.types).not.toContain("session.idle");
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("falls back to the session.idle event when the hook is absent", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+
+    const watch = createAgentPlugin(() => ({
+      name: "watch",
+      sessionIdle: () => {
+        seen.push("idle");
+      },
+    }));
+
+    const fake = fakeContext("/work/fallback", undefined, undefined, true);
+
+    fake.events.push({
+      type: "session.idle",
+      location: { directory: "/work/fallback" },
+      data: { sessionID: "s1" },
+    });
+
+    const cleanup = yield* attach(watch, fake);
+
+    yield* Effect.promise(() => streamOf(fake).settled);
+
+    expect(fake.handlers.idle).toBeUndefined();
+    expect(streamOf(fake).options?.types).toContain("session.idle");
+    expect(seen).toEqual(["idle"]);
+
+    yield* release(cleanup);
+  }),
+);
+
+it.effect("maps permission allow, deny and leave onto the evaluation", () =>
+  Effect.gen(function* () {
+    const gate = createAgentPlugin(() => ({
+      name: "gate",
+
+      permissionAsked: (request) => {
+        if (request.resources.some((resource) => resource.startsWith("/infra/"))) {
+          return { deny: "/infra/ is off limits." };
+        }
+
+        if (request.action === "read") {
+          return { allow: true };
+        }
+
+        return undefined;
+      },
+    }));
+
+    const fake = fakeContext("/work/permission");
+    const cleanup = yield* attach(gate, fake);
+    const evaluate = hookOf(fake.handlers.evaluate);
+
+    const denied: FakePermissionEvent = {
+      sessionID: "s1",
+      action: "shell",
+      resources: ["/infra/deploy.sh"],
+      effect: "ask",
+    };
+
+    yield* runHook(() => evaluate(denied));
+
+    expect(denied).toEqual({
+      sessionID: "s1",
+      action: "shell",
+      resources: ["/infra/deploy.sh"],
+      effect: "deny",
+      message: "/infra/ is off limits.",
+    });
+
+    const allowed: FakePermissionEvent = {
+      sessionID: "s1",
+      action: "read",
+      resources: ["/work/readme.md"],
+      effect: "ask",
+    };
+
+    yield* runHook(() => evaluate(allowed));
+
+    expect(allowed.effect).toBe("allow");
+
+    const left: FakePermissionEvent = {
+      sessionID: "s1",
+      action: "write",
+      resources: ["/work/notes.md"],
+      effect: "ask",
+      message: "the person's own prompt",
+    };
+
+    yield* runHook(() => evaluate(left));
+
+    expect(left.effect).toBe("ask");
+    expect(left.message).toBe("the person's own prompt");
+
+    yield* release(cleanup);
   }),
 );

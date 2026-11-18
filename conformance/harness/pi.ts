@@ -9,7 +9,13 @@ import { runCommand } from "./run.ts";
 import { sandbox, writeText } from "./sandbox.ts";
 
 /** A Pi extension loaded with -e is one file. */
-const PLUGIN_FILE = "plugin.js";
+export const PLUGIN_FILE = "plugin.js";
+
+/** Both scripted model ids, so `setModel` has a real target. */
+const MODELS = [
+  { id: "scripted", name: "Scripted" },
+  { id: "scripted-2", name: "Scripted 2" },
+];
 
 const modelsJson = (baseUrl: string) => ({
   providers: {
@@ -17,25 +23,38 @@ const modelsJson = (baseUrl: string) => ({
       baseUrl,
       api: "openai-completions",
       apiKey: "fake-key",
-      models: [
-        {
-          id: "scripted",
-          name: "Scripted",
-          reasoning: false,
-          input: ["text"],
-          contextWindow: 32768,
-          maxTokens: 4096,
-        },
-      ],
+      models: MODELS.map(({ id, name }) => ({
+        id,
+        name,
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 32768,
+        maxTokens: 4096,
+      })),
     },
   },
 });
 
-const writeModels = (dir: string, baseUrl: string): Effect.Effect<void> =>
-  writeText(
-    join(dir, "pi-agent", "models.json"),
-    JSON.stringify(modelsJson(baseUrl), null, 2) + "\n",
-  );
+/**
+ * Retries are off so a scripted failure ends its turn rather than being
+ * retried into a later answer, and auto-compaction is off so the only
+ * compaction a row sees is the one its plugin asked for. An extension's
+ * manual `compact()` is unaffected by the switch.
+ */
+const settingsJson = () => ({ retry: { enabled: false }, compaction: { enabled: false } });
+
+/** Writes the sandboxed Pi models file that serves both scripted ids, and its settings. */
+export const writePiConfig = (dir: string, baseUrl: string): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    yield* writeText(
+      join(dir, "pi-agent", "models.json"),
+      JSON.stringify(modelsJson(baseUrl), null, 2) + "\n",
+    );
+    yield* writeText(
+      join(dir, "pi-agent", "settings.json"),
+      JSON.stringify(settingsJson(), null, 2) + "\n",
+    );
+  });
 
 const extensionArgs = (bundles: ReadonlyArray<string>): ReadonlyArray<string> =>
   bundles.flatMap((bundle) => ["-e", bundle]);
@@ -72,7 +91,7 @@ export const runPiScenario = (scenario: Scenario): Effect.Effect<AgentRun, never
       box.pi.env,
     );
 
-    yield* writeModels(box.dir, model.baseUrl);
+    yield* writePiConfig(box.dir, model.baseUrl);
 
     const command = yield* runCommand({
       bin: box.pi.bin,
