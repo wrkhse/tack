@@ -118,6 +118,8 @@ interface FakePi {
   readonly handlers: Partial<Record<PiEventName, FakeHandler>>;
   readonly unsubscribed: string[];
   readonly calls: FakeCall[];
+  /** Resolves once the adapter has made a call of this method; never polls. */
+  readonly called: (method: FakeCall["method"]) => Promise<void>;
   /** When set, every action throws Pi's stale-context error. */
   readonly stale: { active: boolean };
 }
@@ -188,6 +190,29 @@ function fakePi(modelResult = true): FakePi {
     }
   };
 
+  const waiters: { readonly method: FakeCall["method"]; readonly settle: () => void }[] = [];
+
+  const record = (call: FakeCall): void => {
+    calls.push(call);
+
+    for (const waiter of waiters.filter((candidate) => candidate.method === call.method)) {
+      waiters.splice(waiters.indexOf(waiter), 1);
+      waiter.settle();
+    }
+  };
+
+  const called = (method: FakeCall["method"]): Promise<void> => {
+    if (calls.some((call) => call.method === method)) {
+      return Promise.resolve();
+    }
+
+    const { promise, resolve } = Promise.withResolvers<void>();
+
+    waiters.push({ method, settle: resolve });
+
+    return promise;
+  };
+
   const context: FakePiContext = {
     sessionManager: { getSessionId: () => "s1" },
     modelRegistry: {
@@ -198,11 +223,11 @@ function fakePi(modelResult = true): FakePi {
     },
     compact: (options) => {
       assertFresh();
-      calls.push({ method: "compact", options });
+      record({ method: "compact", options });
     },
     abort: () => {
       assertFresh();
-      calls.push({ method: "abort" });
+      record({ method: "abort" });
     },
   };
 
@@ -216,11 +241,11 @@ function fakePi(modelResult = true): FakePi {
     },
     sendMessage: (message: FakeAppendMessage, options?: FakeSendOptions) => {
       assertFresh();
-      calls.push({ method: "sendMessage", message, options });
+      record({ method: "sendMessage", message, options });
     },
     setModel: (model: FakeModel) => {
       assertFresh();
-      calls.push({ method: "setModel", model });
+      record({ method: "setModel", model });
 
       return Promise.resolve(modelResult);
     },
@@ -230,7 +255,7 @@ function fakePi(modelResult = true): FakePi {
     throw new Error("the test fake is not a Pi extension API");
   }
 
-  const created = { pi: fake, context, handlers, unsubscribed, calls, stale };
+  const created = { pi: fake, context, handlers, unsubscribed, calls, called, stale };
 
   started.push(created);
 
@@ -510,7 +535,7 @@ it.effect("reports a completed compaction as accepted", () =>
 
     const pending = session.compact();
 
-    yield* Effect.promise(() => vi.waitFor(() => expect(fake.calls).toHaveLength(1)));
+    yield* Effect.promise(() => fake.called("compact"));
 
     compactOf(fake.calls[0]).onComplete?.();
 
@@ -529,7 +554,7 @@ it.effect("refuses a compaction Pi reports as failed", () =>
 
     const pending = session.compact();
 
-    yield* Effect.promise(() => vi.waitFor(() => expect(fake.calls).toHaveLength(1)));
+    yield* Effect.promise(() => fake.called("compact"));
 
     compactOf(fake.calls[0]).onError?.(new Error("out of room"));
 
@@ -554,7 +579,7 @@ it.effect("does not accept a compaction before Pi reports it", () =>
       return outcome;
     });
 
-    yield* Effect.promise(() => vi.waitFor(() => expect(fake.calls).toHaveLength(1)));
+    yield* Effect.promise(() => fake.called("compact"));
 
     expect(settled).toBe(false);
 

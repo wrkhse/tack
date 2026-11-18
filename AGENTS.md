@@ -31,7 +31,7 @@ An abstraction is justified only when it removes concepts from the caller's ment
 - Explain and obtain approval before adding a production dependency.
 - Do not modify a quality gate, suppression, test, or health floor merely to make a change pass.
 
-For Workhorse TypeScript, use Bun for package management and scripts, Effect for effects, Vitest for tests, Oxlint with the vendored anti-slop rules, and Fallow for repository health.
+For Workhorse TypeScript, use Bun for package management and scripts, Effect for effects, Vitest for tests, Oxlint with the vendored anti-slop and landmines rules, and Fallow for repository health.
 
 ## Work
 
