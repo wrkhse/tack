@@ -10,7 +10,7 @@ the structure read from the code.
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----------- |
 | [T1](slices/t1.md) core, OpenCode, Pi         | Write `toolBefore` (deny, rewrite), `promptSent` (append) and `toolAfter`, run them in OpenCode and Pi; two plugins combine | Implemented |
 | [T2](slices/t2.md) session actions and events | `ctx.session` actions, `responseFinished`, `sessionIdle`, `permissionAsked`, acting outside a hook                          | Implemented |
-| [T3](slices/t3.md) tools                      | Register a tool once: native in OpenCode, Pi and Claude Code mods, an MCP server for Codex                                  | Planned     |
+| [T3](slices/t3.md) tools                      | Register a tool once: native in OpenCode, Pi and Claude Code mods, a generated MCP server for Codex                         | Planned     |
 | T4 Claude Code mod                            | Run the same plugins as a Claude Code mod                                                                                   | Planned     |
 | T5 `tack-hook` runner and action queue        | Run the plugins in Codex through one shared runner per event                                                                | Planned     |
 | T6 Claude Code hook entries                   | The same plugins with mods off                                                                                              | Planned     |
