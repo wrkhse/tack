@@ -267,6 +267,7 @@ function buildEffectMod(out: string): void {
   // rejects: it wants the symbol declared as an export at the top.
   text = text.replace(/\nexport \{\s*register\s*\};?\s*$/, "\n");
   text = text.replace(/^(?:var|const|function) register\b/m, "export $&");
+  text = text.replace(/^export var register\b/m, "export const register");
   writeFileSync(out, text);
 
   const count = (needle: string): number => text.split(needle).length - 1;
@@ -274,6 +275,7 @@ function buildEffectMod(out: string): void {
   console.log(JSON.stringify({
     bytes: statSync(out).size,
     exports: count("export const register") + count("export function register"),
+    varExports: count("export var register"),
     nodeImports: count("node:"),
     dynamicImports: count("import("),
     requires: count("require("),
@@ -337,8 +339,10 @@ function sandbox(label: string): Sandbox {
 
   writeFileSync(join(bin, "git"), shim);
   chmodSync(join(bin, "git"), 0o755);
+  writeFileSync(join(bin, "tack-recorder"), shim);
+  chmodSync(join(bin, "tack-recorder"), 0o755);
   mkdirSync(join(project, "probe-out"), { recursive: true });
-  writeFileSync(join(project, "probe-out", "shim-path.txt"), join(bin, "git"));
+  writeFileSync(join(project, "probe-out", "shim-path.txt"), join(bin, "tack-recorder"));
 
   return {
     project,
