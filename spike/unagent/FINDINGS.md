@@ -7,7 +7,10 @@ Research spike, 2026-10-21. A one-page capability matrix across OpenCode, Pi, Cl
 Most of what `unagent` was meant to unify has been standardized or built by others in the last six months:
 
 - **Portable packaging exists.** [Agent Plugins](https://agent-plugins.org) 1.0.0 (published; 1.1.0 is a working draft) defines one directory with `plugin.json`, `skills/` and `mcp.json`, plus reverse-domain folders for client-specific extras. Codex loads it natively. Copilot CLI and Cursor document support. Claude Code, OpenCode V2, pi and fx do not.
-- **Skills over MCP is a Final MCP extension.** [SEP-2640](https://modelcontextprotocol.io/extensions/skills/overview) (`io.modelcontextprotocol/skills`, `skill://` URIs) is what `ARCHITECTURE.md` proposed. No primary coding agent consumes it yet.
+- **Skills over MCP is a Final MCP extension.**
+  [SEP-2640](https://modelcontextprotocol.io/extensions/skills/overview)
+  (`io.modelcontextprotocol/skills`, `skill://` URIs) has no primary coding agent
+  consumer yet.
 - **Runtime driving exists.** The Vercel AI SDK's [`HarnessAgent`](https://ai-sdk.dev/docs/ai-sdk-harnesses/harness-adapters) (`@ai-sdk/harness` 1.0.159, 1.4M downloads a month) drives Claude Code, Codex, OpenCode, pi, fx, Cursor, Copilot, Cline, Grok Build and Deep Agents through one session API, with a published capability table. [ACP](https://agentclientprotocol.com) v1 covers editor-to-agent sessions for 42 registry agents.
 - **File generation exists.** [rulesync](https://github.com/dyoshikawa/rulesync) (1.13M downloads a month, v38) generates rules, MCP, commands, subagents, skills, hooks and permissions for about 60 tools. [add-mcp](https://github.com/neon-solutions/add-mcp) (754k a month) writes native MCP config for 23 agents and has a programmatic `upsertServer`.
 - **The name is taken.** npm `unagent` 0.0.8 belongs to [onmax/unagent](https://github.com/onmax/unagent): agent detection, a skill installer, and cloud primitives.
@@ -532,7 +535,9 @@ Decision: use `@workhorse/agents` and offer the verified agent table to onmax/un
 
 ## 6. Generated UI across agents
 
-Goal: a capability defines UI once and it appears in each agent's chat, sidebar, bottom bar and dialogs, and in Workhorse's own web, TUI and phone clients. `ARCHITECTURE.md` already names the approach: "use the extension capabilities of MCP to add `json-render` for generic generative UIs".
+Goal: a capability defines UI once and it appears in each agent's chat, sidebar,
+bottom bar and dialogs, and in Workhorse's own web, TUI and phone clients. This
+spike proposes an MCP extension that uses `json-render` for generic generative UIs.
 
 ### Versions and sources
 
@@ -690,9 +695,14 @@ The same render-only rule applies to the OpenCode plugin and the pi extension: t
 
 Decisions 4, 5, 7, 8 and 10 still stand.
 
+The [tack master issue](https://github.com/wrkhse/tack/issues/1) tracks the
+project's harness design.
+
 ## Sources consulted
 
-- **Workhorse:** `AGENTS.md`, `ARCHITECTURE.md`, `PHILOSOPHY.md`, `daemon/docs/architecture.md`.
+- **Workhorse:** `AGENTS.md`,
+  [PHILOSOPHY.md](https://github.com/wrkhse/workhorse/blob/main/PHILOSOPHY.md),
+  `daemon/docs/architecture.md`.
 - **Claude Code:**
   - `code.claude.com/docs/en/{mcp,managed-mcp,memory,skills,sub-agents,hooks,permissions,settings,sandboxing,headless,cli-reference}.md`
   - `plugins/{manifest-reference,marketplace-reference,cli-reference}.md`
