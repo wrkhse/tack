@@ -1,5 +1,5 @@
 async function guard($) {
-  await $.clock.sleep(9500);
+  await $.clock.sleep(15000);
 
   return { deny: "slow guard answered" };
 }

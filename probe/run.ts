@@ -27,7 +27,7 @@ const MODS = [
   "m-globals", "m-events", "m-prompt", "m-tool", "m-effect",
   "m-order-a", "m-order-b", "m-dollar-value", "m-dollar-param",
   "m-dollar-closure", "m-dollar-noun", "m-throws",
-  "m-catch-throw", "m-catch-slow",
+  "m-catch-throw", "m-catch-slow", "m-shim",
 ];
 
 const SEQUENCE = [
@@ -261,11 +261,19 @@ function buildEffectMod(out: string): void {
 
   if (!existsSync(out)) return;
 
-  const text = readFileSync(out, "utf8");
+  let text = readFileSync(out, "utf8");
+
+  // Bun emits a trailing `export { register }`, which the mod load check
+  // rejects: it wants the symbol declared as an export at the top.
+  text = text.replace(/\nexport \{\s*register\s*\};?\s*$/, "\n");
+  text = text.replace(/^(?:var|const|function) register\b/m, "export $&");
+  writeFileSync(out, text);
+
   const count = (needle: string): number => text.split(needle).length - 1;
 
   console.log(JSON.stringify({
     bytes: statSync(out).size,
+    exports: count("export const register") + count("export function register"),
     nodeImports: count("node:"),
     dynamicImports: count("import("),
     requires: count("require("),
@@ -318,7 +326,7 @@ function sandbox(label: string): Sandbox {
   const shim = [
     "#!/bin/sh",
     'case "$1" in',
-    "  push|probe-shim)",
+    "  push|probe-shim|tack-tool)",
     "    printf '%s | TACK_RECORDER=%s\\n' \"$*\" \"${TACK_RECORDER:-unset}\" >> '" + recorder + "'",
     "    exit 0",
     "    ;;",
@@ -329,6 +337,8 @@ function sandbox(label: string): Sandbox {
 
   writeFileSync(join(bin, "git"), shim);
   chmodSync(join(bin, "git"), 0o755);
+  mkdirSync(join(project, "probe-out"), { recursive: true });
+  writeFileSync(join(project, "probe-out", "shim-path.txt"), join(bin, "git"));
 
   return {
     project,
@@ -404,6 +414,10 @@ function printStream(stdout: string): void {
 
     console.log(clip(line, isInit ? 6000 : 700));
   }
+
+  const notices = lines.filter((line) => /skipped|did not load|refused/i.test(line));
+
+  console.log("--- notices in stdout: " + JSON.stringify(notices));
 }
 
 function printFiles(box: Sandbox): void {
@@ -473,7 +487,7 @@ for (const name of MODS) {
 }
 
 await scenario("no-mods", [], true);
-await scenario("main", ["m-globals", "m-events", "m-prompt", "m-tool", "m-effect", "m-order-a", "m-order-b"], true);
+await scenario("main", ["m-globals", "m-events", "m-prompt", "m-tool", "m-effect", "m-order-a", "m-order-b", "m-shim"], true);
 await scenario("order-reversed", ["m-order-b", "m-order-a"], false);
 await scenario("dollar", ["m-dollar-value", "m-dollar-param", "m-dollar-closure", "m-dollar-noun"], false);
 await scenario("throws-stream", ["m-throws"], true);

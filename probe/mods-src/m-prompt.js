@@ -4,9 +4,6 @@ export const register = (on) => {
 
     const context = Array.isArray(e.context) ? e.context : [];
 
-    return next({
-      ...e,
-      context: [...context, { type: "text", text: "tack-probe-context" }],
-    });
+    return next({ ...e, context: [...context, "tack-probe-context"] });
   });
 };
