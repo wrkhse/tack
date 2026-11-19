@@ -44,6 +44,9 @@ Each scope maps a plugin name to its one live registration.
 - A reload disposes before it registers again, so registering a name once its
   registration is disposed is the only legitimate re-registration.
 - `plugins(scope)` returns the live definitions in first-registration order.
+- Every hook combines them in [`byPriority`](../hooks/README.md#order-and-budgets)
+  order (`src/hooks/order.ts`): lower `priority` first, ties broken by name, so
+  the order plugins load in never changes how a hook combines.
 - `dispose` removes only its own registration; a token that is no longer live
   removes nothing.
 - The leader is the earliest live registration in the scope, provided its

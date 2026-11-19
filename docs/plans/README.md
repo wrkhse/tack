@@ -1,6 +1,6 @@
 # tack v1 plans
 
-Implemented features and the shipped parts of T3:
+Slices:
 
 - [T1: hooks for OpenCode and Pi](slices/t1.md): **Implemented.** Deny or
   rewrite tool calls, append to prompts, observe tool results, and combine
