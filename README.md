@@ -12,6 +12,67 @@ flowchart LR
     Plugin -->|"serveMcp"| MCP["MCP client<br/>stdio"]
 ```
 
+## Design
+
+A tack plugin is a core of hooks, tools, session actions and UI, plus the
+modules it lists. tack decides in-process, so a bridge that forwards events
+and applies a daemon's verdicts is one plugin too. One plugin runs in
+OpenCode, Pi, Claude Code and Codex; what a harness cannot do for a plugin
+is a cell in the fidelity table, never a silent no-op.
+
+```mermaid
+flowchart TD
+    P["plugin<br/>core + modules"] -->|"tack build"| H["harness entries<br/>OpenCode, Pi, Claude, Codex"]
+    P -->|"tack build"| L["tool CLI"]
+    P -->|"tack build"| D["daemon entry"]
+    P -->|"tack build"| M["MCP server"]
+    P -->|"tack build"| E["client + sdk exports"]
+```
+
+A module contributes commands, tools, hooks or an export; a plugin that does
+not list a module neither builds nor bundles it. The needs column lists what
+each module requires; `tack build` fails when a need is missing.
+
+| Module | Adds | Needs |
+| --- | --- | --- |
+| skills | `<tool> skills list/get/path`; refuses tool calls until loaded | core |
+| wasm | Rust crate as WASM with typed bindings, native for `tack-hook` | — |
+| daemon | a process with a method table, state and health | a transport |
+| transports | HTTP + SSE, Unix socket, stdio; framing written in Rust | wasm |
+| client | connects to a daemon; the CLI and MCP tools call through it | daemon |
+| sdk | typed `definePlugin` for a tool's own hooks | daemon |
+
+Skills append a required skill through the same session actions and refuse
+tool calls until it loads; the rule needs no judge. WASM gives Rust functions
+typed bindings in TypeScript with no hand-written port: the crate builds
+native for the `tack-hook` runner, and the module has no sockets, files or
+clock of its own. The daemon loads sources and plugins from folders,
+built-ins first, taking each file's kind from its default export; each runs
+in a worker with a memory limit, and a watcher reloads a changed file while
+polls in flight finish on the version they started with. Transports keep
+framing, auth, request ids, acks and reconnects in Rust, with HTTP and socket
+only carrying that framing and stdio driving MCP and the `tack-hook` runner.
+The client's methods and types come from the daemon's method table; `connect()`
+reads the address and token from the environment and state folder, checks
+health and protocol once, and exposes live event subscriptions. The SDK
+publishes `definePlugin` at `<tool>/sdk`, and the daemon runs a tool's hook
+points in priority order with a time budget and a declared `onError`, using
+the same engine as harness hooks.
+
+```mermaid
+flowchart LR
+    Folders["load folders"] -->|"file changed"| Watch["watcher<br/>+ 1 s check"]
+    Watch -->|"load in worker"| Workers["one worker per source / plugin"]
+    Workers -->|"methods + hooks"| Daemon["daemon"]
+    Client["client / CLI / MCP tool"] -->|connect| Transport["transport"]
+    Transport -->|"call"| Daemon
+```
+
+One tool publishes one package, with `<tool>/client` and `<tool>/sdk` as
+subpath exports; each subpath loads only its own modules, and heavy parts
+stay optional dependencies. The issues behind these parts are linked under
+More.
+
 ## Install
 
 tack is not published to npm. Build it from a source checkout pinned to a
@@ -219,6 +280,14 @@ The plan is [tack#1](https://github.com/wrkhse/tack/issues/1).
 
 ## More
 
+- Design: [plan](https://github.com/wrkhse/tack/issues/1) ·
+  [modules](https://github.com/wrkhse/tack/issues/19) ·
+  [skills](https://github.com/wrkhse/tack/issues/8) ·
+  [WASM](https://github.com/wrkhse/tack/issues/24) ·
+  [daemon](https://github.com/wrkhse/tack/issues/20) ·
+  [transports](https://github.com/wrkhse/tack/issues/22) ·
+  [client](https://github.com/wrkhse/tack/issues/17) ·
+  [SDK](https://github.com/wrkhse/tack/issues/23)
 - [Plans](docs/plans/README.md)
 - [Adapters](src/agents/README.md) · [Hooks](src/hooks/README.md) ·
   [Host](src/host/README.md) · [Session](src/session/README.md)
