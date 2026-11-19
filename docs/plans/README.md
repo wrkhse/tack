@@ -1,18 +1,15 @@
 # tack v1 plans
 
-The plan is [wrkhse/tack#1](https://github.com/wrkhse/tack/issues/1), approved by
-the owner on 2026-11-17. Each slice is a vertical feature proven in the real
-agent CLIs, in a throwaway HOME, in CI. A slice has its own page once it starts.
-A planned slice's page shows how its parts are used; a started slice adds
-the structure read from the code.
+Implemented features and the shipped parts of T3:
 
-| Slice                                         | You can                                                                                                                     | Status      |
-| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| [T1](slices/t1.md) core, OpenCode, Pi         | Write `toolBefore` (deny, rewrite), `promptSent` (append) and `toolAfter`, run them in OpenCode and Pi; two plugins combine | Implemented |
-| [T2](slices/t2.md) session actions and events | `ctx.session` actions, `responseFinished`, `sessionIdle`, `permissionAsked`, acting outside a hook                          | Implemented |
-| [T3](slices/t3.md) tools                      | Register a tool once: native in OpenCode, Pi and Claude Code mods, a generated MCP server for Codex                         | Building    |
-| [T4](slices/t4.md) Claude Code mod            | Run the same plugins as a Claude Code mod                                                                                   | Planned     |
-| T5 `tack-hook` runner and action queue        | Run the plugins in Codex through one shared runner per event                                                                | Planned     |
-| T6 Claude Code hook entries                   | The same plugins with mods off                                                                                              | Planned     |
-| T7 UI basics                                  | Status line, toast, ask and dialog, slash commands                                                                          | Planned     |
-| T8 UI surfaces                                | Panels, sidebars and bands in each harness that has them                                                                    | Planned     |
+- [T1: hooks for OpenCode and Pi](slices/t1.md): **Implemented.** Deny or
+  rewrite tool calls, append to prompts, observe tool results, and combine
+  plugins by priority.
+- [T2: session actions and events](slices/t2.md): **Implemented.** Act on a
+  session outside a hook and observe session, response and permission events.
+- [T3: tools](slices/t3.md): **Building.** Register tools in OpenCode and Pi
+  and serve them through a generated stdio MCP entry.
+
+[Roadmap: tack#1](https://github.com/wrkhse/tack/issues/1).
+
+[Claude Code mod RFC: tack#28](https://github.com/wrkhse/tack/issues/28).
