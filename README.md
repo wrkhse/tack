@@ -33,14 +33,14 @@ A module contributes commands, tools, hooks or an export; a plugin that does
 not list a module neither builds nor bundles it. The needs column lists what
 each module requires; `tack build` fails when a need is missing.
 
-| Module | Adds | Needs |
-| --- | --- | --- |
-| skills | `<tool> skills list/get/path`; refuses tool calls until loaded | core |
-| wasm | Rust crate as WASM with typed bindings, native for `tack-hook` | — |
-| daemon | a process with a method table, state and health | a transport |
-| transports | HTTP + SSE, Unix socket, stdio; framing written in Rust | wasm |
-| client | connects to a daemon; the CLI and MCP tools call through it | daemon |
-| sdk | typed `definePlugin` for a tool's own hooks | daemon |
+| Module     | Adds                                                           | Needs       |
+| ---------- | -------------------------------------------------------------- | ----------- |
+| skills     | `<tool> skills list/get/path`; refuses tool calls until loaded | core        |
+| wasm       | Rust crate as WASM with typed bindings, native for `tack-hook` | —           |
+| daemon     | a process with a method table, state and health                | a transport |
+| transports | HTTP + SSE, Unix socket, stdio; framing written in Rust        | wasm        |
+| client     | connects to a daemon; the CLI and MCP tools call through it    | daemon      |
+| sdk        | typed `definePlugin` for a tool's own hooks                    | daemon      |
 
 Skills append a required skill through the same session actions and refuse
 tool calls until it loads; the rule needs no judge. WASM gives Rust functions
