@@ -83,7 +83,28 @@ function startDaemon() {
         resolve(ok);
       };
 
-      timer = setTimeout(() => finish(fs.existsSync(SOCKET)), START_TIMEOUT_MS);
+      // A stale socket file can survive a dead daemon. Record its identity so
+      // readiness means a fresh bind, not just a path that already exists.
+      let stale;
+      try {
+        const info = fs.statSync(SOCKET);
+        stale = info.ino + ":" + info.mtimeMs;
+      } catch {
+        stale = undefined;
+      }
+
+      const ready = () => {
+        if (!fs.existsSync(SOCKET)) return false;
+        if (stale === undefined) return true;
+        try {
+          const info = fs.statSync(SOCKET);
+          return info.ino + ":" + info.mtimeMs !== stale;
+        } catch {
+          return false;
+        }
+      };
+
+      timer = setTimeout(() => finish(ready()), START_TIMEOUT_MS);
 
       try {
         // The daemon unlinks a stale socket only after it holds the lock, so
@@ -94,8 +115,8 @@ function startDaemon() {
           detached: true,
           stdio: ["ignore", log, log],
         });
-        child.on("error", () => finish(fs.existsSync(SOCKET)));
-        child.on("exit", () => finish(fs.existsSync(SOCKET)));
+        child.on("error", () => finish(ready()));
+        child.on("exit", () => finish(ready()));
         child.unref();
         fs.closeSync(log);
       } catch {
@@ -104,7 +125,7 @@ function startDaemon() {
       }
 
       poll = setInterval(() => {
-        if (fs.existsSync(SOCKET)) finish(true);
+        if (ready()) finish(true);
       }, POLL_MS);
     });
   }

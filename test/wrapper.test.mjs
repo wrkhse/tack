@@ -744,8 +744,10 @@ async function secondColdStartKeepsLiveDaemon() {
     applyEnv(secondEnv);
     for (const key of Object.keys(require.cache)) delete require.cache[key];
     const second = require(instrumented);
+    // The second daemon loses the lock, so its socket never replaces the
+    // live one and the start cannot claim a fresh bind.
     const ready = await second.__startDaemon();
-    assert.equal(ready, true, "the live socket must satisfy the poll");
+    assert.equal(ready, false, "an unchanged socket is not a fresh bind");
 
     const lines = readFileSync(marker, "utf8").trim().split("\n");
     assert.equal(lines.length, 2, "the second daemon also tried to start");
