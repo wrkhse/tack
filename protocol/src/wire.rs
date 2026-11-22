@@ -117,6 +117,34 @@ pub struct PluginManifest {
     pub tools: Vec<ToolDef>,
 }
 
+/// Why the wrapper denied a call without a verdict from the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenyReason {
+    SocketMissing,
+    Timeout,
+    SocketClosed,
+    MalformedReply,
+}
+
+impl DenyReason {
+    pub const ALL: [DenyReason; 4] = [
+        DenyReason::SocketMissing,
+        DenyReason::Timeout,
+        DenyReason::SocketClosed,
+        DenyReason::MalformedReply,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DenyReason::SocketMissing => "socket_missing",
+            DenyReason::Timeout => "timeout",
+            DenyReason::SocketClosed => "socket_closed",
+            DenyReason::MalformedReply => "malformed_reply",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
     TooLarge,
@@ -374,5 +402,30 @@ mod tests {
         };
         assert_eq!(tool.id(), 11);
         assert_eq!(tool.version(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn deny_reasons_serialize_to_their_named_strings() {
+        for (reason, expected) in [
+            (DenyReason::SocketMissing, "socket_missing"),
+            (DenyReason::Timeout, "timeout"),
+            (DenyReason::SocketClosed, "socket_closed"),
+            (DenyReason::MalformedReply, "malformed_reply"),
+        ] {
+            assert_eq!(reason.as_str(), expected);
+            assert_eq!(
+                serde_json::to_value(reason).unwrap(),
+                serde_json::json!(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn every_deny_reason_round_trips() {
+        for reason in DenyReason::ALL {
+            let line = serde_json::to_string(&reason).unwrap();
+            let decoded: DenyReason = serde_json::from_str(&line).unwrap();
+            assert_eq!(decoded, reason);
+        }
     }
 }

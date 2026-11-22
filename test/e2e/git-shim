@@ -1,0 +1,12 @@
+#!/bin/sh
+# Records pushes and delegates every other git command to the real git.
+if [ "$1" = "push" ]; then
+  echo "$*" >> "$TACK_RECORDER"
+  echo "recorded"
+  exit 0
+fi
+if [ -z "$TACK_REAL_GIT" ]; then
+  echo "tack-e2e: real git not found" >&2
+  exit 127
+fi
+exec "$TACK_REAL_GIT" "$@"

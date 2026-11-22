@@ -28,4 +28,21 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-# e2e job is added by the end-to-end slice.
+  e2e:
+    needs: [rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # No API key: the fake provider is a local model started by the runner.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.100
+      - run: npm install -g @opencode/cli@2.3.0
+      - run: cargo build --workspace --bins --locked
+      - run: cargo run --locked -p tack-cli -- build fixtures/safe-push --out dist
+      - run: node test/wrapper.test.mjs
+      - run: node test/e2e/run.mjs
+

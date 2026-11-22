@@ -324,6 +324,12 @@ dependencies = [
 [[package]]
 name = "tack-cli"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tack_protocol",
+ "tack_runtime",
+ "tack_wrapper",
+]
 
 [[package]]
 name = "tack_daemon"
@@ -360,6 +366,10 @@ version = "0.1.0"
 [[package]]
 name = "tack_wrapper"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tack_protocol",
+]
 
 [[package]]
 name = "tokio"
