@@ -1,6 +1,6 @@
 # Slice 1: one plugin, OpenCode, unsandboxed daemon
 
-**Status:** In progress ([tack#34](https://github.com/wrkhse/tack/issues/34)).
+**Status:** Implemented (pending release candidate).
 
 You can write one Luau plugin with a `toolBefore` hook and one tool, build it
 for OpenCode, and have the hook deny a tool call in a real OpenCode session.
@@ -444,6 +444,30 @@ The scripted provider is decided: a minimal local OpenAI-compatible SSE
 stand-in ported from `conformance/model/stand-in.ts` at base commit
 `663045b8e9a931a188d011484a425144cd2a1885`, with a git-shim recorder,
 CI-only.
+
+## Delivery
+
+Slice 1 ships in three pull requests:
+
+- [#35](https://github.com/wrkhse/tack/pull/35) removes the pre-production
+  TypeScript and scaffolds the Rust workspace.
+- [#36](https://github.com/wrkhse/tack/pull/36) adds the wire protocol, the
+  mlua sandbox, the owner-only socket transport, and the per-user daemon.
+- [#37](https://github.com/wrkhse/tack/pull/37) adds the `tack build` CLI, the
+  generated fail-closed OpenCode wrapper, wrapper tests, and the end-to-end
+  CI fixture.
+
+Required checks pass on `main` at commit `acb9396`: CI run
+[45060213755](https://github.com/wrkhse/tack/actions/runs/45060213755) passed
+both `rust` and `e2e`.
+
+CI run [45059820332](https://github.com/wrkhse/tack/actions/runs/45059820332)
+on #37 records five end-to-end assertions: `git push` was not executed, the
+daemon denied the push, the daemon ran `guard_status`, the deny reason reached
+the session, and the tool result reached the session.
+
+The reliability follow-up [#38](https://github.com/wrkhse/tack/issues/38) is
+open. No release candidate has been cut.
 
 ## Provenance
 
