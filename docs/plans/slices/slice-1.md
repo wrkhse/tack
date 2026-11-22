@@ -74,6 +74,11 @@ so no API key is needed, in CI or a container with a throwaway `HOME`:
 
 A passing build or a unit test alone is not the proof.
 
+The scripted provider is decided: a minimal local OpenAI-compatible SSE
+stand-in ported from `conformance/model/stand-in.ts` at base commit
+`663045b8e9a931a188d011484a425144cd2a1885`, with a git-shim recorder,
+CI-only.
+
 ## Provenance
 
 Base commit: `663045b8e9a931a188d011484a425144cd2a1885`.
@@ -83,7 +88,4 @@ The e2e part re-adds `conformance/model/stand-in.ts` and
 
 ## Left open
 
-- The scripted provider is decided: a minimal local OpenAI-compatible SSE
-  stand-in ported from `conformance/model/stand-in.ts`, with a git-shim
-  recorder, CI-only.
 - Whether the recorder trace is kept as a CI artifact is open.
