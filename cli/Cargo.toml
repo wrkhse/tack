@@ -8,3 +8,9 @@ license.workspace = true
 [[bin]]
 name = "tack"
 path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+tack_protocol = { path = "../protocol" }
+tack_runtime = { path = "../runtime" }
+tack_wrapper = { path = "../wrapper" }

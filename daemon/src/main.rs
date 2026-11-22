@@ -97,7 +97,7 @@ fn version_error(id: u64, version: u32) -> Reply {
     Reply::Error {
         id,
         version: PROTOCOL_VERSION,
-        error: ReplyError::Malformed,
+        error: ReplyError::ProtocolVersion,
         message: format!("unsupported protocol version {version}"),
     }
 }

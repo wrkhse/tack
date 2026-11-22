@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.100
           components: rustfmt, clippy
@@ -28,4 +28,35 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-# e2e job is added by the end-to-end slice.
+  e2e:
+    needs: [rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # No API key: the fake provider is a local model started by the runner.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+      - name: Install OpenCode
+        run: |
+          bin="$RUNNER_TEMP/opencode-bin"
+          mkdir -p "$bin"
+          cd "$bin"
+          curl -fsSLO https://github.com/anomalyco/opencode/releases/download/v2.3.0/opencode-linux-x64.tar.gz
+          echo 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b  opencode-linux-x64.tar.gz' | sha256sum -c -
+          tar -xzf opencode-linux-x64.tar.gz
+          chmod +x opencode
+          echo "$bin" >> "$GITHUB_PATH"
+          export PATH="$bin:$PATH"
+          opencode --version
+      - run: cargo build --workspace --bins --locked
+      - run: cargo run --locked -p tack-cli -- build fixtures/safe-push --out dist
+      - run: node test/wrapper.test.mjs
+      - run: node test/e2e/run.mjs
+

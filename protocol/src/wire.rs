@@ -24,6 +24,7 @@ pub enum ReplyError {
     Script,
     UnsupportedHook,
     UnknownTool,
+    ProtocolVersion,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -115,6 +116,49 @@ pub struct PluginManifest {
     #[serde(default)]
     pub needs: Vec<String>,
     pub tools: Vec<ToolDef>,
+}
+
+/// Why the wrapper denied a call without a verdict from the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenyReason {
+    SocketMissing,
+    Timeout,
+    SocketClosed,
+    MalformedReply,
+    ProtocolVersion,
+    Limit,
+    Script,
+    UnknownTool,
+    DaemonError,
+}
+
+impl DenyReason {
+    pub const ALL: [DenyReason; 9] = [
+        DenyReason::SocketMissing,
+        DenyReason::Timeout,
+        DenyReason::SocketClosed,
+        DenyReason::MalformedReply,
+        DenyReason::ProtocolVersion,
+        DenyReason::Limit,
+        DenyReason::Script,
+        DenyReason::UnknownTool,
+        DenyReason::DaemonError,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DenyReason::SocketMissing => "socket_missing",
+            DenyReason::Timeout => "timeout",
+            DenyReason::SocketClosed => "socket_closed",
+            DenyReason::MalformedReply => "malformed_reply",
+            DenyReason::ProtocolVersion => "protocol_version",
+            DenyReason::Limit => "limit",
+            DenyReason::Script => "script",
+            DenyReason::UnknownTool => "unknown_tool",
+            DenyReason::DaemonError => "daemon_error",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +329,12 @@ mod tests {
             serde_json::json!("unknown_tool")
         );
         assert_eq!(
+            serde_json::to_value(ReplyError::ProtocolVersion).unwrap(),
+            serde_json::json!("protocol_version")
+        );
+        let version: ReplyError = serde_json::from_str("\"protocol_version\"").unwrap();
+        assert_eq!(version, ReplyError::ProtocolVersion);
+        assert_eq!(
             serde_json::to_value(Reply::Error {
                 id: 9,
                 version: PROTOCOL_VERSION,
@@ -374,5 +424,35 @@ mod tests {
         };
         assert_eq!(tool.id(), 11);
         assert_eq!(tool.version(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn deny_reasons_serialize_to_their_named_strings() {
+        for (reason, expected) in [
+            (DenyReason::SocketMissing, "socket_missing"),
+            (DenyReason::Timeout, "timeout"),
+            (DenyReason::SocketClosed, "socket_closed"),
+            (DenyReason::MalformedReply, "malformed_reply"),
+            (DenyReason::ProtocolVersion, "protocol_version"),
+            (DenyReason::Limit, "limit"),
+            (DenyReason::Script, "script"),
+            (DenyReason::UnknownTool, "unknown_tool"),
+            (DenyReason::DaemonError, "daemon_error"),
+        ] {
+            assert_eq!(reason.as_str(), expected);
+            assert_eq!(
+                serde_json::to_value(reason).unwrap(),
+                serde_json::json!(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn every_deny_reason_round_trips() {
+        for reason in DenyReason::ALL {
+            let line = serde_json::to_string(&reason).unwrap();
+            let decoded: DenyReason = serde_json::from_str(&line).unwrap();
+            assert_eq!(decoded, reason);
+        }
     }
 }
