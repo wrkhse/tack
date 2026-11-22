@@ -19,16 +19,52 @@ use tack_protocol::wire::{Content, Outcome, PluginManifest, ToolCall, ToolDef};
 
 use crate::require;
 
-const DEADLINE_MESSAGE: &str = "tack: script deadline exceeded";
+pub use crate::require::RequireCause;
+
 const MAX_DEPTH: usize = 16;
 const MAX_ENTRIES: usize = 1024;
 
-#[derive(Debug)]
+/// Why a bounded engine operation was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LimitCause {
+    Deadline,
+    Memory,
+}
+
+impl fmt::Display for LimitCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            LimitCause::Deadline => "tack: script deadline exceeded",
+            LimitCause::Memory => "tack: memory limit exceeded",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for LimitCause {}
+
+/// Why a plugin could not be loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadCause {
+    Require(RequireCause),
+    Message(String),
+}
+
+impl fmt::Display for LoadCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoadCause::Require(cause) => cause.fmt(f),
+            LoadCause::Message(message) => f.write_str(message),
+        }
+    }
+}
+
+/// A refused load, script call, limit or malformed plugin result.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
-    Load(String),
+    Load(LoadCause),
     Script(String),
-    Limit(String),
-    UnknownHook(String),
+    Limit(LimitCause),
     UnknownTool(String),
     InvalidResult(String),
 }
@@ -36,12 +72,12 @@ pub enum EngineError {
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EngineError::Load(message)
-            | EngineError::Script(message)
-            | EngineError::Limit(message)
-            | EngineError::UnknownHook(message)
-            | EngineError::UnknownTool(message)
-            | EngineError::InvalidResult(message) => f.write_str(message),
+            EngineError::Load(cause) => cause.fmt(f),
+            EngineError::Script(message) | EngineError::InvalidResult(message) => {
+                f.write_str(message)
+            }
+            EngineError::Limit(cause) => cause.fmt(f),
+            EngineError::UnknownTool(name) => write!(f, "tack: unknown tool: {name}"),
         }
     }
 }
@@ -50,11 +86,14 @@ impl std::error::Error for EngineError {}
 
 impl From<mlua::Error> for EngineError {
     fn from(error: mlua::Error) -> Self {
+        if let Some(cause) = error.downcast_ref::<LimitCause>() {
+            return EngineError::Limit(cause.clone());
+        }
+        if let Some(cause) = error.downcast_ref::<RequireCause>() {
+            return EngineError::Load(LoadCause::Require(cause.clone()));
+        }
         match &error {
-            mlua::Error::MemoryError(_) => EngineError::Limit(error.to_string()),
-            mlua::Error::RuntimeError(message) if message.contains(DEADLINE_MESSAGE) => {
-                EngineError::Limit(error.to_string())
-            }
+            mlua::Error::MemoryError(_) => EngineError::Limit(LimitCause::Memory),
             _ => EngineError::Script(error.to_string()),
         }
     }
@@ -101,6 +140,7 @@ pub struct Sandbox {
     lua: Lua,
     plugin: Table,
     deadline: Arc<Deadline>,
+    call_lock: Mutex<()>,
     default_deadline_ms: u64,
 }
 
@@ -111,7 +151,8 @@ impl Sandbox {
         deadline_ms: u64,
     ) -> Result<Sandbox, EngineError> {
         let lua = Lua::new();
-        let state = require::RequireState::new(folder).map_err(EngineError::Load)?;
+        let state = require::RequireState::new(folder)
+            .map_err(|message| EngineError::Load(LoadCause::Message(message)))?;
         let loader = require::install(&lua, state)?;
         lua.globals().set("require", loader.clone())?;
         lua.sandbox(true)?;
@@ -121,17 +162,23 @@ impl Sandbox {
         let watchdog = Arc::clone(&deadline);
         lua.set_interrupt(move |_| {
             if watchdog.expired() {
-                Err(mlua::Error::runtime(DEADLINE_MESSAGE))
+                Err(mlua::Error::external(LimitCause::Deadline))
             } else {
                 Ok(VmState::Continue)
             }
         });
 
-        let plugin = load_plugin(&loader)?;
+        // A top-level loop must not hang startup either. The deadline is
+        // armed around the entry chunk, then disarmed before the VM is shared.
+        deadline.begin(deadline_ms);
+        let plugin = load_plugin(&loader);
+        deadline.disarm();
+
         Ok(Self {
             lua,
-            plugin,
+            plugin: plugin?,
             deadline,
+            call_lock: Mutex::new(()),
             default_deadline_ms: deadline_ms,
         })
     }
@@ -142,6 +189,7 @@ impl Sandbox {
         call: &ToolCall,
         deadline_ms: u64,
     ) -> Result<Outcome, EngineError> {
+        let _guard = self.call_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.deadline.begin(deadline_ms);
         let outcome = self.run_hook(hook, call);
         self.deadline.disarm();
@@ -154,6 +202,7 @@ impl Sandbox {
         input: &Value,
         deadline_ms: u64,
     ) -> Result<Vec<Content>, EngineError> {
+        let _guard = self.call_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.deadline.begin(deadline_ms);
         let content = self.run_tool(name, input);
         self.deadline.disarm();
@@ -161,6 +210,7 @@ impl Sandbox {
     }
 
     pub fn manifest(&self) -> Result<PluginManifest, EngineError> {
+        let _guard = self.call_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.deadline.begin(self.default_deadline_ms);
         let manifest = self.read_manifest();
         self.deadline.disarm();
@@ -172,7 +222,7 @@ impl Sandbox {
             return Ok(Outcome::Allow);
         };
         let result = function.call::<LuaValue>((self.call_table(call)?, self.ctx()?))?;
-        decode_outcome(result)
+        decode_outcome(result, &call.input)
     }
 
     fn run_tool(&self, name: &str, input: &Value) -> Result<Vec<Content>, EngineError> {
@@ -232,18 +282,22 @@ impl Sandbox {
 }
 
 fn load_plugin(loader: &Function) -> Result<Table, EngineError> {
-    let value: LuaValue = loader
-        .call(("./plugin",))
-        .map_err(|error| EngineError::Load(error.to_string()))?;
+    let value: LuaValue =
+        loader
+            .call(("./plugin",))
+            .map_err(|error| match EngineError::from(error) {
+                EngineError::Script(message) => EngineError::Load(LoadCause::Message(message)),
+                classified => classified,
+            })?;
     match value {
         LuaValue::Table(table) => Ok(table),
-        _ => Err(EngineError::Load(
+        _ => Err(EngineError::Load(LoadCause::Message(
             "tack: plugin.luau must return a table".into(),
-        )),
+        ))),
     }
 }
 
-fn decode_outcome(value: LuaValue) -> Result<Outcome, EngineError> {
+fn decode_outcome(value: LuaValue, input: &Value) -> Result<Outcome, EngineError> {
     let table = match value {
         LuaValue::Nil => return Ok(Outcome::Allow),
         LuaValue::Table(table) => table,
@@ -261,12 +315,24 @@ fn decode_outcome(value: LuaValue) -> Result<Outcome, EngineError> {
             .get::<Option<String>>("command")?
             .ok_or_else(|| EngineError::InvalidResult("tack: rewrite needs a command".into()))?;
         return Ok(Outcome::Rewrite {
-            input: serde_json::json!({ "command": command }),
+            input: merge_command(input, command),
         });
     }
     Err(EngineError::InvalidResult(
         "tack: hook result has no deny or rewrite".into(),
     ))
+}
+
+/// Replace only the command field, leaving the rest of the tool call intact.
+fn merge_command(input: &Value, command: String) -> Value {
+    let mut input = input.clone();
+    match input.as_object_mut() {
+        Some(object) => {
+            object.insert("command".to_owned(), Value::String(command));
+            input
+        }
+        None => serde_json::json!({ "command": command }),
+    }
 }
 
 fn decode_content(value: LuaValue) -> Result<Vec<Content>, EngineError> {
@@ -284,7 +350,7 @@ fn decode_content(value: LuaValue) -> Result<Vec<Content>, EngineError> {
     let mut decoded = Vec::new();
     for pair in content.pairs::<LuaValue, LuaValue>() {
         if decoded.len() >= MAX_ENTRIES {
-            return Err(EngineError::Limit("tack: tool content is too large".into()));
+            return Err(EngineError::Limit(LimitCause::Memory));
         }
         let (_, item) = pair?;
         let item = match item {
@@ -339,7 +405,7 @@ impl Sandbox {
         let mut needs = Vec::new();
         for pair in table.pairs::<LuaValue, LuaValue>() {
             if needs.len() >= MAX_ENTRIES {
-                return Err(EngineError::Limit("tack: too many needs".into()));
+                return Err(EngineError::Limit(LimitCause::Memory));
             }
             let (_, item) = pair?;
             let need = match item {
@@ -363,7 +429,7 @@ impl Sandbox {
         let mut seen = HashSet::new();
         for pair in tools.pairs::<LuaValue, LuaValue>() {
             if definitions.len() >= MAX_ENTRIES {
-                return Err(EngineError::Limit("tack: too many tools".into()));
+                return Err(EngineError::Limit(LimitCause::Memory));
             }
             let (key, value) = pair?;
             let key = lua_key(key)?;
@@ -422,7 +488,7 @@ fn lua_key(value: LuaValue) -> Result<String, EngineError> {
 
 fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, EngineError> {
     if depth > MAX_DEPTH {
-        return Err(EngineError::Limit("tack: JSON nesting too deep".into()));
+        return Err(EngineError::Limit(LimitCause::Memory));
     }
     match value {
         Value::Null => Ok(LuaValue::Nil),
@@ -437,7 +503,7 @@ fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, Engin
         Value::String(value) => Ok(LuaValue::String(lua.create_string(value.as_bytes())?)),
         Value::Array(values) => {
             if values.len() > MAX_ENTRIES {
-                return Err(EngineError::Limit("tack: JSON array too large".into()));
+                return Err(EngineError::Limit(LimitCause::Memory));
             }
             let table = lua.create_table()?;
             for (index, item) in values.iter().enumerate() {
@@ -447,7 +513,7 @@ fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, Engin
         }
         Value::Object(values) => {
             if values.len() > MAX_ENTRIES {
-                return Err(EngineError::Limit("tack: JSON object too large".into()));
+                return Err(EngineError::Limit(LimitCause::Memory));
             }
             let table = lua.create_table()?;
             for (key, item) in values {
@@ -460,7 +526,7 @@ fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, Engin
 
 fn lua_to_json(value: LuaValue, depth: usize) -> Result<Value, EngineError> {
     if depth > MAX_DEPTH {
-        return Err(EngineError::Limit("tack: Lua nesting too deep".into()));
+        return Err(EngineError::Limit(LimitCause::Memory));
     }
     match value {
         LuaValue::Nil => Ok(Value::Null),
@@ -484,7 +550,7 @@ fn lua_table_to_json(table: &Table, depth: usize) -> Result<Value, EngineError> 
 
     for pair in table.pairs::<LuaValue, LuaValue>() {
         if object.len() + array.len() >= MAX_ENTRIES {
-            return Err(EngineError::Limit("tack: Lua table too large".into()));
+            return Err(EngineError::Limit(LimitCause::Memory));
         }
         let (key, value) = pair?;
         match key {
@@ -540,7 +606,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
-    use tack_protocol::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
+    use tack_protocol::DEFAULT_DEADLINE_MS;
+    use tack_protocol::DEFAULT_MEMORY_BYTES;
 
     use super::*;
 
@@ -567,7 +634,11 @@ mod tests {
         }
 
         fn write(&self, name: &str, contents: &str) {
-            std::fs::write(self.root.join(name), contents).expect("write fixture");
+            let path = self.root.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create fixture parent");
+            }
+            std::fs::write(path, contents).expect("write fixture");
         }
 
         fn path(&self) -> &Path {
@@ -703,23 +774,68 @@ return {
     }
 
     #[test]
+    fn a_rewrite_keeps_the_other_input_fields() {
+        let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+        let mut input = call("rewrite-me");
+        input.input = json!({ "command": "git push origin main", "cwd": "/repo", "dry": false });
+        let outcome = sandbox
+            .hook("toolBefore", &input, DEFAULT_DEADLINE_MS)
+            .expect("hook returns");
+        assert_eq!(
+            outcome,
+            Outcome::Rewrite {
+                input: json!({ "command": "git push --dry-run", "cwd": "/repo", "dry": false })
+            }
+        );
+    }
+
+    #[test]
     fn a_runaway_loop_is_limited_by_the_deadline() {
-        assert_eq!(DEFAULT_DEADLINE_MS, 100);
         let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
         let error = sandbox
             .hook("toolBefore", &call("loop"), 20)
             .expect_err("loop is interrupted");
-        assert!(matches!(error, EngineError::Limit(_)), "got {error:?}");
+        assert_eq!(error, EngineError::Limit(LimitCause::Deadline));
     }
 
     #[test]
     fn a_memory_hog_is_limited_by_the_ceiling() {
-        assert_eq!(DEFAULT_MEMORY_BYTES, 16 * 1024 * 1024);
         let (_scratch, sandbox) = fixture(1024 * 1024);
         let error = sandbox
             .hook("toolBefore", &call("hog"), 1000)
             .expect_err("allocation is refused");
-        assert!(matches!(error, EngineError::Limit(_)), "got {error:?}");
+        assert_eq!(error, EngineError::Limit(LimitCause::Memory));
+    }
+
+    #[test]
+    fn a_runaway_call_does_not_disarm_another_calls_deadline() {
+        let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+        std::thread::scope(|scope| {
+            let looping = scope.spawn(|| sandbox.hook("toolBefore", &call("loop"), 20));
+            let normal =
+                scope.spawn(|| sandbox.hook("toolBefore", &call("shell"), DEFAULT_DEADLINE_MS));
+
+            assert_eq!(
+                looping.join().expect("loop thread joins"),
+                Err(EngineError::Limit(LimitCause::Deadline))
+            );
+            assert_eq!(
+                normal.join().expect("normal thread joins"),
+                Ok(Outcome::Deny {
+                    reason: "push blocked".into()
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn a_top_level_loop_is_limited_during_load() {
+        let scratch = Scratch::new();
+        scratch.write("plugin.luau", "while true do end");
+        let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, 20)
+            .err()
+            .expect("top-level loop is interrupted");
+        assert_eq!(error, EngineError::Limit(LimitCause::Deadline));
     }
 
     #[test]
@@ -748,25 +864,19 @@ return {
 
     #[test]
     fn require_refuses_parent_and_absolute_paths() {
-        for (source, expected) in [
-            (
-                r#"local x = require("../escape") return { name = "x" }"#,
-                "parent",
-            ),
-            (
-                r#"local x = require("/etc/passwd") return { name = "x" }"#,
-                "absolute",
-            ),
+        for (spec, expected) in [
+            ("../escape", RequireCause::Parent("../escape".into())),
+            ("/etc/passwd", RequireCause::Absolute("/etc/passwd".into())),
         ] {
             let scratch = Scratch::new();
-            scratch.write("plugin.luau", source);
+            scratch.write(
+                "plugin.luau",
+                &format!(r#"local x = require("{spec}") return {{ name = "x" }}"#),
+            );
             let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
                 .err()
                 .expect("require is refused");
-            assert!(
-                matches!(&error, EngineError::Load(message) if message.contains(expected)),
-                "got {error:?}"
-            );
+            assert_eq!(error, EngineError::Load(LoadCause::Require(expected)));
         }
     }
 
@@ -784,20 +894,108 @@ return {
         let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
             .err()
             .expect("cycle is refused");
-        assert!(
-            matches!(&error, EngineError::Load(message) if message.contains("cycle")),
-            "got {error:?}"
+        assert_eq!(
+            error,
+            EngineError::Load(LoadCause::Require(RequireCause::Cycle("./plugin".into())))
+        );
+    }
+
+    #[test]
+    fn require_refuses_a_missing_module() {
+        let scratch = Scratch::new();
+        scratch.write(
+            "plugin.luau",
+            r#"local x = require("./nope") return { name = "x" }"#,
+        );
+        let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+            .err()
+            .expect("missing module is refused");
+        assert_eq!(
+            error,
+            EngineError::Load(LoadCause::Require(RequireCause::Missing("./nope".into())))
+        );
+    }
+
+    #[test]
+    fn require_refuses_a_symlink_that_escapes_the_folder() {
+        let scratch = Scratch::new();
+        let outside = Scratch::new();
+        outside.write("secret.luau", r#"return { reason = "secret" }"#);
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.luau"),
+            scratch.path().join("linked.luau"),
+        )
+        .expect("create symlink");
+        scratch.write(
+            "plugin.luau",
+            r#"local x = require("./linked") return { name = "x" }"#,
+        );
+        let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+            .err()
+            .expect("escaping symlink is refused");
+        assert_eq!(
+            error,
+            EngineError::Load(LoadCause::Require(RequireCause::Escape("./linked".into())))
         );
     }
 
     #[test]
     fn the_global_require_is_the_scoped_one() {
-        let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
-        let content = sandbox
-            .tool("require_absolute", &json!({}), DEFAULT_DEADLINE_MS)
+        let scratch = Scratch::new();
+        scratch.write(
+            "plugin.luau",
+            r#"
+local child = require("./sub/child")
+return {
+    name = "scoped",
+    tools = {
+        resolved = {
+            name = "resolved",
+            run = function(input, ctx)
+                return { content = { { kind = "text", text = child.reason } } }
+            end,
+        },
+        refused = {
+            name = "refused",
+            run = function(input, ctx)
+                local ok = pcall(function() return require("/etc/passwd") end)
+                return { content = { { kind = "text", text = tostring(ok) } } }
+            end,
+        },
+    },
+}
+"#,
+        );
+        scratch.write("helper.luau", r#"return { reason = "root helper" }"#);
+        scratch.write("sub/helper.luau", r#"return { reason = "sub helper" }"#);
+        scratch.write(
+            "sub/child.luau",
+            r#"local helper = require("./helper") return { reason = helper.reason }"#,
+        );
+
+        let sandbox = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+            .expect("fixture loads");
+
+        // The scoped loader resolves specs against the plugin root, so the
+        // child's "./helper" is the root module. Stock Luau require resolves
+        // it against the child's own folder and rejects chunks without an
+        // "@" chunk name, so either outcome proves the scoped loader is live.
+        let resolved = sandbox
+            .tool("resolved", &json!({}), DEFAULT_DEADLINE_MS)
             .expect("tool returns");
         assert_eq!(
-            content,
+            resolved,
+            vec![Content {
+                kind: "text".into(),
+                text: "root helper".into()
+            }]
+        );
+
+        let refused = sandbox
+            .tool("refused", &json!({}), DEFAULT_DEADLINE_MS)
+            .expect("tool returns");
+        assert_eq!(
+            refused,
             vec![Content {
                 kind: "text".into(),
                 text: "false".into()
@@ -839,9 +1037,9 @@ return {
         let sandbox =
             Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS).expect("loads");
         let error = sandbox.manifest().expect_err("duplicate is refused");
-        assert!(
-            matches!(&error, EngineError::InvalidResult(message) if message.contains("duplicate")),
-            "got {error:?}"
+        assert_eq!(
+            error,
+            EngineError::InvalidResult("tack: duplicate tool name: repeated".into())
         );
     }
 }

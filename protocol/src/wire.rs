@@ -11,22 +11,53 @@ use serde_json::Value;
 
 pub use crate::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES, MAX_FRAME_BYTES, MAX_PENDING};
 
+/// Every request and reply carries this version; peers refuse other versions.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The machine-readable class carried by an error reply.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyError {
+    Malformed,
+    TooLarge,
+    Limit,
+    Script,
+    UnsupportedHook,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Hook {
         id: u64,
+        version: u32,
         hook: String,
         call: ToolCall,
     },
     Tool {
         id: u64,
+        version: u32,
         name: String,
         input: Value,
     },
 }
 
+impl Request {
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Hook { id, .. } | Self::Tool { id, .. } => *id,
+        }
+    }
+
+    pub fn version(&self) -> u32 {
+        match self {
+            Self::Hook { version, .. } | Self::Tool { version, .. } => *version,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCall {
     pub tool: String,
     pub name: String,
@@ -52,9 +83,22 @@ pub struct Content {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reply {
-    Hook { id: u64, outcome: Outcome },
-    Tool { id: u64, content: Vec<Content> },
-    Error { id: u64, message: String },
+    Hook {
+        id: u64,
+        version: u32,
+        outcome: Outcome,
+    },
+    Tool {
+        id: u64,
+        version: u32,
+        content: Vec<Content>,
+    },
+    Error {
+        id: u64,
+        version: u32,
+        error: ReplyError,
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -145,6 +189,7 @@ mod tests {
     fn hook_request() -> Request {
         Request::Hook {
             id: 7,
+            version: PROTOCOL_VERSION,
             hook: "toolBefore".into(),
             call: ToolCall {
                 tool: "shell".into(),
@@ -165,6 +210,7 @@ mod tests {
 
         let reply = Reply::Hook {
             id: 7,
+            version: PROTOCOL_VERSION,
             outcome: Outcome::Deny {
                 reason: "push blocked".into(),
             },
@@ -174,6 +220,7 @@ mod tests {
 
         let tool = Reply::Tool {
             id: 8,
+            version: PROTOCOL_VERSION,
             content: vec![Content {
                 kind: "text".into(),
                 text: "guard_status: daemon ok".into(),
@@ -181,6 +228,15 @@ mod tests {
         };
         let decoded: Reply = serde_json::from_slice(&encode_line(&tool).unwrap()).unwrap();
         assert_eq!(decoded, tool);
+
+        let error = Reply::Error {
+            id: 9,
+            version: PROTOCOL_VERSION,
+            error: ReplyError::TooLarge,
+            message: "too_large".into(),
+        };
+        let decoded: Reply = serde_json::from_slice(&encode_line(&error).unwrap()).unwrap();
+        assert_eq!(decoded, error);
     }
 
     #[test]
@@ -190,6 +246,7 @@ mod tests {
             serde_json::json!({
                 "kind": "hook",
                 "id": 7,
+                "version": PROTOCOL_VERSION,
                 "hook": "toolBefore",
                 "call": {
                     "tool": "shell",
@@ -217,6 +274,27 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(call.session_id, None);
+
+        assert_eq!(
+            serde_json::to_value(ReplyError::UnsupportedHook).unwrap(),
+            serde_json::json!("unsupported_hook")
+        );
+        assert_eq!(
+            serde_json::to_value(Reply::Error {
+                id: 9,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::Malformed,
+                message: "malformed".into(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "error",
+                "id": 9,
+                "version": PROTOCOL_VERSION,
+                "error": "malformed",
+                "message": "malformed"
+            })
+        );
     }
 
     #[test]
@@ -253,5 +331,43 @@ mod tests {
         assert!(serde_json::from_slice::<Request>(br#"{"kind":"hook"}"#).is_err());
         assert!(serde_json::from_slice::<Reply>(b"not json\n").is_err());
         assert!(serde_json::from_slice::<Outcome>(br#"{"kind":"deny"}"#).is_err());
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        let request = serde_json::to_value(hook_request()).unwrap();
+        let mut with_extra = request.as_object().unwrap().clone();
+        with_extra.insert("extra".into(), serde_json::json!(1));
+
+        assert!(serde_json::from_value::<Request>(serde_json::json!(with_extra)).is_err());
+
+        let mut call = serde_json::to_value(ToolCall {
+            tool: "shell".into(),
+            name: "shell".into(),
+            input: serde_json::json!({}),
+            session_id: None,
+        })
+        .unwrap();
+        call.as_object_mut()
+            .unwrap()
+            .insert("extra".into(), serde_json::json!(1));
+
+        assert!(serde_json::from_value::<ToolCall>(call).is_err());
+    }
+
+    #[test]
+    fn accessors_read_id_and_version() {
+        let request = hook_request();
+        assert_eq!(request.id(), 7);
+        assert_eq!(request.version(), PROTOCOL_VERSION);
+
+        let tool = Request::Tool {
+            id: 11,
+            version: PROTOCOL_VERSION,
+            name: "shell".into(),
+            input: serde_json::json!({}),
+        };
+        assert_eq!(tool.id(), 11);
+        assert_eq!(tool.version(), PROTOCOL_VERSION);
     }
 }

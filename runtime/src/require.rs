@@ -5,10 +5,48 @@
 //! refuses escapes and cycles, and evaluates each module into the same VM.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use mlua::chunk::ChunkMode;
 use mlua::{Function, Lua, Result as LuaResult, Value as LuaValue};
+
+/// The largest module source the loader will read, in bytes.
+const MAX_MODULE_BYTES: u64 = 1024 * 1024;
+
+/// A refused module load, carrying the specifier that caused it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequireCause {
+    Absolute(String),
+    Parent(String),
+    Escape(String),
+    Cycle(String),
+    Missing(String),
+    TooLarge(String),
+    Unreadable { spec: String, detail: String },
+}
+
+impl fmt::Display for RequireCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RequireCause::Absolute(spec) => {
+                write!(f, "tack: require rejects absolute path: {spec}")
+            }
+            RequireCause::Parent(spec) => write!(f, "tack: require rejects parent path: {spec}"),
+            RequireCause::Escape(spec) => write!(f, "tack: require escapes plugin folder: {spec}"),
+            RequireCause::Cycle(spec) => write!(f, "tack: require cycle detected: {spec}"),
+            RequireCause::Missing(spec) => write!(f, "tack: require module not found: {spec}"),
+            RequireCause::TooLarge(spec) => write!(f, "tack: require module too large: {spec}"),
+            RequireCause::Unreadable { spec, detail } => {
+                write!(f, "tack: require cannot read {spec}: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequireCause {}
 
 pub(crate) struct RequireState {
     root: PathBuf,
@@ -36,16 +74,16 @@ impl RequireState {
         })
     }
 
-    fn resolve(&mut self, spec: &str) -> Result<Resolved, String> {
+    fn resolve(&mut self, spec: &str) -> Result<Resolved, RequireCause> {
         let relative = Path::new(spec);
         if relative.is_absolute() {
-            return Err(format!("tack: require rejects absolute path: {spec}"));
+            return Err(RequireCause::Absolute(spec.to_owned()));
         }
         if relative
             .components()
             .any(|part| matches!(part, Component::ParentDir))
         {
-            return Err(format!("tack: require rejects parent path: {spec}"));
+            return Err(RequireCause::Parent(spec.to_owned()));
         }
 
         let candidate = self.root.join(relative);
@@ -54,12 +92,11 @@ impl RequireState {
             return Ok(Resolved::Cached(value.clone()));
         }
         if self.loading.contains(&canonical) {
-            return Err(format!("tack: require cycle detected: {spec}"));
+            return Err(RequireCause::Cycle(spec.to_owned()));
         }
 
         let name = canonical.to_string_lossy().into_owned();
-        let source = std::fs::read_to_string(&canonical)
-            .map_err(|error| format!("tack: require cannot read {spec}: {error}"))?;
+        let source = read_source(&canonical, spec)?;
         self.loading.push(canonical.clone());
         Ok(Resolved::Load {
             canonical,
@@ -69,7 +106,7 @@ impl RequireState {
     }
 
     /// Resolve a specifier through a small, fixed list of Luau module paths.
-    fn locate(&self, candidate: &Path, spec: &str) -> Result<PathBuf, String> {
+    fn locate(&self, candidate: &Path, spec: &str) -> Result<PathBuf, RequireCause> {
         let mut paths = Vec::with_capacity(4);
         if matches!(
             candidate.extension().and_then(|ext| ext.to_str()),
@@ -85,14 +122,17 @@ impl RequireState {
             if !path.is_file() {
                 continue;
             }
-            let canonical = std::fs::canonicalize(&path)
-                .map_err(|error| format!("tack: require cannot read {spec}: {error}"))?;
+            let canonical =
+                std::fs::canonicalize(&path).map_err(|error| RequireCause::Unreadable {
+                    spec: spec.to_owned(),
+                    detail: error.to_string(),
+                })?;
             if !canonical.starts_with(&self.root) {
-                return Err(format!("tack: require escapes plugin folder: {spec}"));
+                return Err(RequireCause::Escape(spec.to_owned()));
             }
             return Ok(canonical);
         }
-        Err(format!("tack: require module not found: {spec}"))
+        Err(RequireCause::Missing(spec.to_owned()))
     }
 
     fn finish(&mut self, canonical: PathBuf, outcome: LuaResult<LuaValue>) -> LuaResult<LuaValue> {
@@ -101,6 +141,28 @@ impl RequireState {
         self.cache.insert(canonical, value.clone());
         Ok(value)
     }
+}
+
+/// Read a module source under a hard size cap, with one read and no growth.
+fn read_source(path: &Path, spec: &str) -> Result<String, RequireCause> {
+    let file = std::fs::File::open(path).map_err(|error| RequireCause::Unreadable {
+        spec: spec.to_owned(),
+        detail: error.to_string(),
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MODULE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| RequireCause::Unreadable {
+            spec: spec.to_owned(),
+            detail: error.to_string(),
+        })?;
+    if bytes.len() as u64 > MAX_MODULE_BYTES {
+        return Err(RequireCause::TooLarge(spec.to_owned()));
+    }
+    String::from_utf8(bytes).map_err(|error| RequireCause::Unreadable {
+        spec: spec.to_owned(),
+        detail: error.to_string(),
+    })
 }
 
 /// Install the scoped loader as the global require, returning the function so
@@ -115,7 +177,7 @@ pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
 
         let resolved = {
             let mut state = state.lock().expect("require state poisoned");
-            state.resolve(&spec).map_err(mlua::Error::runtime)?
+            state.resolve(&spec).map_err(mlua::Error::external)?
         };
         match resolved {
             Resolved::Cached(value) => Ok(value),
@@ -126,7 +188,11 @@ pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
             } => {
                 // The mutex guard is dropped before entering Lua: a module
                 // may call require again for its own siblings.
-                let outcome = lua.load(source).set_name(name).eval::<LuaValue>();
+                let outcome = lua
+                    .load(source)
+                    .set_mode(ChunkMode::Text)
+                    .set_name(name)
+                    .eval::<LuaValue>();
                 state
                     .lock()
                     .expect("require state poisoned")

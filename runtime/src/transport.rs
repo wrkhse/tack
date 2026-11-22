@@ -1,30 +1,36 @@
 //! Owner-only Unix-socket transport framed as newline-delimited JSON.
 //!
-//! An `O_EXCL` lock file in the state folder keeps two daemons from serving
-//! the same socket. The lock and socket are removed when the server drops.
+//! A kernel `flock` in the state folder keeps two daemons from serving the
+//! same socket. The kernel releases the lock when a daemon dies, so a living
+//! daemon's lock or socket can never be removed by a second start.
 
 use std::fmt;
-use std::fs::{self, OpenOptions, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
 use std::io::{self, ErrorKind, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tack_protocol::wire::{self, MAX_FRAME_BYTES, MAX_PENDING, Reply, Request};
+use tack_protocol::wire::{self, MAX_PENDING, PROTOCOL_VERSION, Reply, ReplyError, Request};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
 
-const LOCK_STALE_AFTER: Duration = Duration::from_secs(10);
+const LOCK_FILE: &str = "tack.lock";
 const MAX_REQUESTS_PER_CONNECTION: usize = 1000;
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Failures from binding or serving the owner-only Unix socket.
 #[derive(Debug)]
 pub enum TransportError {
     /// Another daemon holds the start lock.
     LockBusy,
-    /// The start lock could not be created, read or removed.
+    /// The start lock could not be created or locked.
     LockIo,
+    /// The state folder belongs to another user.
+    StateNotOwned,
     /// The socket could not be prepared or bound.
     Bind(String),
     /// A socket read or write failed.
@@ -38,6 +44,7 @@ impl fmt::Display for TransportError {
         match self {
             Self::LockBusy => write!(f, "lock_busy"),
             Self::LockIo => write!(f, "lock_io"),
+            Self::StateNotOwned => write!(f, "state_not_owned"),
             Self::Bind(context) => write!(f, "bind({context})"),
             Self::Io => write!(f, "io"),
             Self::Malformed => write!(f, "malformed"),
@@ -47,83 +54,81 @@ impl fmt::Display for TransportError {
 
 impl std::error::Error for TransportError {}
 
-/// The held `O_EXCL` lock; keeping the file open keeps the lock visible.
+/// The held kernel lock. Keeping the descriptor open keeps the flock held.
+#[derive(Debug)]
 struct Lock {
-    path: PathBuf,
-    _file: fs::File,
-}
-
-/// A bound Unix listener together with the start lock that guards it.
-///
-/// Both the socket and the lock are removed when this value is dropped.
-pub struct Server {
-    listener: UnixListener,
-    socket: PathBuf,
-    lock: Lock,
-}
-
-fn lock_age(lock_path: &Path) -> Result<Duration, TransportError> {
-    let modified = fs::metadata(lock_path)
-        .and_then(|meta| meta.modified())
-        .map_err(|_| TransportError::LockIo)?;
-
-    Ok(SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or_default())
-}
-
-fn retry_stale_lock(lock_path: &Path) -> Result<fs::File, TransportError> {
-    let age = lock_age(lock_path)?;
-
-    if age < LOCK_STALE_AFTER {
-        return Err(TransportError::LockBusy);
-    }
-
-    fs::remove_file(lock_path).map_err(|_| TransportError::LockIo)?;
-
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(lock_path)
-        .map_err(|err| {
-            if err.kind() == ErrorKind::AlreadyExists {
-                TransportError::LockBusy
-            } else {
-                TransportError::LockIo
-            }
-        })
+    _file: File,
 }
 
 fn acquire_lock(lock_path: &Path) -> Result<Lock, TransportError> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|_| TransportError::LockIo)?;
+
+    // The flock is held by the descriptor until it closes, which the kernel
+    // does when the daemon exits. No guard and no stale-lock cleanup is needed.
+    file.try_lock().map_err(|err| match err {
+        TryLockError::WouldBlock => TransportError::LockBusy,
+        TryLockError::Error(_) => TransportError::LockIo,
+    })?;
+
+    Ok(Lock { _file: file })
+}
+
+/// Create a missing state folder, or verify that an existing one is ours.
+fn ensure_state_dir(state_dir: &Path) -> Result<(), TransportError> {
+    match fs::metadata(state_dir) {
+        Ok(meta) if meta.is_dir() => verify_owner(state_dir, &meta),
+        Ok(_) => Err(TransportError::Bind(format!(
+            "{} is not a directory",
+            state_dir.display()
+        ))),
+        Err(err) if err.kind() == ErrorKind::NotFound => fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(state_dir)
+            .map_err(|err| TransportError::Bind(format!("create {}: {err}", state_dir.display()))),
+        Err(err) => Err(TransportError::Bind(format!(
+            "stat {}: {err}",
+            state_dir.display()
+        ))),
+    }
+}
+
+/// A file created in a directory belongs to the creating user unless the
+/// directory is setgid, which tack never sets. Comparing its uid with the
+/// folder's uid detects a folder owned by somebody else without a dependency.
+fn verify_owner(state_dir: &Path, meta: &fs::Metadata) -> Result<(), TransportError> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let probe = state_dir.join(format!(".tack-owner-{}-{nanos}", std::process::id()));
+
     let created = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(lock_path);
+        .open(&probe)
+        .map_err(|err| TransportError::Bind(format!("probe {}: {err}", probe.display())))?;
+    drop(created);
 
-    let mut file = match created {
-        Ok(file) => file,
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => retry_stale_lock(lock_path)?,
-        Err(_) => return Err(TransportError::LockIo),
-    };
+    let probe_uid = fs::metadata(&probe)
+        .map(|probe_meta| probe_meta.uid())
+        .map_err(|err| TransportError::Bind(format!("stat {}: {err}", probe.display())))?;
+    let _ = fs::remove_file(&probe);
 
-    write!(file, "{}", std::process::id()).map_err(|_| TransportError::LockIo)?;
+    if probe_uid != meta.uid() {
+        return Err(TransportError::StateNotOwned);
+    }
 
-    Ok(Lock {
-        path: lock_path.to_path_buf(),
-        _file: file,
-    })
+    Ok(())
 }
 
 fn prepare_socket(socket: &Path) -> Result<(), TransportError> {
-    let parent = socket
-        .parent()
-        .ok_or_else(|| TransportError::Bind("socket path has no parent".into()))?;
-
-    fs::create_dir_all(parent)
-        .map_err(|err| TransportError::Bind(format!("create {}: {err}", parent.display())))?;
-    fs::set_permissions(parent, Permissions::from_mode(0o700))
-        .map_err(|err| TransportError::Bind(format!("chmod {}: {err}", parent.display())))?;
-
     match fs::remove_file(socket) {
         Ok(()) => {}
         Err(err) if err.kind() == ErrorKind::NotFound => {}
@@ -138,10 +143,32 @@ fn prepare_socket(socket: &Path) -> Result<(), TransportError> {
     Ok(())
 }
 
-/// Bind the owner-only socket, guarding the bind with an exclusive start lock.
-pub async fn bind(socket: &Path, lock_path: &Path) -> Result<Server, TransportError> {
-    let lock = acquire_lock(lock_path)?;
+/// A bound Unix listener together with the kernel lock that guards it.
+#[derive(Debug)]
+pub struct Server {
+    listener: UnixListener,
+    socket: PathBuf,
+    _lock: Lock,
+}
 
+/// Bind the owner-only socket inside a verified state folder.
+pub async fn bind(state_dir: &Path, socket: &Path) -> Result<Server, TransportError> {
+    ensure_state_dir(state_dir)?;
+
+    let canonical_state = fs::canonicalize(state_dir)
+        .map_err(|err| TransportError::Bind(format!("resolve {}: {err}", state_dir.display())))?;
+    let parent = socket
+        .parent()
+        .ok_or_else(|| TransportError::Bind("socket path has no parent".into()))?;
+    let canonical_parent = fs::canonicalize(parent)
+        .map_err(|err| TransportError::Bind(format!("resolve {}: {err}", parent.display())))?;
+    if canonical_parent != canonical_state {
+        return Err(TransportError::Bind(
+            "socket must live directly in the state dir".into(),
+        ));
+    }
+
+    let lock = acquire_lock(&canonical_state.join(LOCK_FILE))?;
     prepare_socket(socket)?;
 
     let listener = UnixListener::bind(socket)
@@ -153,13 +180,12 @@ pub async fn bind(socket: &Path, lock_path: &Path) -> Result<Server, TransportEr
     Ok(Server {
         listener,
         socket: socket.to_path_buf(),
-        lock,
+        _lock: lock,
     })
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.lock.path);
         let _ = fs::remove_file(&self.socket);
     }
 }
@@ -179,15 +205,36 @@ impl Server {
                 let _ = connections.join_next().await;
             }
 
-            let (stream, _) = self
-                .listener
-                .accept()
-                .await
-                .map_err(|_| TransportError::Io)?;
+            let (stream, _) = match self.listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(err) => {
+                    eprintln!("tack-daemon: accept failed: {err}");
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    continue;
+                }
+            };
 
             let task_handle = Arc::clone(&handle);
             connections.spawn_blocking(move || run_connection(stream, task_handle));
         }
+    }
+}
+
+fn error_reply(error: ReplyError, message: &str) -> Reply {
+    Reply::Error {
+        id: 0,
+        version: PROTOCOL_VERSION,
+        error,
+        message: message.into(),
+    }
+}
+
+fn send_error(writer: &mut StdUnixStream, error: ReplyError, message: &str) {
+    if let Ok(encoded) = wire::encode_line(&error_reply(error, message)) {
+        if writer.write_all(&encoded).is_err() {
+            return;
+        }
+        let _ = writer.flush();
     }
 }
 
@@ -200,7 +247,10 @@ where
         Err(_) => return,
     };
 
-    if stream.set_nonblocking(false).is_err() {
+    if stream.set_nonblocking(false).is_err()
+        || stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
+        || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
+    {
         return;
     }
 
@@ -214,19 +264,17 @@ where
         let line = match wire::read_line(&mut reader) {
             Ok(Some(line)) => line,
             Ok(None) => break,
+            Err(wire::WireError::TooLarge) => {
+                send_error(&mut writer, ReplyError::TooLarge, "too_large");
+
+                break;
+            }
             Err(_) => break,
         };
 
-        if line.len() > MAX_FRAME_BYTES {
-            break;
-        }
-
         let reply = match serde_json::from_slice::<Request>(&line) {
             Ok(request) => handle(request),
-            Err(_) => Reply::Error {
-                id: 0,
-                message: "malformed_reply".into(),
-            },
+            Err(_) => error_reply(ReplyError::Malformed, "malformed"),
         };
 
         let encoded = match wire::encode_line(&reply) {
@@ -245,7 +293,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use tack_protocol::wire::{Outcome, ToolCall};
+    use tack_protocol::wire::{MAX_FRAME_BYTES, Outcome, ReplyError, ToolCall};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 
     use super::*;
@@ -285,10 +333,12 @@ mod tests {
         match request {
             Request::Hook { id, .. } => Reply::Hook {
                 id,
+                version: PROTOCOL_VERSION,
                 outcome: Outcome::Allow,
             },
             Request::Tool { id, .. } => Reply::Tool {
                 id,
+                version: PROTOCOL_VERSION,
                 content: vec![],
             },
         }
@@ -306,10 +356,10 @@ mod tests {
     #[tokio::test]
     async fn concurrent_binds_contend_for_the_lock() {
         let dir = TempDir::new();
-        let socket = dir.path().join("s");
-        let lock = dir.path().join("s.lock");
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
 
-        let (first, second) = tokio::join!(bind(&socket, &lock), bind(&socket, &lock));
+        let (first, second) = tokio::join!(bind(&state, &socket), bind(&state, &socket));
 
         let wins = [first.is_ok(), second.is_ok()];
         assert_eq!(wins.iter().filter(|won| **won).count(), 1);
@@ -322,17 +372,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_into_a_fresh_nested_folder() {
+        let dir = TempDir::new();
+        let state = dir.path().join("a/b/c");
+        let socket = state.join("tack.sock");
+
+        let server = bind(&state, &socket).await.unwrap();
+        assert!(socket.exists());
+
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn state_folder_and_socket_have_owner_only_modes() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let _server = bind(&state, &socket).await.unwrap();
+
+        let socket_mode = fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+        let state_mode = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(socket_mode, 0o600);
+        assert_eq!(state_mode, 0o700);
+    }
+
+    #[tokio::test]
+    async fn existing_state_folder_is_not_chmodded() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        fs::create_dir(&state).unwrap();
+
+        let before = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+        let _server = bind(&state, &socket).await.unwrap();
+        let after = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn socket_outside_the_state_folder_is_refused() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = dir.path().join("elsewhere.sock");
+
+        let err = bind(&state, &socket).await.unwrap_err();
+        assert!(matches!(err, TransportError::Bind(_)));
+    }
+
+    #[tokio::test]
     async fn round_trips_a_hook_request() {
         let dir = TempDir::new();
-        let socket = dir.path().join("s");
-        let lock = dir.path().join("s.lock");
-        let server = bind(&socket, &lock).await.unwrap();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).await.unwrap();
 
         let task = tokio::spawn(server.serve(allow_all));
 
         let mut client = UnixStream::connect(&socket).await.unwrap();
         let line = wire::encode_line(&Request::Hook {
             id: 7,
+            version: PROTOCOL_VERSION,
             hook: "toolBefore".into(),
             call: ToolCall {
                 tool: "shell".into(),
@@ -347,23 +448,24 @@ mod tests {
         client.flush().await.unwrap();
 
         let reply = read_reply(client).await;
-        assert!(matches!(
+        assert_eq!(
             reply,
             Reply::Hook {
                 id: 7,
-                outcome: Outcome::Allow
+                version: PROTOCOL_VERSION,
+                outcome: Outcome::Allow,
             }
-        ));
+        );
 
         task.abort();
     }
 
     #[tokio::test]
-    async fn malformed_frame_gets_a_named_error() {
+    async fn malformed_frame_gets_a_typed_malformed_reply() {
         let dir = TempDir::new();
-        let socket = dir.path().join("s");
-        let lock = dir.path().join("s.lock");
-        let server = bind(&socket, &lock).await.unwrap();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).await.unwrap();
 
         let task = tokio::spawn(server.serve(allow_all));
 
@@ -372,48 +474,102 @@ mod tests {
         client.flush().await.unwrap();
 
         let reply = read_reply(client).await;
-        assert!(matches!(
+        assert_eq!(
             reply,
             Reply::Error {
                 id: 0,
-                ref message
-            } if message.as_str() == "malformed_reply"
-        ));
+                version: PROTOCOL_VERSION,
+                error: ReplyError::Malformed,
+                message: "malformed".into(),
+            }
+        );
 
         task.abort();
     }
 
     #[tokio::test]
-    async fn socket_and_parent_have_owner_only_modes() {
+    async fn oversized_frame_gets_a_typed_too_large_reply() {
         let dir = TempDir::new();
-        let socket = dir.path().join("s");
-        let lock = dir.path().join("s.lock");
-        let _server = bind(&socket, &lock).await.unwrap();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).await.unwrap();
 
-        let socket_mode = fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
-        let parent_mode = fs::metadata(socket.parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let task = tokio::spawn(server.serve(allow_all));
 
-        assert_eq!(socket_mode, 0o600);
-        assert_eq!(parent_mode, 0o700);
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        let mut frame = vec![b'x'; MAX_FRAME_BYTES + 1];
+        frame.push(b'\n');
+        client.write_all(&frame).await.unwrap();
+        client.flush().await.unwrap();
+
+        let reply = read_reply(client).await;
+        assert_eq!(
+            reply,
+            Reply::Error {
+                id: 0,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::TooLarge,
+                message: "too_large".into(),
+            }
+        );
+
+        task.abort();
     }
 
     #[tokio::test]
-    async fn dropping_server_removes_lock_and_socket() {
+    async fn dropping_server_removes_only_its_socket() {
         let dir = TempDir::new();
-        let socket = dir.path().join("s");
-        let lock = dir.path().join("s.lock");
-        let server = bind(&socket, &lock).await.unwrap();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let lock = state.join(LOCK_FILE);
+        let foreign = state.join("keep-me");
+        fs::create_dir_all(&state).unwrap();
+        fs::write(&foreign, b"keep").unwrap();
 
+        let server = bind(&state, &socket).await.unwrap();
         assert!(socket.exists());
         assert!(lock.exists());
 
         drop(server);
 
         assert!(!socket.exists());
-        assert!(!lock.exists());
+        assert!(lock.exists());
+        assert!(foreign.exists());
+    }
+
+    #[tokio::test]
+    async fn lock_is_released_when_the_server_drops() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+
+        let first = bind(&state, &socket).await.unwrap();
+        drop(first);
+
+        let second = bind(&state, &socket).await;
+        assert!(second.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_state_folder_owned_by_another_user_is_refused() {
+        let ours = TempDir::new();
+        let probe = ours.path().join("probe");
+        fs::write(&probe, b"").unwrap();
+        let our_uid = fs::metadata(&probe).unwrap().uid();
+
+        // macOS keeps a root-owned, world-writable /private/tmp. We cannot
+        // chown a folder as an unprivileged user, so this is the only folder
+        // with a foreign uid that tack is still able to write a probe into.
+        let state = Path::new("/private/tmp");
+        let Ok(meta) = fs::metadata(state) else {
+            return;
+        };
+        if meta.uid() == our_uid || meta.permissions().mode() & 0o002 == 0 {
+            return;
+        }
+
+        let socket = state.join(format!("tack-sock-{}", std::process::id()));
+        let err = bind(state, &socket).await.unwrap_err();
+        assert!(matches!(err, TransportError::StateNotOwned));
     }
 }

@@ -1,5 +1,12 @@
 --!strict
 
+-- The scoped module loader injected as the global require, replacing Luau's
+-- stock loader. A specifier resolves only inside the canonical plugin folder:
+-- absolute paths, parent segments, symlinks that escape the folder, missing
+-- modules and cycles are rejected. Each module is evaluated once per path and
+-- cached. Annotate requires under --!strict using this declaration.
+declare require: (path: string) -> any
+
 -- The call a toolBefore hook inspects before the harness runs it.
 export type ToolCall = {
     tool: string,
