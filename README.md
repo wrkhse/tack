@@ -1,6 +1,8 @@
 # tack
 
-tack lets you write one coding-agent plugin and load it in OpenCode and Pi. A
+tack is a universal agent adapter. You write one plugin, a Luau table, and tack
+builds it into OpenCode, Pi, Claude Code and Codex. Its compiler builds the
+modules the plugin lists: barn, skills, transports, client and sdk. A
 plugin guards tool calls, adds text to prompts, watches results, acts on its
 session and registers tools. The same tools also reach any MCP client over
 stdio.
