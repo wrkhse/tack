@@ -111,7 +111,7 @@ pub fn render(config: &WrapperConfig) -> Result<String, WrapperError> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tack_protocol::wire::ToolDef;
+    use tack_protocol::wire::{DenyReason, ToolDef};
 
     use super::*;
 
@@ -142,20 +142,22 @@ mod tests {
     #[test]
     fn render_replaces_every_token() {
         let manifest = manifest();
-        let reasons = [
-            "socket_missing",
-            "timeout",
-            "socket_closed",
-            "malformed_reply",
-        ];
+        let reasons: Vec<&str> = DenyReason::ALL
+            .iter()
+            .map(|&reason| reason.as_str())
+            .collect();
         let output = render(&config(&manifest, &reasons)).expect("render succeeds");
+
+        let expected = serde_json::to_string(&reasons).expect("serialize reasons");
+        let rendered = output
+            .lines()
+            .find(|line| line.starts_with("const DENY_REASONS = "))
+            .expect("DENY_REASONS is rendered");
 
         assert!(output.contains(r#""name":"safe-push""#));
         assert!(output.contains(r#""/opt/tack/tack-daemon""#));
         assert!(output.contains(r#""/plugins/tack""#));
-        assert!(
-            output.contains(r#"["socket_missing","timeout","socket_closed","malformed_reply"]"#)
-        );
+        assert_eq!(rendered, format!("const DENY_REASONS = {expected};"));
         assert!(output.contains(" = 2000;"));
         assert!(output.contains(" = 3000;"));
         assert!(output.contains("const PROTOCOL_VERSION = 1;"));

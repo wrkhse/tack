@@ -34,6 +34,7 @@ const DAEMON_LOG = path.join(STATE, "daemon.log");
 
 // Reply::Error classes map to named reasons, never a single catch-all.
 const ERROR_REASONS = new Map([
+  ["protocol_version", "protocol_version"],
   ["limit", "limit"],
   ["script", "script"],
   ["unknown_tool", "unknown_tool"],
@@ -45,7 +46,6 @@ const ERROR_REASONS = new Map([
 const REASONS = new Set(DENY_REASONS);
 let sequence = 0;
 let starting;
-let daemonChild;
 
 function nextId() {
   sequence = (sequence + 1) % Number.MAX_SAFE_INTEGER;
@@ -78,7 +78,6 @@ function startDaemon() {
         done = true;
         clearTimeout(timer);
         clearInterval(poll);
-        daemonChild = ok ? child : undefined;
         // A failed or dead start must not poison later calls.
         starting = undefined;
         resolve(ok);
@@ -87,9 +86,8 @@ function startDaemon() {
       timer = setTimeout(() => finish(fs.existsSync(SOCKET)), START_TIMEOUT_MS);
 
       try {
-        // A refused connection leaves a stale socket file. Remove it so the
-        // readiness poll can only observe the new daemon's socket.
-        if (fs.existsSync(SOCKET)) fs.unlinkSync(SOCKET);
+        // The daemon unlinks a stale socket only after it holds the lock, so
+        // a second start here must never remove a live daemon's socket.
         fs.mkdirSync(STATE, { recursive: true });
         const log = fs.openSync(DAEMON_LOG, "a");
         child = spawn(daemonBin(), ["--socket", SOCKET, "--plugin", PLUGIN_DIR], {
@@ -97,10 +95,7 @@ function startDaemon() {
           stdio: ["ignore", log, log],
         });
         child.on("error", () => finish(fs.existsSync(SOCKET)));
-        child.on("exit", () => {
-          if (daemonChild === child) daemonChild = undefined;
-          finish(fs.existsSync(SOCKET));
-        });
+        child.on("exit", () => finish(fs.existsSync(SOCKET)));
         child.unref();
         fs.closeSync(log);
       } catch {
@@ -242,12 +237,10 @@ async function before(event) {
   }
   if (outcome.kind === "rewrite") {
     const rewritten = outcome.input;
-    if (!rewritten || typeof rewritten !== "object" ||
-        typeof rewritten.command !== "string") {
-      throw new Error("tack: " + denyName("malformed_reply"));
-    }
-    if (tool === "shell") event.input.command = rewritten.command;
-    else event.input = rewritten;
+    const plain = rewritten !== null && typeof rewritten === "object" &&
+      !Array.isArray(rewritten);
+    if (!plain) throw new Error("tack: " + denyName("malformed_reply"));
+    event.input = rewritten;
     return;
   }
   if (outcome.kind !== "allow") {

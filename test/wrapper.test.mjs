@@ -44,6 +44,7 @@ const CALL = {
 const ALLOW_CALL = { ...CALL, input: { command: "echo hello" } };
 
 const ERROR_REASONS = [
+  ["protocol_version", "protocol_version"],
   ["limit", "limit"],
   ["script", "script"],
   ["unknown_tool", "unknown_tool"],
@@ -158,9 +159,9 @@ function fakeContext() {
 
 function pickBefore(hooks, transforms) {
   const all = [...hooks, ...transforms];
-  const before = all.find(([name]) => /before/i.test(name)) ?? all[0];
+  const before = all.find(([name]) => /before/i.test(name));
 
-  assert.ok(before, "the wrapper registered no before handler");
+  assert.ok(before, "the wrapper registered no execute.before handler");
   assert.equal(
     typeof before[1], "function", "the before callback is not a function",
   );
@@ -168,12 +169,12 @@ function pickBefore(hooks, transforms) {
   return before[1];
 }
 
-async function loadPlugin(env) {
+async function loadPlugin(env, modulePath = wrapperPath) {
   applyEnv(env);
 
   for (const key of Object.keys(require.cache)) delete require.cache[key];
 
-  const plugin = require(wrapperPath);
+  const plugin = require(modulePath);
   assert.equal(
     typeof plugin.setup, "function", "the wrapper does not export setup()",
   );
@@ -187,8 +188,8 @@ async function loadPlugin(env) {
   return { before: pickBefore(fake.hooks, fake.transforms), cleanup, ...fake };
 }
 
-async function loadBefore(env) {
-  return (await loadPlugin(env)).before;
+async function loadBefore(env, modulePath = wrapperPath) {
+  return (await loadPlugin(env, modulePath)).before;
 }
 
 function baseEnv(dir, overrides = {}) {
@@ -315,11 +316,36 @@ const STUB_DAEMON = [
   "'use strict';",
   "const net = require('node:net');",
   "const fs = require('node:fs');",
+  "const path = require('node:path');",
   "const args = process.argv.slice(2);",
   "const socket = args[args.indexOf('--socket') + 1];",
   "const plugin = args[args.indexOf('--plugin') + 1];",
   "const marker = process.env.TACK_STUB_MARKER;",
-  "if (marker) fs.appendFileSync(marker, JSON.stringify({ pid: process.pid, socket, plugin }) + '\\n');",
+  "if (marker) fs.appendFileSync(marker, JSON.stringify({",
+  "  pid: process.pid, socket, plugin }) + '\\n');",
+  "const state = process.env.TACK_STATE_DIR ||",
+  "  (process.env.XDG_STATE_HOME ? path.join(process.env.XDG_STATE_HOME, 'tack') :",
+  "    path.join(process.env.HOME, '.local', 'state', 'tack'));",
+  "const lock = path.join(state, 'tack.lock');",
+  "function acquire() {",
+  "  for (let i = 0; i < 20; i++) {",
+  "    try {",
+  "      const fd = fs.openSync(lock, 'wx');",
+  "      fs.writeFileSync(fd, String(process.pid));",
+  "      fs.closeSync(fd);",
+  "      return true;",
+  "    } catch (err) {",
+  "      if (err.code !== 'EEXIST') return false;",
+  "      let owner = 0;",
+  "      try { owner = Number(fs.readFileSync(lock, 'utf8')); } catch {}",
+  "      if (!owner) { fs.rmSync(lock, { force: true }); continue; }",
+  "      try { process.kill(owner, 0); return false; } catch {}",
+  "      fs.rmSync(lock, { force: true });",
+  "    }",
+  "  }",
+  "  return false;",
+  "}",
+  "if (!acquire()) process.exit(3);",
   "fs.rmSync(socket, { force: true });",
   "const delay = Number(process.env.TACK_STUB_DELAY_MS || 0);",
   "function serve() {",
@@ -337,12 +363,26 @@ const STUB_DAEMON = [
   "        try { request = JSON.parse(line); } catch { continue; }",
   "        const script = process.env.TACK_STUB_SCRIPT || 'allow';",
   "        let reply;",
-  "        if (script === 'version') reply = { kind: 'hook', id: request.id, version: 999, outcome: { kind: 'allow' } };",
-  "        else if (script === 'unknown-outcome') reply = { kind: 'hook', id: request.id, version: request.version, outcome: { kind: 'surprise' } };",
-  "        else if (script === 'rewrite-no-command') reply = { kind: 'hook', id: request.id, version: request.version, outcome: { kind: 'rewrite', input: {} } };",
-  "        else if (script.startsWith('error:')) reply = { kind: 'error', id: request.id, version: request.version, error: script.slice(6), message: 'from daemon' };",
-  "        else if (request.kind === 'tool') reply = { kind: 'tool', id: request.id, version: request.version, content: [{ kind: 'text', text: 'guard_status: daemon ok' }] };",
-  "        else reply = { kind: 'hook', id: request.id, version: request.version, outcome: { kind: 'allow' } };",
+  "        if (script === 'version') reply = {",
+  "          kind: 'hook', id: request.id, version: 999,",
+  "          outcome: { kind: 'allow' },",
+  "        };",
+  "        else if (script === 'unknown-outcome') reply = {",
+  "          kind: 'hook', id: request.id, version: request.version,",
+  "          outcome: { kind: 'surprise' },",
+  "        };",
+  "        else if (script.startsWith('error:')) reply = {",
+  "          kind: 'error', id: request.id, version: request.version,",
+  "          error: script.slice(6), message: 'from daemon',",
+  "        };",
+  "        else if (request.kind === 'tool') reply = {",
+  "          kind: 'tool', id: request.id, version: request.version,",
+  "          content: [{ kind: 'text', text: 'guard_status: daemon ok' }],",
+  "        };",
+  "        else reply = {",
+  "          kind: 'hook', id: request.id, version: request.version,",
+  "          outcome: { kind: 'allow' },",
+  "        };",
   "        conn.write(JSON.stringify(reply) + '\\n');",
   "      }",
   "    });",
@@ -444,6 +484,20 @@ async function versionMismatch() {
   await denyFromReply(text, "protocol_version");
 }
 
+async function typedVersionError() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+
+  try {
+    const env = baseEnv(dir, { TACK_STUB_SCRIPT: "error:protocol_version" });
+    const before = await coldBefore(env, marker, dir);
+    await expectDeny(before, "protocol_version");
+  } finally {
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function oversizeWithNewline() {
   await denyFromReply("x".repeat(1024 * 1024 + 8), "malformed_reply");
 }
@@ -453,9 +507,29 @@ async function unknownOutcome() {
   await denyFromReply(text, "malformed_reply");
 }
 
-async function rewriteWithoutCommand() {
-  const text = reply("hook", { outcome: { kind: "rewrite", input: {} } });
-  await denyFromReply(text, "malformed_reply");
+async function rewriteReplacesInputForAnyTool() {
+  const event = { tool: "shell", input: { command: "git push origin main" } };
+  const rewritten = { command: "git push --dry-run", extra: true };
+  const error = await runOutcome({ kind: "rewrite", input: rewritten }, event);
+  assert.equal(error, undefined, "a rewrite must pass for any tool");
+  assert.deepEqual(event.input, rewritten, "rewrite replaces the whole input");
+}
+
+async function rewriteWorksForNonShellTool() {
+  const event = { tool: "guard_status", input: { old: true } };
+  const error = await runOutcome(
+    { kind: "rewrite", input: { verbose: true } },
+    event,
+  );
+  assert.equal(error, undefined, "a non-shell rewrite must pass");
+  assert.deepEqual(event.input, { verbose: true });
+}
+
+async function rewriteRejectsNonObjects() {
+  for (const input of [null, [], "command", 42]) {
+    const text = reply("hook", { outcome: { kind: "rewrite", input } });
+    await denyFromReply(text, "malformed_reply");
+  }
 }
 
 async function allowPasses() {
@@ -638,14 +712,75 @@ async function staleSocketRestarts() {
   }
 }
 
+// A second module instance needs to start without a socket failure, so the
+// test loads a copy with one extra export. The shipped wrapper is untouched.
+function instrumentedWrapper(dir) {
+  const source = readFileSync(wrapperPath, "utf8");
+  const target = path.join(dir, "instrumented.js");
+  writeFileSync(
+    target,
+    source + "\nmodule.exports.__startDaemon = startDaemon;\n",
+  );
+  return target;
+}
+
+async function secondColdStartKeepsLiveDaemon() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+  const socket = path.join(dir, "tack.sock");
+  const env = baseEnv(dir);
+
+  try {
+    const beforeA = await coldBefore(env, marker, dir);
+    await beforeA(ALLOW_CALL);
+    assert.ok(existsSync(socket), "the first daemon owns the socket");
+
+    const instrumented = instrumentedWrapper(dir);
+    const secondEnv = baseEnv(dir, {
+      TACK_DAEMON_BIN: path.join(dir, "stub-daemon.js"),
+      TACK_STUB_MARKER: marker,
+    });
+    delete secondEnv.TACK_NO_START;
+    applyEnv(secondEnv);
+    for (const key of Object.keys(require.cache)) delete require.cache[key];
+    const second = require(instrumented);
+    const ready = await second.__startDaemon();
+    assert.equal(ready, true, "the live socket must satisfy the poll");
+
+    const lines = readFileSync(marker, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2, "the second daemon also tried to start");
+    assert.ok(existsSync(socket), "the live socket was not unlinked");
+
+    applyEnv(env);
+    await beforeA(ALLOW_CALL);
+    const beforeFresh = await loadBefore(env);
+    await beforeFresh(ALLOW_CALL);
+  } finally {
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 await check("socket_missing fails closed", missingSocket);
 await check("timeout fails closed", timeout);
 await check("socket_closed fails closed", closedSocket);
 await check("malformed_reply fails closed", malformedReply);
 await check("version mismatch denies protocol_version", versionMismatch);
+await check(
+  "typed protocol_version reply denies protocol_version",
+  typedVersionError,
+);
 await check("oversize reply with a newline fails closed", oversizeWithNewline);
 await check("unknown outcome kind fails closed", unknownOutcome);
-await check("rewrite without a command fails closed", rewriteWithoutCommand);
+await check(
+  "rewrite replaces the input for any tool",
+  rewriteReplacesInputForAnyTool,
+);
+await check("rewrite works for a non-shell tool", rewriteWorksForNonShellTool);
+await check(
+  "rewrite with a non-object input fails closed",
+  rewriteRejectsNonObjects,
+);
 await check("allow passes through", allowPasses);
 await check("deny blocks the call", denyBlocks);
 await check("rewrite with a string command mutates and passes", rewriteMutates);
@@ -683,6 +818,10 @@ await check("a later call restarts a daemon that died", restartAfterDaemonDeath)
 await check(
   "ECONNREFUSED on a stale socket restarts the daemon",
   staleSocketRestarts,
+);
+await check(
+  "a second cold start leaves the live daemon reachable",
+  secondColdStartKeepsLiveDaemon,
 );
 
 if (buildDir) rmSync(buildDir, { recursive: true, force: true });

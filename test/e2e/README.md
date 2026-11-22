@@ -18,8 +18,8 @@ Run these only in CI or a disposable container. The scripts create a throwaway
 HOME, use a local fake provider, and need no API key. Never run them against a
 real user HOME.
 
-From the repository root, in a container with Node, Rust 1.100 and
-@opencode/cli@2.3.0 installed:
+From the repository root, in a container with Node, Rust 1.100, and the
+pinned OpenCode 2.3.0 tarball installed with its SHA-256 checksum verified:
 
     cargo build --workspace --bins --locked
     cargo run --locked -p tack-cli -- build fixtures/safe-push --out dist

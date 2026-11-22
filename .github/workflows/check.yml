@@ -49,7 +49,6 @@ jobs:
           mkdir -p "$bin"
           cd "$bin"
           curl -fsSLO https://github.com/anomalyco/opencode/releases/download/v2.3.0/opencode-linux-x64.tar.gz
-          curl -fsSLO https://github.com/anomalyco/opencode/releases/download/v2.3.0/SHA256SUMS
           echo 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b  opencode-linux-x64.tar.gz' | sha256sum -c -
           tar -xzf opencode-linux-x64.tar.gz
           chmod +x opencode

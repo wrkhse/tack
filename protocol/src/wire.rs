@@ -24,6 +24,7 @@ pub enum ReplyError {
     Script,
     UnsupportedHook,
     UnknownTool,
+    ProtocolVersion,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -327,6 +328,12 @@ mod tests {
             serde_json::to_value(ReplyError::UnknownTool).unwrap(),
             serde_json::json!("unknown_tool")
         );
+        assert_eq!(
+            serde_json::to_value(ReplyError::ProtocolVersion).unwrap(),
+            serde_json::json!("protocol_version")
+        );
+        let version: ReplyError = serde_json::from_str("\"protocol_version\"").unwrap();
+        assert_eq!(version, ReplyError::ProtocolVersion);
         assert_eq!(
             serde_json::to_value(Reply::Error {
                 id: 9,
