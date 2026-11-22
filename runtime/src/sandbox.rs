@@ -159,6 +159,7 @@ impl Sandbox {
         let state = require::RequireState::new(folder)
             .map_err(|message| EngineError::Load(LoadCause::Message(message)))?;
         let loader = require::install(&lua, state)?;
+        require::confine_global_require(&lua)?;
         lua.sandbox(true)?;
         lua.set_memory_limit(memory_bytes)?;
 
@@ -624,6 +625,8 @@ mod tests {
     use serde_json::json;
     use tack_protocol::DEFAULT_DEADLINE_MS;
     use tack_protocol::DEFAULT_MEMORY_BYTES;
+
+    use crate::require::REQUIRE_CONFINED;
 
     use super::*;
 
@@ -1132,6 +1135,91 @@ return { later = later }
             vec![Content {
                 kind: "text".into(),
                 text: "guard_status: daemon ok".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn global_require_is_a_refuser_through_getfenv() {
+        let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+        let lua = &sandbox.lua;
+
+        let has_getfenv: bool = lua
+            .load("return type(getfenv) == 'function'")
+            .eval()
+            .expect("query getfenv");
+        assert!(has_getfenv, "Luau sandbox keeps getfenv available");
+
+        let (loaded, message): (bool, String) = lua
+            .load(
+                r#"
+                local globals = getfenv(0)
+                return pcall(globals.require, "/etc/passwd")
+                "#,
+            )
+            .eval()
+            .expect("call the global require");
+
+        assert!(!loaded);
+        assert_eq!(message, REQUIRE_CONFINED);
+    }
+
+    #[test]
+    fn raw_global_require_is_never_a_working_loader() {
+        let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+        let lua = &sandbox.lua;
+
+        let kind: String = lua
+            .load("return type(rawget(_G, 'require'))")
+            .eval()
+            .expect("inspect the raw global require");
+        assert_eq!(kind, "function");
+
+        let (loaded, message): (bool, String) = lua
+            .load("return pcall(rawget(_G, 'require'), '/etc/passwd')")
+            .eval()
+            .expect("call the raw global require");
+        assert!(!loaded);
+        assert_eq!(message, REQUIRE_CONFINED);
+    }
+
+    #[test]
+    fn a_function_with_globals_env_cannot_require_outside_the_folder() {
+        let scratch = Scratch::new();
+        scratch.write(
+            "plugin.luau",
+            r#"
+local escape = function()
+    return require("/etc/passwd")
+end
+return {
+    name = "escape",
+    tools = {
+        probe = {
+            name = "probe",
+            run = function(input, ctx)
+                local globals = getfenv(0)
+                setfenv(escape, globals)
+                local loaded, err = pcall(escape)
+                local text = tostring(loaded) .. "|" .. tostring(err)
+                return { content = { { kind = "text", text = text } } }
+            end,
+        },
+    },
+}
+"#,
+        );
+        let sandbox = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+            .expect("fixture loads");
+
+        let content = sandbox
+            .tool("probe", &json!({}), DEFAULT_DEADLINE_MS)
+            .expect("tool returns");
+        assert_eq!(
+            content,
+            vec![Content {
+                kind: "text".into(),
+                text: format!("false|{REQUIRE_CONFINED}"),
             }]
         );
     }

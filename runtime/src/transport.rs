@@ -6,7 +6,7 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
@@ -61,7 +61,7 @@ struct Lock {
 }
 
 fn acquire_lock(lock_path: &Path) -> Result<Lock, TransportError> {
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
@@ -75,6 +75,17 @@ fn acquire_lock(lock_path: &Path) -> Result<Lock, TransportError> {
         TryLockError::WouldBlock => TransportError::LockBusy,
         TryLockError::Error(_) => TransportError::LockIo,
     })?;
+
+    // Publish the owning pid so an external runner can find and stop this
+    // daemon. Truncate after taking the lock so a stale, longer pid leaves no
+    // tail behind.
+    let pid = std::process::id().to_string();
+    file.set_len(0).map_err(|_| TransportError::LockIo)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| TransportError::LockIo)?;
+    file.write_all(pid.as_bytes())
+        .map_err(|_| TransportError::LockIo)?;
+    file.flush().map_err(|_| TransportError::LockIo)?;
 
     Ok(Lock { _file: file })
 }
@@ -571,6 +582,33 @@ mod tests {
 
         let second = bind(&state, &socket).await;
         assert!(second.is_ok());
+    }
+
+    #[tokio::test]
+    async fn lock_file_holds_the_bind_process_id() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+
+        let _server = bind(&state, &socket).await.unwrap();
+        let lock = state.join(LOCK_FILE);
+        let content = fs::read_to_string(&lock).unwrap();
+
+        assert_eq!(content, std::process::id().to_string());
+    }
+
+    #[tokio::test]
+    async fn a_stale_longer_pid_is_truncated_on_bind() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        fs::create_dir(&state).unwrap();
+        fs::write(state.join(LOCK_FILE), b"999999999999").unwrap();
+
+        let _server = bind(&state, &socket).await.unwrap();
+        let content = fs::read_to_string(state.join(LOCK_FILE)).unwrap();
+
+        assert_eq!(content, std::process::id().to_string());
     }
 
     #[test]

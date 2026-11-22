@@ -6,6 +6,11 @@
 //! evaluates each module into the same VM. Each module's chunk gets an
 //! environment whose require closes over that module's folder, so a deferred
 //! call still resolves against the file that defined it.
+//!
+//! Luau's stock global require (FsRequirer) is replaced with a refuser before
+//! the VM is sandboxed. A module's scoped require shadows it in its own
+//! environment; code that reaches globals through getfenv or setfenv finds the
+//! refuser instead of a loader for arbitrary files.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -18,6 +23,9 @@ use mlua::{Function, Lua, Result as LuaResult, Table, Value as LuaValue};
 
 /// The largest module source the loader will read, in bytes.
 const MAX_MODULE_BYTES: u64 = 1024 * 1024;
+
+/// Error raised by the global require refuser. Scoped requires shadow it.
+pub(crate) const REQUIRE_CONFINED: &str = "tack: require is confined to the plugin folder";
 
 /// A refused module load, carrying the specifier that caused it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +182,15 @@ pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
     let root = state.root.clone();
     let state = Arc::new(Mutex::new(state));
     scoped_require(lua, state, root)
+}
+
+/// Replace Luau's stock global require with a function that always refuses.
+/// Called before `Lua::sandbox(true)` makes the globals table read-only; each
+/// module's scoped require shadows this global in its own environment.
+pub(crate) fn confine_global_require(lua: &Lua) -> LuaResult<()> {
+    let source = format!("return function() error('{REQUIRE_CONFINED}', 0) end");
+    let refuser: Function = lua.load(&source).eval()?;
+    lua.globals().set("require", refuser)
 }
 
 /// Build a require whose relative specs resolve against one fixed folder.
