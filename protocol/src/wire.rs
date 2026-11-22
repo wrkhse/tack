@@ -23,6 +23,7 @@ pub enum ReplyError {
     Limit,
     Script,
     UnsupportedHook,
+    UnknownTool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -278,6 +279,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ReplyError::UnsupportedHook).unwrap(),
             serde_json::json!("unsupported_hook")
+        );
+        assert_eq!(
+            serde_json::to_value(ReplyError::UnknownTool).unwrap(),
+            serde_json::json!("unknown_tool")
         );
         assert_eq!(
             serde_json::to_value(Reply::Error {

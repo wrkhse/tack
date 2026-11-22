@@ -75,7 +75,7 @@ fn socket_in_state_dir(state_dir: &Path, socket: &Path) -> bool {
 fn reply_error(id: u64, error: EngineError) -> Reply {
     let kind = match &error {
         EngineError::Limit(_) => ReplyError::Limit,
-        EngineError::UnknownTool(_) => ReplyError::UnsupportedHook,
+        EngineError::UnknownTool(_) => ReplyError::UnknownTool,
         // Script, load and invalid-result failures are all script failures.
         _ => ReplyError::Script,
     };

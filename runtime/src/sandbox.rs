@@ -29,15 +29,20 @@ const MAX_ENTRIES: usize = 1024;
 pub enum LimitCause {
     Deadline,
     Memory,
+    TooManyEntries { limit: usize },
+    TooDeep { limit: usize },
 }
 
 impl fmt::Display for LimitCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            LimitCause::Deadline => "tack: script deadline exceeded",
-            LimitCause::Memory => "tack: memory limit exceeded",
-        };
-        f.write_str(message)
+        match self {
+            LimitCause::Deadline => f.write_str("tack: script deadline exceeded"),
+            LimitCause::Memory => f.write_str("tack: memory limit exceeded"),
+            LimitCause::TooManyEntries { limit } => {
+                write!(f, "tack: too many table entries: {limit}")
+            }
+            LimitCause::TooDeep { limit } => write!(f, "tack: nesting deeper than {limit}"),
+        }
     }
 }
 
@@ -350,7 +355,9 @@ fn decode_content(value: LuaValue) -> Result<Vec<Content>, EngineError> {
     let mut decoded = Vec::new();
     for pair in content.pairs::<LuaValue, LuaValue>() {
         if decoded.len() >= MAX_ENTRIES {
-            return Err(EngineError::Limit(LimitCause::Memory));
+            return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                limit: MAX_ENTRIES,
+            }));
         }
         let (_, item) = pair?;
         let item = match item {
@@ -405,7 +412,9 @@ impl Sandbox {
         let mut needs = Vec::new();
         for pair in table.pairs::<LuaValue, LuaValue>() {
             if needs.len() >= MAX_ENTRIES {
-                return Err(EngineError::Limit(LimitCause::Memory));
+                return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                    limit: MAX_ENTRIES,
+                }));
             }
             let (_, item) = pair?;
             let need = match item {
@@ -429,7 +438,9 @@ impl Sandbox {
         let mut seen = HashSet::new();
         for pair in tools.pairs::<LuaValue, LuaValue>() {
             if definitions.len() >= MAX_ENTRIES {
-                return Err(EngineError::Limit(LimitCause::Memory));
+                return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                    limit: MAX_ENTRIES,
+                }));
             }
             let (key, value) = pair?;
             let key = lua_key(key)?;
@@ -488,7 +499,7 @@ fn lua_key(value: LuaValue) -> Result<String, EngineError> {
 
 fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, EngineError> {
     if depth > MAX_DEPTH {
-        return Err(EngineError::Limit(LimitCause::Memory));
+        return Err(EngineError::Limit(LimitCause::TooDeep { limit: MAX_DEPTH }));
     }
     match value {
         Value::Null => Ok(LuaValue::Nil),
@@ -503,7 +514,9 @@ fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, Engin
         Value::String(value) => Ok(LuaValue::String(lua.create_string(value.as_bytes())?)),
         Value::Array(values) => {
             if values.len() > MAX_ENTRIES {
-                return Err(EngineError::Limit(LimitCause::Memory));
+                return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                    limit: MAX_ENTRIES,
+                }));
             }
             let table = lua.create_table()?;
             for (index, item) in values.iter().enumerate() {
@@ -513,7 +526,9 @@ fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, Engin
         }
         Value::Object(values) => {
             if values.len() > MAX_ENTRIES {
-                return Err(EngineError::Limit(LimitCause::Memory));
+                return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                    limit: MAX_ENTRIES,
+                }));
             }
             let table = lua.create_table()?;
             for (key, item) in values {
@@ -526,7 +541,7 @@ fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, Engin
 
 fn lua_to_json(value: LuaValue, depth: usize) -> Result<Value, EngineError> {
     if depth > MAX_DEPTH {
-        return Err(EngineError::Limit(LimitCause::Memory));
+        return Err(EngineError::Limit(LimitCause::TooDeep { limit: MAX_DEPTH }));
     }
     match value {
         LuaValue::Nil => Ok(Value::Null),
@@ -550,7 +565,9 @@ fn lua_table_to_json(table: &Table, depth: usize) -> Result<Value, EngineError> 
 
     for pair in table.pairs::<LuaValue, LuaValue>() {
         if object.len() + array.len() >= MAX_ENTRIES {
-            return Err(EngineError::Limit(LimitCause::Memory));
+            return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                limit: MAX_ENTRIES,
+            }));
         }
         let (key, value) = pair?;
         match key {
@@ -808,6 +825,38 @@ return {
     }
 
     #[test]
+    fn a_too_deep_input_is_limited_by_depth() {
+        let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+        let mut input = json!(1);
+        for _ in 0..=MAX_DEPTH + 1 {
+            input = json!([input]);
+        }
+        let error = sandbox
+            .tool("guard_status", &input, DEFAULT_DEADLINE_MS)
+            .expect_err("deep input is refused");
+        assert_eq!(
+            error,
+            EngineError::Limit(LimitCause::TooDeep { limit: MAX_DEPTH })
+        );
+    }
+
+    #[test]
+    fn a_too_wide_input_is_limited_by_entry_count() {
+        let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+        let mut object = serde_json::Map::new();
+        for index in 0..=MAX_ENTRIES {
+            object.insert(format!("k{index}"), json!(index));
+        }
+        let error = sandbox
+            .tool("guard_status", &Value::Object(object), DEFAULT_DEADLINE_MS)
+            .expect_err("wide input is refused");
+        assert_eq!(
+            error,
+            EngineError::Limit(LimitCause::TooManyEntries { limit: MAX_ENTRIES })
+        );
+    }
+
+    #[test]
     fn a_runaway_call_does_not_disarm_another_calls_deadline() {
         let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
         std::thread::scope(|scope| {
@@ -940,19 +989,23 @@ return {
     }
 
     #[test]
-    fn the_global_require_is_the_scoped_one() {
+    fn a_module_requires_relative_to_its_own_folder() {
         let scratch = Scratch::new();
         scratch.write(
             "plugin.luau",
             r#"
 local child = require("./sub/child")
+local root = require("./helper")
 return {
     name = "scoped",
     tools = {
         resolved = {
             name = "resolved",
             run = function(input, ctx)
-                return { content = { { kind = "text", text = child.reason } } }
+                return { content = {
+                    { kind = "text", text = child.value },
+                    { kind = "text", text = root.root },
+                } }
             end,
         },
         refused = {
@@ -966,29 +1019,33 @@ return {
 }
 "#,
         );
-        scratch.write("helper.luau", r#"return { reason = "root helper" }"#);
-        scratch.write("sub/helper.luau", r#"return { reason = "sub helper" }"#);
+        scratch.write("helper.luau", r#"return { root = "from root" }"#);
+        scratch.write("sub/helper.luau", r#"return { sub = "from sub" }"#);
         scratch.write(
             "sub/child.luau",
-            r#"local helper = require("./helper") return { reason = helper.reason }"#,
+            r#"local helper = require("./helper") return { value = helper.sub }"#,
         );
 
         let sandbox = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
             .expect("fixture loads");
 
-        // The scoped loader resolves specs against the plugin root, so the
-        // child's "./helper" is the root module. Stock Luau require resolves
-        // it against the child's own folder and rejects chunks without an
-        // "@" chunk name, so either outcome proves the scoped loader is live.
+        // The child's "./helper" is sub/helper.luau, not the root helper:
+        // one returns a "sub" field and the other a "root" field.
         let resolved = sandbox
             .tool("resolved", &json!({}), DEFAULT_DEADLINE_MS)
             .expect("tool returns");
         assert_eq!(
             resolved,
-            vec![Content {
-                kind: "text".into(),
-                text: "root helper".into()
-            }]
+            vec![
+                Content {
+                    kind: "text".into(),
+                    text: "from sub".into()
+                },
+                Content {
+                    kind: "text".into(),
+                    text: "from root".into()
+                },
+            ]
         );
 
         let refused = sandbox
@@ -999,6 +1056,68 @@ return {
             vec![Content {
                 kind: "text".into(),
                 text: "false".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_deferred_require_uses_the_defining_modules_folder() {
+        let scratch = Scratch::new();
+        scratch.write(
+            "plugin.luau",
+            r#"
+local child = require("./sub/child")
+return {
+    name = "scoped",
+    toolBefore = function(call, ctx)
+        return ctx.deny(child.later())
+    end,
+    tools = {
+        deferred = {
+            name = "deferred",
+            run = function(input, ctx)
+                return { content = { { kind = "text", text = child.later() } } }
+            end,
+        },
+    },
+}
+"#,
+        );
+        scratch.write("helper.luau", r#"return { root = "from root" }"#);
+        scratch.write("sub/helper.luau", r#"return { sub = "from sub" }"#);
+        scratch.write(
+            "sub/child.luau",
+            r#"
+local function later()
+    local helper = require("./helper")
+    return helper.sub
+end
+return { later = later }
+"#,
+        );
+
+        let sandbox = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+            .expect("fixture loads");
+
+        // The deferred call runs after child.luau finished loading; its
+        // require still resolves against sub/, not the plugin root.
+        let outcome = sandbox
+            .hook("toolBefore", &call("shell"), DEFAULT_DEADLINE_MS)
+            .expect("hook returns");
+        assert_eq!(
+            outcome,
+            Outcome::Deny {
+                reason: "from sub".into()
+            }
+        );
+        let content = sandbox
+            .tool("deferred", &json!({}), DEFAULT_DEADLINE_MS)
+            .expect("tool returns");
+        assert_eq!(
+            content,
+            vec![Content {
+                kind: "text".into(),
+                text: "from sub".into()
             }]
         );
     }

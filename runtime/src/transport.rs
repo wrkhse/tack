@@ -6,12 +6,12 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tack_protocol::wire::{self, MAX_PENDING, PROTOCOL_VERSION, Reply, ReplyError, Request};
 use tokio::net::{UnixListener, UnixStream};
@@ -23,13 +23,13 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Failures from binding or serving the owner-only Unix socket.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TransportError {
     /// Another daemon holds the start lock.
     LockBusy,
     /// The start lock could not be created or locked.
     LockIo,
-    /// The state folder belongs to another user.
+    /// The state folder belongs to another user or is group/world writable.
     StateNotOwned,
     /// The socket could not be prepared or bound.
     Bind(String),
@@ -82,7 +82,7 @@ fn acquire_lock(lock_path: &Path) -> Result<Lock, TransportError> {
 /// Create a missing state folder, or verify that an existing one is ours.
 fn ensure_state_dir(state_dir: &Path) -> Result<(), TransportError> {
     match fs::metadata(state_dir) {
-        Ok(meta) if meta.is_dir() => verify_owner(state_dir, &meta),
+        Ok(meta) if meta.is_dir() => verify_state_dir(&meta),
         Ok(_) => Err(TransportError::Bind(format!(
             "{} is not a directory",
             state_dir.display()
@@ -99,33 +99,18 @@ fn ensure_state_dir(state_dir: &Path) -> Result<(), TransportError> {
     }
 }
 
-/// A file created in a directory belongs to the creating user unless the
-/// directory is setgid, which tack never sets. Comparing its uid with the
-/// folder's uid detects a folder owned by somebody else without a dependency.
-fn verify_owner(state_dir: &Path, meta: &fs::Metadata) -> Result<(), TransportError> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let probe = state_dir.join(format!(".tack-owner-{}-{nanos}", std::process::id()));
+/// A state folder is safe when it belongs to us and cannot be written by its
+/// group or by other users, so nobody else can plant a socket inside it.
+fn state_dir_is_safe(uid: u32, mode: u32, euid: u32) -> bool {
+    uid == euid && mode & 0o022 == 0
+}
 
-    let created = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .map_err(|err| TransportError::Bind(format!("probe {}: {err}", probe.display())))?;
-    drop(created);
-
-    let probe_uid = fs::metadata(&probe)
-        .map(|probe_meta| probe_meta.uid())
-        .map_err(|err| TransportError::Bind(format!("stat {}: {err}", probe.display())))?;
-    let _ = fs::remove_file(&probe);
-
-    if probe_uid != meta.uid() {
-        return Err(TransportError::StateNotOwned);
+fn verify_state_dir(meta: &fs::Metadata) -> Result<(), TransportError> {
+    if state_dir_is_safe(meta.uid(), meta.mode(), unsafe { libc::geteuid() }) {
+        Ok(())
+    } else {
+        Err(TransportError::StateNotOwned)
     }
-
-    Ok(())
 }
 
 fn prepare_socket(socket: &Path) -> Result<(), TransportError> {
@@ -238,6 +223,40 @@ fn send_error(writer: &mut StdUnixStream, error: ReplyError, message: &str) {
     }
 }
 
+/// Wraps a socket so every blocking read spends only the time left in the
+/// current frame's budget, rather than resetting a fresh timeout per read.
+struct DeadlineReader<'a> {
+    stream: &'a StdUnixStream,
+    deadline: Instant,
+}
+
+impl<'a> DeadlineReader<'a> {
+    fn new(stream: &'a StdUnixStream, deadline: Instant) -> Self {
+        Self { stream, deadline }
+    }
+
+    fn reset(&mut self, deadline: Instant) {
+        self.deadline = deadline;
+    }
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "frame deadline exceeded",
+            ));
+        }
+
+        // A timeval of zero means "no timeout" on Unix, so keep it positive.
+        let remaining = remaining.max(Duration::from_millis(1));
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buf)
+    }
+}
+
 fn run_connection<F>(stream: UnixStream, handle: Arc<F>)
 where
     F: Fn(Request) -> Reply + Send + Sync + 'static,
@@ -247,9 +266,7 @@ where
         Err(_) => return,
     };
 
-    if stream.set_nonblocking(false).is_err()
-        || stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
-        || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
+    if stream.set_nonblocking(false).is_err() || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
     {
         return;
     }
@@ -258,9 +275,13 @@ where
         Ok(writer) => writer,
         Err(_) => return,
     };
-    let mut reader = io::BufReader::new(stream);
+    let mut reader = io::BufReader::new(DeadlineReader::new(&stream, Instant::now() + IO_TIMEOUT));
 
     for _ in 0..MAX_REQUESTS_PER_CONNECTION {
+        // Each frame gets one budget shared by all of its reads, so a peer
+        // that dribbles bytes cannot keep a frame open indefinitely.
+        reader.get_mut().reset(Instant::now() + IO_TIMEOUT);
+
         let line = match wire::read_line(&mut reader) {
             Ok(Some(line)) => line,
             Ok(None) => break,
@@ -294,7 +315,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use tack_protocol::wire::{MAX_FRAME_BYTES, Outcome, ReplyError, ToolCall};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 
     use super::*;
 
@@ -364,11 +385,11 @@ mod tests {
         let wins = [first.is_ok(), second.is_ok()];
         assert_eq!(wins.iter().filter(|won| **won).count(), 1);
 
-        let loser_is_busy = match (&first, &second) {
-            (Ok(_), Err(err)) | (Err(err), Ok(_)) => matches!(err, TransportError::LockBusy),
-            _ => false,
+        let loser = match (&first, &second) {
+            (Ok(_), Err(err)) | (Err(err), Ok(_)) => err,
+            _ => panic!("one bind must lose the lock"),
         };
-        assert!(loser_is_busy);
+        assert_eq!(loser, &TransportError::LockBusy);
     }
 
     #[tokio::test]
@@ -550,26 +571,48 @@ mod tests {
         assert!(second.is_ok());
     }
 
+    #[test]
+    fn state_dir_safety_checks_owner_and_mode() {
+        let euid = 501;
+
+        // Owned by us and not writable by group or others.
+        assert!(state_dir_is_safe(euid, 0o700, euid));
+        assert!(state_dir_is_safe(euid, 0o755, euid));
+
+        // World-writable and group-writable folders are refused.
+        assert!(!state_dir_is_safe(euid, 0o777, euid));
+        assert!(!state_dir_is_safe(euid, 0o770, euid));
+
+        // A folder owned by somebody else is refused.
+        assert!(!state_dir_is_safe(0, 0o700, euid));
+    }
+
     #[tokio::test]
-    async fn a_state_folder_owned_by_another_user_is_refused() {
-        let ours = TempDir::new();
-        let probe = ours.path().join("probe");
-        fs::write(&probe, b"").unwrap();
-        let our_uid = fs::metadata(&probe).unwrap().uid();
+    async fn a_partial_frame_is_bounded_by_the_frame_deadline() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).await.unwrap();
 
-        // macOS keeps a root-owned, world-writable /private/tmp. We cannot
-        // chown a folder as an unprivileged user, so this is the only folder
-        // with a foreign uid that tack is still able to write a probe into.
-        let state = Path::new("/private/tmp");
-        let Ok(meta) = fs::metadata(state) else {
-            return;
-        };
-        if meta.uid() == our_uid || meta.permissions().mode() & 0o002 == 0 {
-            return;
-        }
+        let task = tokio::spawn(server.serve(allow_all));
 
-        let socket = state.join(format!("tack-sock-{}", std::process::id()));
-        let err = bind(state, &socket).await.unwrap_err();
-        assert!(matches!(err, TransportError::StateNotOwned));
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        client
+            .write_all(b"partial-line-without-a-newline")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let start = Instant::now();
+        let mut buf = [0u8; 8];
+        let read = tokio::time::timeout(Duration::from_secs(8), client.read(&mut buf))
+            .await
+            .expect("connection did not end within the bound");
+
+        assert_eq!(read.unwrap(), 0, "expected EOF at the frame deadline");
+        assert!(start.elapsed() >= Duration::from_secs(4));
+        assert!(start.elapsed() < Duration::from_secs(8));
+
+        task.abort();
     }
 }

@@ -238,6 +238,8 @@ impl Sandbox {
 pub enum LimitCause {
     Deadline,
     Memory,
+    TooManyEntries { limit: usize },
+    TooDeep { limit: usize },
 }
 
 pub enum LoadCause {
@@ -384,3 +386,6 @@ The e2e part re-adds `conformance/model/stand-in.ts` and
   100 ms deadline, so a pathological pattern in a plugin can stall a call.
   Bounding the command text length and discouraging nested or unbounded
   patterns in plugin review is one mitigation.
+
+- `luau-analyze` over `sdk/tack.d.luau` is not yet wired into CI because the
+  tool is not installed in the pinned environment.

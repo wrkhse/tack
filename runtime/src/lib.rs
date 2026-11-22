@@ -1,5 +1,5 @@
 //! Bounded runtime services: the plugin sandbox, the scoped module loader and
-//! JSON-RPC framing over the owner-only Unix socket.
+//! NDJSON framing over the owner-only Unix socket.
 
 mod require;
 pub mod sandbox;

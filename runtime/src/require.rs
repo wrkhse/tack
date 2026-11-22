@@ -1,8 +1,11 @@
 //! A scoped replacement for Luau's require, confined to one plugin folder.
 //!
 //! The stock loader reaches arbitrary files and participates in its own cache.
-//! This one resolves every specifier against the canonical plugin folder,
-//! refuses escapes and cycles, and evaluates each module into the same VM.
+//! This one resolves every specifier against the requiring module's folder,
+//! confines every load to the plugin folder, refuses escapes and cycles, and
+//! evaluates each module into the same VM. Each module's chunk gets an
+//! environment whose require closes over that module's folder, so a deferred
+//! call still resolves against the file that defined it.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -11,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use mlua::chunk::ChunkMode;
-use mlua::{Function, Lua, Result as LuaResult, Value as LuaValue};
+use mlua::{Function, Lua, Result as LuaResult, Table, Value as LuaValue};
 
 /// The largest module source the loader will read, in bytes.
 const MAX_MODULE_BYTES: u64 = 1024 * 1024;
@@ -74,7 +77,7 @@ impl RequireState {
         })
     }
 
-    fn resolve(&mut self, spec: &str) -> Result<Resolved, RequireCause> {
+    fn resolve(&mut self, spec: &str, base: &Path) -> Result<Resolved, RequireCause> {
         let relative = Path::new(spec);
         if relative.is_absolute() {
             return Err(RequireCause::Absolute(spec.to_owned()));
@@ -86,7 +89,7 @@ impl RequireState {
             return Err(RequireCause::Parent(spec.to_owned()));
         }
 
-        let candidate = self.root.join(relative);
+        let candidate = base.join(relative);
         let canonical = self.locate(&candidate, spec)?;
         if let Some(value) = self.cache.get(&canonical) {
             return Ok(Resolved::Cached(value.clone()));
@@ -168,7 +171,19 @@ fn read_source(path: &Path, spec: &str) -> Result<String, RequireCause> {
 /// Install the scoped loader as the global require, returning the function so
 /// the host can load the entry module through the same path and cache.
 pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
+    let root = state.root.clone();
     let state = Arc::new(Mutex::new(state));
+    let loader = scoped_require(lua, Arc::clone(&state), root)?;
+    lua.globals().set("require", loader.clone())?;
+    Ok(loader)
+}
+
+/// Build a require whose relative specs resolve against one fixed folder.
+fn scoped_require(
+    lua: &Lua,
+    state: Arc<Mutex<RequireState>>,
+    base: PathBuf,
+) -> LuaResult<Function> {
     lua.create_function(move |lua, requested: LuaValue| {
         let spec = match requested {
             LuaValue::String(value) => value.to_str()?.to_string(),
@@ -176,8 +191,8 @@ pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
         };
 
         let resolved = {
-            let mut state = state.lock().expect("require state poisoned");
-            state.resolve(&spec).map_err(mlua::Error::external)?
+            let mut guard = state.lock().expect("require state poisoned");
+            guard.resolve(&spec, &base).map_err(mlua::Error::external)?
         };
         match resolved {
             Resolved::Cached(value) => Ok(value),
@@ -186,12 +201,18 @@ pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
                 source,
                 name,
             } => {
+                let module_base = canonical
+                    .parent()
+                    .map_or_else(|| base.clone(), Path::to_path_buf);
+                let require = scoped_require(lua, Arc::clone(&state), module_base)?;
+                let env = module_env(lua, require)?;
                 // The mutex guard is dropped before entering Lua: a module
                 // may call require again for its own siblings.
                 let outcome = lua
                     .load(source)
                     .set_mode(ChunkMode::Text)
                     .set_name(name)
+                    .set_environment(env)
                     .eval::<LuaValue>();
                 state
                     .lock()
@@ -200,4 +221,14 @@ pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
             }
         }
     })
+}
+
+/// The chunk environment: sandbox globals with a require bound to its folder.
+fn module_env(lua: &Lua, require: Function) -> LuaResult<Table> {
+    let env = lua.create_table()?;
+    env.set("require", require)?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", lua.globals())?;
+    env.set_metatable(Some(metatable))?;
+    Ok(env)
 }

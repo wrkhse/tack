@@ -346,6 +346,7 @@ dependencies = [
 name = "tack_runtime"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "mlua",
  "serde_json",
  "tack_protocol",
