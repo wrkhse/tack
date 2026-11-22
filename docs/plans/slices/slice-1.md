@@ -5,6 +5,24 @@
 You can write one Luau plugin with a `toolBefore` hook and one tool, build it
 for OpenCode, and have the hook deny a tool call in a real OpenCode session.
 
+```lua
+--!strict
+local guardStatus = require("./guard-status")
+
+return {
+  name = "safe-push",
+
+  toolBefore = function(call, ctx)
+    if call.tool == "shell"
+      and string.find(call.input.command, "^git push") then
+      return ctx.deny("push blocked")
+    end
+  end,
+
+  tools = { guard_status = guardStatus },
+}
+```
+
 ```mermaid
 flowchart LR
     A["Luau plugin<br/>table + tool"] --> B["tack build<br/>Rust CLI"];
@@ -55,3 +73,17 @@ so no API key is needed, in CI or a container with a throwaway `HOME`:
    returns to the session.
 
 A passing build or a unit test alone is not the proof.
+
+## Provenance
+
+Base commit: `663045b8e9a931a188d011484a425144cd2a1885`.
+
+The e2e part re-adds `conformance/model/stand-in.ts` and
+`conformance/harness/recorder.ts` from that base as the CI fixture.
+
+## Left open
+
+- The scripted provider is decided: a minimal local OpenAI-compatible SSE
+  stand-in ported from `conformance/model/stand-in.ts`, with a git-shim
+  recorder, CI-only.
+- Whether the recorder trace is kept as a CI artifact is open.

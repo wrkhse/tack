@@ -5,6 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[dependencies]
-serde_json.workspace = true
-tack_protocol = { path = "../protocol" }
+[[bin]]
+name = "tack"
+path = "src/main.rs"

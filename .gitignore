@@ -1,6 +1,5 @@
 .DS_Store
 /target/
-/target
 **/target/
 /dist
 node_modules/
