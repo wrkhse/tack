@@ -1,8 +1,7 @@
 # tack
 
-tack is a universal agent adapter. You write one plugin, a Luau table, and tack
-builds it into OpenCode, Pi, Claude Code and Codex. Its compiler builds the
-modules the plugin lists: barn, skills, transports, client and sdk. A
+tack is a universal agent adapter: you write one plugin, and it runs in every
+agent harness. Today a plugin is TypeScript and loads in OpenCode and Pi. A
 plugin guards tool calls, adds text to prompts, watches results, acts on its
 session and registers tools. The same tools also reach any MCP client over
 stdio.
@@ -279,6 +278,8 @@ The plan is [tack#1](https://github.com/wrkhse/tack/issues/1).
 - [ ] Claude Code hook entries
 - [ ] UI: status, toast, dialogs, commands
 - [ ] UI surfaces
+- [ ] Plugins as Luau tables, built by a Rust CLI into every harness
+      ([workhorse#56](https://github.com/wrkhse/workhorse/issues/56))
 
 ## More
 
