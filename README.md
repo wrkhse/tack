@@ -1,6 +1,6 @@
 # tack
 
-tack lets you write one coding-agent plugin and load it in OpenCode and Pi. A
+tack is a universal agent adapter: one plugin for every agent harness. Today a plugin is TypeScript and loads in OpenCode and Pi. A
 plugin guards tool calls, adds text to prompts, watches results, acts on its
 session and registers tools. The same tools also reach any MCP client over
 stdio.
@@ -277,6 +277,8 @@ The plan is [tack#1](https://github.com/wrkhse/tack/issues/1).
 - [ ] Claude Code hook entries
 - [ ] UI: status, toast, dialogs, commands
 - [ ] UI surfaces
+- [ ] Plugins as Luau tables, built by a Rust CLI into every harness
+      ([workhorse#56](https://github.com/wrkhse/workhorse/issues/56))
 
 ## More
 
