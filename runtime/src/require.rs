@@ -168,14 +168,12 @@ fn read_source(path: &Path, spec: &str) -> Result<String, RequireCause> {
     })
 }
 
-/// Install the scoped loader as the global require, returning the function so
-/// the host can load the entry module through the same path and cache.
+/// Build the scoped loader rooted at the plugin folder, returning the function
+/// so the host can load the entry module through the same path and cache.
 pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
     let root = state.root.clone();
     let state = Arc::new(Mutex::new(state));
-    let loader = scoped_require(lua, Arc::clone(&state), root)?;
-    lua.globals().set("require", loader.clone())?;
-    Ok(loader)
+    scoped_require(lua, state, root)
 }
 
 /// Build a require whose relative specs resolve against one fixed folder.

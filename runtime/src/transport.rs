@@ -106,7 +106,9 @@ fn state_dir_is_safe(uid: u32, mode: u32, euid: u32) -> bool {
 }
 
 fn verify_state_dir(meta: &fs::Metadata) -> Result<(), TransportError> {
-    if state_dir_is_safe(meta.uid(), meta.mode(), unsafe { libc::geteuid() }) {
+    // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.
+    let euid = unsafe { libc::geteuid() };
+    if state_dir_is_safe(meta.uid(), meta.mode(), euid) {
         Ok(())
     } else {
         Err(TransportError::StateNotOwned)

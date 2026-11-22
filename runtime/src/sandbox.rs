@@ -159,7 +159,6 @@ impl Sandbox {
         let state = require::RequireState::new(folder)
             .map_err(|message| EngineError::Load(LoadCause::Message(message)))?;
         let loader = require::install(&lua, state)?;
-        lua.globals().set("require", loader.clone())?;
         lua.sandbox(true)?;
         lua.set_memory_limit(memory_bytes)?;
 
