@@ -1,7 +1,6 @@
 # tack
 
-tack is a universal agent adapter: you write one plugin, and it runs in every
-agent harness. Today a plugin is TypeScript and loads in OpenCode and Pi. A
+tack is a universal agent adapter: one plugin for every agent harness. Today a plugin is TypeScript and loads in OpenCode and Pi. A
 plugin guards tool calls, adds text to prompts, watches results, acts on its
 session and registers tools. The same tools also reach any MCP client over
 stdio.
