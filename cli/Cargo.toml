@@ -1,0 +1,10 @@
+[package]
+name = "tack-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+tack_protocol = { path = "../protocol" }

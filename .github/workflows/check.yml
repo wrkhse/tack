@@ -2,100 +2,22 @@ name: check
 
 on:
   push:
-    branches: [main]
   pull_request:
-  workflow_dispatch:
-    inputs:
-      repeat:
-        description: "How many times each conformance row runs (TACK_CONFORMANCE_REPEAT)"
-        required: false
-        default: "1"
-        type: string
-      only:
-        description: "Run only conformance rows whose name contains this text, case-insensitive (TACK_CONFORMANCE_ONLY)"
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: check-${{ github.workflow }}-${{ github.ref }}
-  # Runs on main are never cancelled: a queued push waits for the running one.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
 jobs:
-  gate:
+  rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
         with:
-          # fallow audit compares against the merge base.
-          fetch-depth: 0
-          persist-credentials: false
-      # Installs Node from .node-version, Bun from packageManager, and Vite+ from package.json.
-      - uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
-        with:
-          node-version-file: .node-version
-          run-install: false
-      - run: bun install --frozen-lockfile
-      # Gate ignores GHSA-fc5q-39xc-vjpf (picomatch, unpatched, dev chains only); removed at 4.0.8.
-      - run: bun run check
+          toolchain: 1.100
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
 
-  conformance:
-    name: conformance (${{ matrix.agent }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      # mcp runs the generated server's stdio rows and starts no agent CLI.
-      matrix:
-        agent: [opencode, pi, mcp]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # Installs Node from .node-version, Bun from packageManager, and Vite+ from package.json.
-      - uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
-        with:
-          node-version-file: .node-version
-          run-install: false
-      - run: bun install --frozen-lockfile
-      - name: Verify the pinned install
-        # An out-of-band install changes the lockfile or manifest. @opencode/cli's
-        # postinstall links the binary of one of the installed platform packages;
-        # a fallback install fetches its own copy instead, which leaves the
-        # lockfile untouched and its bytes unequal to every candidate.
-        run: |
-          git diff --exit-code -- bun.lock package.json
-
-          candidates=(node_modules/@opencode/cli-*/bin/opencode)
-
-          if [ ! -f "${candidates[0]}" ]; then
-            echo "no platform binary was installed; expected at least one of node_modules/@opencode/cli-*/bin/opencode" >&2
-            exit 1
-          fi
-
-          if [ ! -e node_modules/.bin/opencode ]; then
-            echo "the suite's entry point, node_modules/.bin/opencode, is missing" >&2
-            exit 1
-          fi
-
-          installed="$(readlink -f node_modules/.bin/opencode)"
-
-          for candidate in "${candidates[@]}"; do
-            if cmp -s "$installed" "$candidate"; then
-              echo "the suite runs $installed, byte-identical to $candidate"
-              exit 0
-            fi
-          done
-
-          echo "the suite would run $installed, which matches none of the installed platform binaries:" >&2
-          printf '  %s\n' "${candidates[@]}" >&2
-          exit 1
-      - run: bun run conformance:${{ matrix.agent }}
-        env:
-          TACK_CONFORMANCE_REPEAT: ${{ inputs.repeat || '1' }}
-          TACK_CONFORMANCE_ONLY: ${{ inputs.only }}
+# e2e job is added by the end-to-end slice.
