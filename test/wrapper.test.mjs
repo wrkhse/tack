@@ -2,7 +2,10 @@
 // Runs in CI or a disposable container only, never against a real daemon.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -12,9 +15,9 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 
-const wrapperPath = process.env.TACK_WRAPPER
-  ? path.resolve(process.env.TACK_WRAPPER)
-  : path.join(repoRoot, "dist", "opencode", "index.js");
+const CALL_TIMEOUT_MS = 150;
+const START_TIMEOUT_MS = 300;
+const HARD_TIMEOUT_MS = 10_000;
 
 const ENV_KEYS = [
   "TACK_STATE_DIR",
@@ -23,6 +26,11 @@ const ENV_KEYS = [
   "TACK_NO_START",
   "TACK_CALL_TIMEOUT_MS",
   "TACK_START_TIMEOUT_MS",
+  "XDG_STATE_HOME",
+  "HOME",
+  "TACK_STUB_MARKER",
+  "TACK_STUB_DELAY_MS",
+  "TACK_STUB_SCRIPT",
 ];
 
 const CALL = {
@@ -35,9 +43,35 @@ const CALL = {
 
 const ALLOW_CALL = { ...CALL, input: { command: "echo hello" } };
 
-const HARD_TIMEOUT_MS = 10_000;
+const ERROR_REASONS = [
+  ["limit", "limit"],
+  ["script", "script"],
+  ["unknown_tool", "unknown_tool"],
+  ["malformed", "daemon_error"],
+  ["too_large", "daemon_error"],
+  ["unsupported_hook", "daemon_error"],
+];
 
 let failures = 0;
+let buildDir;
+
+function buildWrapper() {
+  buildDir = mkdtempSync(path.join(tmpdir(), "tack-wrapper-build-"));
+  execFileSync(
+    "cargo",
+    [
+      "run", "--locked", "-p", "tack-cli", "--",
+      "build", path.join(repoRoot, "fixtures/safe-push"),
+      "--out", buildDir,
+      "--call-timeout-ms", String(CALL_TIMEOUT_MS),
+      "--start-timeout-ms", String(START_TIMEOUT_MS),
+    ],
+    { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  return path.join(buildDir, "opencode", "index.js");
+}
+
+const wrapperPath = process.env.TACK_WRAPPER || buildWrapper();
 
 function hardTimeout(promise, ms, label) {
   let timer;
@@ -66,31 +100,60 @@ function applyEnv(env) {
   }
 }
 
+// The real OpenCode 2.3 API registers hooks and tools as objects with
+// dispose(), and tool results are { content: [{ type, text }] }. Pin that
+// shape here: a wrapper that drifts from it fails during setup or execution.
 function fakeContext() {
   const hooks = new Map();
   const transforms = new Map();
+  const registrations = [];
+  const added = [];
 
-  const capture = (target) => (name, handler) => {
-    if (typeof name === "function") {
-      handler = name;
-      name = "default";
-    }
-    target.set(String(name), handler);
+  const register = () => {
+    const registration = {
+      disposed: false,
+      async dispose() {
+        this.disposed = true;
+      },
+    };
+    registrations.push(registration);
+    return registration;
   };
 
-  return {
-    ctx: {
-      hook: capture(hooks),
-      transform: capture(transforms),
-      tool: {
-        hook: capture(hooks),
-        transform: capture(transforms),
-        register: () => {},
+  const ctx = {
+    tool: {
+      hook(name, callback) {
+        assert.equal(name, "execute.before", "hook name must be execute.before");
+        assert.equal(
+          typeof callback, "function", "hook callback must be a function",
+        );
+        hooks.set(name, callback);
+        return register();
+      },
+      transform(callback) {
+        assert.equal(
+          typeof callback, "function", "transform callback must be a function",
+        );
+        const editor = {
+          add(definition) {
+            assert.equal(
+              typeof definition.name, "string", "tool name must be a string",
+            );
+            assert.equal(
+              typeof definition.execute, "function", "tool needs execute()",
+            );
+            added.push(definition);
+            return definition;
+          },
+        };
+        callback(editor);
+        transforms.set(String(transforms.size), callback);
+        return register();
       },
     },
-    hooks,
-    transforms,
   };
+
+  return { ctx, hooks, transforms, registrations, added };
 }
 
 function pickBefore(hooks, transforms) {
@@ -98,25 +161,34 @@ function pickBefore(hooks, transforms) {
   const before = all.find(([name]) => /before/i.test(name)) ?? all[0];
 
   assert.ok(before, "the wrapper registered no before handler");
-  assert.equal(typeof before[1], "function", "the before callback is not a function");
+  assert.equal(
+    typeof before[1], "function", "the before callback is not a function",
+  );
 
   return before[1];
 }
 
-async function loadBefore(env) {
+async function loadPlugin(env) {
   applyEnv(env);
 
   for (const key of Object.keys(require.cache)) delete require.cache[key];
 
   const plugin = require(wrapperPath);
-  assert.equal(typeof plugin.setup, "function", "the wrapper does not export setup()");
+  assert.equal(
+    typeof plugin.setup, "function", "the wrapper does not export setup()",
+  );
 
-  const { ctx, hooks, transforms } = fakeContext();
-  const result = plugin.setup(ctx);
+  const fake = fakeContext();
+  const cleanup = plugin.setup(fake.ctx);
+  assert.equal(typeof cleanup, "function", "setup must return a cleanup function");
+  assert.equal(fake.hooks.size, 1, "one execute.before hook must be registered");
+  assert.equal(fake.transforms.size, 1, "one tool transform must be registered");
 
-  if (result && typeof result.then === "function") await result;
+  return { before: pickBefore(fake.hooks, fake.transforms), cleanup, ...fake };
+}
 
-  return pickBefore(hooks, transforms);
+async function loadBefore(env) {
+  return (await loadPlugin(env)).before;
 }
 
 function baseEnv(dir, overrides = {}) {
@@ -125,8 +197,6 @@ function baseEnv(dir, overrides = {}) {
     TACK_SOCKET: path.join(dir, "tack.sock"),
     TACK_DAEMON_BIN: path.join(dir, "no-daemon"),
     TACK_NO_START: "1",
-    TACK_CALL_TIMEOUT_MS: "150",
-    TACK_START_TIMEOUT_MS: "300",
     ...overrides,
   };
 }
@@ -179,9 +249,155 @@ async function expectDeny(before, reason) {
   assert.equal(thrown.message, "tack: " + reason, "wrong fail-closed reason");
 }
 
+function reply(kind, extra = {}) {
+  return JSON.stringify({ kind, id: 1, version: 1, ...extra });
+}
+
+async function denyFromReply(replyText, reason) {
+  const dir = tempDir();
+  let server;
+
+  try {
+    const env = baseEnv(dir);
+    const before = await loadBefore(env);
+    server = await listen(env.TACK_SOCKET, (conn) => {
+      let buffer = "";
+      conn.setEncoding("utf8");
+      conn.on("error", () => {});
+      conn.on("data", (chunk) => {
+        buffer += chunk;
+        if (buffer.indexOf("\n") < 0) return;
+        conn.write(replyText + "\n");
+      });
+    });
+    await expectDeny(before, reason);
+  } finally {
+    if (server) await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function runOutcome(outcome, event) {
+  const dir = tempDir();
+  let server;
+
+  try {
+    const env = baseEnv(dir);
+    const before = await loadBefore(env);
+    server = await listen(env.TACK_SOCKET, (conn) => {
+      let buffer = "";
+      conn.setEncoding("utf8");
+      conn.on("error", () => {});
+      conn.on("data", (chunk) => {
+        buffer += chunk;
+        if (buffer.indexOf("\n") < 0) return;
+        conn.write(reply("hook", { outcome }) + "\n");
+      });
+    });
+
+    let error;
+    try {
+      await before(event);
+    } catch (thrown) {
+      error = thrown;
+    }
+    return error;
+  } finally {
+    if (server) await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The stub daemon is a test double: it parses the --socket and --plugin args
+// the wrapper passes, records its pid, then answers each NDJSON line.
+const STUB_DAEMON = [
+  "#!/usr/bin/env node",
+  "'use strict';",
+  "const net = require('node:net');",
+  "const fs = require('node:fs');",
+  "const args = process.argv.slice(2);",
+  "const socket = args[args.indexOf('--socket') + 1];",
+  "const plugin = args[args.indexOf('--plugin') + 1];",
+  "const marker = process.env.TACK_STUB_MARKER;",
+  "if (marker) fs.appendFileSync(marker, JSON.stringify({ pid: process.pid, socket, plugin }) + '\\n');",
+  "fs.rmSync(socket, { force: true });",
+  "const delay = Number(process.env.TACK_STUB_DELAY_MS || 0);",
+  "function serve() {",
+  "  const server = net.createServer((conn) => {",
+  "    let buffer = '';",
+  "    conn.setEncoding('utf8');",
+  "    conn.on('error', () => {});",
+  "    conn.on('data', (chunk) => {",
+  "      buffer += chunk;",
+  "      const lines = buffer.split('\\n');",
+  "      buffer = lines.pop();",
+  "      for (const line of lines) {",
+  "        if (!line.trim()) continue;",
+  "        let request;",
+  "        try { request = JSON.parse(line); } catch { continue; }",
+  "        const script = process.env.TACK_STUB_SCRIPT || 'allow';",
+  "        let reply;",
+  "        if (script === 'version') reply = { kind: 'hook', id: request.id, version: 999, outcome: { kind: 'allow' } };",
+  "        else if (script === 'unknown-outcome') reply = { kind: 'hook', id: request.id, version: request.version, outcome: { kind: 'surprise' } };",
+  "        else if (script === 'rewrite-no-command') reply = { kind: 'hook', id: request.id, version: request.version, outcome: { kind: 'rewrite', input: {} } };",
+  "        else if (script.startsWith('error:')) reply = { kind: 'error', id: request.id, version: request.version, error: script.slice(6), message: 'from daemon' };",
+  "        else if (request.kind === 'tool') reply = { kind: 'tool', id: request.id, version: request.version, content: [{ kind: 'text', text: 'guard_status: daemon ok' }] };",
+  "        else reply = { kind: 'hook', id: request.id, version: request.version, outcome: { kind: 'allow' } };",
+  "        conn.write(JSON.stringify(reply) + '\\n');",
+  "      }",
+  "    });",
+  "  });",
+  "  server.listen(socket);",
+  "}",
+  "setTimeout(serve, delay);",
+  "",
+].join("\n");
+
+// This helper binds a socket then exits, leaving a stale socket file behind.
+const STALE_SOCKET = [
+  "const net = require('node:net');",
+  "const fs = require('node:fs');",
+  "const socket = process.argv[2];",
+  "fs.rmSync(socket, { force: true });",
+  "const server = net.createServer(() => {});",
+  "server.listen(socket, () => process.exit(0));",
+  "",
+].join("\n");
+
+function writeScript(dir, name, source) {
+  const script = path.join(dir, name);
+  writeFileSync(script, source, { mode: 0o755 });
+  return script;
+}
+
+async function stopDaemons(marker) {
+  if (!existsSync(marker)) return;
+  const lines = readFileSync(marker, "utf8").trim().split("\n");
+
+  for (const line of lines) {
+    if (!line) continue;
+    try {
+      process.kill(JSON.parse(line).pid);
+    } catch {
+      // The daemon may already have exited.
+    }
+  }
+}
+
+async function coldStart(env, marker, dir) {
+  const stub = writeScript(dir, "stub-daemon.js", STUB_DAEMON);
+  const full = { ...env, TACK_DAEMON_BIN: stub, TACK_STUB_MARKER: marker };
+  delete full.TACK_NO_START;
+
+  const before = await loadBefore(full);
+  await before(ALLOW_CALL);
+
+  assert.ok(existsSync(marker), "the first call did not start the daemon");
+  return JSON.parse(readFileSync(marker, "utf8").trim().split("\n")[0]);
+}
+
 async function missingSocket() {
   const dir = tempDir();
-
   try {
     const before = await loadBefore(baseEnv(dir));
     assert.equal(existsSync(path.join(dir, "tack.sock")), false);
@@ -194,9 +410,8 @@ async function missingSocket() {
 async function timeout() {
   const dir = tempDir();
   let server;
-
   try {
-    const env = baseEnv(dir, { TACK_CALL_TIMEOUT_MS: "150" });
+    const env = baseEnv(dir);
     const before = await loadBefore(env);
     server = await listen(env.TACK_SOCKET, () => {});
     await expectDeny(before, "timeout");
@@ -209,7 +424,6 @@ async function timeout() {
 async function closedSocket() {
   const dir = tempDir();
   let server;
-
   try {
     const env = baseEnv(dir);
     const before = await loadBefore(env);
@@ -222,90 +436,204 @@ async function closedSocket() {
 }
 
 async function malformedReply() {
+  await denyFromReply("not json", "malformed_reply");
+}
+
+async function versionMismatch() {
+  const text = reply("hook", { version: 999, outcome: { kind: "allow" } });
+  await denyFromReply(text, "protocol_version");
+}
+
+async function oversizeWithNewline() {
+  await denyFromReply("x".repeat(1024 * 1024 + 8), "malformed_reply");
+}
+
+async function unknownOutcome() {
+  const text = reply("hook", { outcome: { kind: "surprise" } });
+  await denyFromReply(text, "malformed_reply");
+}
+
+async function rewriteWithoutCommand() {
+  const text = reply("hook", { outcome: { kind: "rewrite", input: {} } });
+  await denyFromReply(text, "malformed_reply");
+}
+
+async function allowPasses() {
+  const event = { tool: "shell", input: { command: "echo hello" } };
+  const error = await runOutcome({ kind: "allow" }, event);
+  assert.equal(error, undefined, "allow must pass through");
+}
+
+async function denyBlocks() {
+  const error = await runOutcome({ kind: "deny", reason: "push blocked" }, CALL);
+  assert.ok(error instanceof Error, "deny must block the call");
+  assert.equal(error.message, "tack: push blocked");
+}
+
+async function rewriteMutates() {
+  const event = { tool: "shell", input: { command: "git push origin main" } };
+  const error = await runOutcome(
+    { kind: "rewrite", input: { command: "git push --dry-run" } },
+    event,
+  );
+  assert.equal(error, undefined, "a rewrite with a command must pass through");
+  assert.equal(event.input.command, "git push --dry-run");
+}
+
+async function toolForwarding() {
   const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
   let server;
 
   try {
     const env = baseEnv(dir);
-    const before = await loadBefore(env);
-    server = await listen(env.TACK_SOCKET, (conn) => conn.write("not json\n"));
-    await expectDeny(before, "malformed_reply");
+    const loaded = await loadPlugin(env);
+    let request;
+
+    server = await listen(env.TACK_SOCKET, (conn) => {
+      let buffer = "";
+      conn.setEncoding("utf8");
+      conn.on("error", () => {});
+      conn.on("data", (chunk) => {
+        buffer += chunk;
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        request = JSON.parse(buffer.slice(0, newline));
+        conn.write(reply("tool", {
+          content: [{ kind: "text", text: "guard_status: daemon ok" }],
+        }) + "\n");
+      });
+    });
+
+    assert.equal(loaded.added.length, 1, "one tool must be registered");
+    const tool = loaded.added[0];
+    const result = await tool.execute({ verbose: true });
+
+    assert.deepEqual(result, {
+      content: [{ type: "text", text: "guard_status: daemon ok" }],
+    });
+    assert.equal(request.kind, "tool");
+    assert.equal(request.name, "guard_status");
+    assert.deepEqual(request.input, { verbose: true });
+
+    await loaded.cleanup();
+    assert.ok(
+      loaded.registrations.every((registration) => registration.disposed),
+      "cleanup must dispose every registration",
+    );
   } finally {
     if (server) await server.close();
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-// The stub daemon binds the socket the wrapper waits for and answers one hook
-// with "allow". It writes its pid beside the socket so the test can stop it.
-const STUB_DAEMON = [
-  "#!/usr/bin/env node",
-  "'use strict';",
-  "const net = require('node:net');",
-  "const fs = require('node:fs');",
-  "const path = require('node:path');",
-  "const socket = process.env.TACK_SOCKET || path.join(process.env.TACK_STATE_DIR, 'tack.sock');",
-  "fs.writeFileSync(socket + '.started', String(process.pid));",
-  "const server = net.createServer((conn) => {",
-  "  let buffer = '';",
-  "  conn.setEncoding('utf8');",
-  "  conn.on('error', () => {});",
-  "  conn.on('data', (chunk) => {",
-  "    buffer += chunk;",
-  "    const lines = buffer.split('\\n');",
-  "    buffer = lines.pop();",
-  "    for (const line of lines) {",
-  "      if (!line.trim()) continue;",
-  "      let request;",
-  "      try { request = JSON.parse(line); } catch { continue; }",
-  "      const reply = { kind: 'hook', id: request.id, version: 1, outcome: { kind: 'allow' } };",
-  "      conn.write(JSON.stringify(reply) + '\\n');",
-  "    }",
-  "  });",
-  "});",
-  "server.listen(socket);",
-  "",
-].join("\n");
-
-async function coldStart() {
+async function stateDirRule(envFor, expectedDir) {
   const dir = tempDir();
-  let daemonPid = 0;
+  const marker = path.join(dir, "daemons.log");
 
   try {
-    const stub = path.join(dir, "stub-daemon.js");
-    writeFileSync(stub, STUB_DAEMON, { mode: 0o755 });
+    const env = envFor(dir, marker);
+    const started = await coldStart(env, marker, dir);
+    const state = expectedDir(dir);
 
-    const env = baseEnv(dir, {
-      TACK_DAEMON_BIN: stub,
-      TACK_CALL_TIMEOUT_MS: "2000",
-      TACK_START_TIMEOUT_MS: "2000",
-    });
-    delete env.TACK_NO_START;
+    assert.equal(started.socket, path.join(state, "tack.sock"));
+    assert.ok(
+      existsSync(path.join(state, "daemon.log")),
+      "log is in the state folder",
+    );
+  } finally {
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
-    const before = await loadBefore(env);
+async function coldStartSuccess() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+
+  try {
+    const started = await coldStart(baseEnv(dir), marker, dir);
+    assert.equal(started.socket, path.join(dir, "tack.sock"));
+    assert.ok(path.isAbsolute(started.plugin), "plugin dir must be absolute");
+    assert.ok(
+      started.plugin.endsWith("fixtures/safe-push"),
+      "plugin dir is the fixture",
+    );
+  } finally {
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function slowStartFailsWithSocketMissing() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+
+  try {
+    const env = baseEnv(dir, { TACK_STUB_DELAY_MS: "900" });
+    const before = await coldBefore(env, marker, dir);
+    // Call timeout is 150 ms and start timeout is 300 ms: a paused call timer
+    // denies socket_missing, while an unpaused one would deny timeout.
+    await expectDeny(before, "socket_missing");
+  } finally {
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function coldBefore(env, marker, dir) {
+  const stub = writeScript(dir, "stub-daemon.js", STUB_DAEMON);
+  const full = { ...env, TACK_DAEMON_BIN: stub, TACK_STUB_MARKER: marker };
+  delete full.TACK_NO_START;
+  return loadBefore(full);
+}
+
+async function restartAfterDaemonDeath() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+
+  try {
+    const before = await coldBefore(baseEnv(dir), marker, dir);
     await before(ALLOW_CALL);
 
-    const marker = env.TACK_SOCKET + ".started";
-    assert.ok(
-      existsSync(env.TACK_SOCKET) || existsSync(marker),
-      "the first call did not start the daemon",
-    );
+    let lines = readFileSync(marker, "utf8").trim().split("\n");
+    assert.equal(lines.length, 1, "one daemon started");
+    const firstPid = JSON.parse(lines[0]).pid;
 
-    if (existsSync(marker)) {
-      daemonPid = Number(readFileSync(marker, "utf8"));
-      assert.ok(
-        Number.isInteger(daemonPid) && daemonPid > 0,
-        "the daemon did not report a process id",
-      );
-    }
+    process.kill(firstPid);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    rmSync(path.join(dir, "tack.sock"), { force: true });
+
+    await before(ALLOW_CALL);
+    lines = readFileSync(marker, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2, "a second daemon started after the first died");
+    assert.notEqual(JSON.parse(lines[1]).pid, firstPid, "the daemon was restarted");
   } finally {
-    if (daemonPid > 0) {
-      try {
-        process.kill(daemonPid);
-      } catch {
-        // The daemon may already have exited with the wrapper.
-      }
-    }
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function staleSocketRestarts() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+  const socket = path.join(dir, "tack.sock");
+
+  try {
+    const stale = writeScript(dir, "stale.js", STALE_SOCKET);
+    execFileSync(process.execPath, [stale, socket], { stdio: "ignore" });
+    // A refused path, whether a socket file or a placeholder, is stale.
+    if (!existsSync(socket)) writeFileSync(socket, "stale");
+    assert.ok(existsSync(socket), "stale socket was not created");
+
+    const before = await coldBefore(baseEnv(dir), marker, dir);
+    await before(ALLOW_CALL);
+
+    assert.ok(existsSync(marker), "a refused socket did not trigger a start");
+    const started = JSON.parse(readFileSync(marker, "utf8").trim().split("\n")[0]);
+    assert.equal(started.socket, socket);
+  } finally {
+    await stopDaemons(marker);
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -314,6 +642,48 @@ await check("socket_missing fails closed", missingSocket);
 await check("timeout fails closed", timeout);
 await check("socket_closed fails closed", closedSocket);
 await check("malformed_reply fails closed", malformedReply);
-await check("cold start launches the daemon and succeeds", coldStart);
+await check("version mismatch denies protocol_version", versionMismatch);
+await check("oversize reply with a newline fails closed", oversizeWithNewline);
+await check("unknown outcome kind fails closed", unknownOutcome);
+await check("rewrite without a command fails closed", rewriteWithoutCommand);
+await check("allow passes through", allowPasses);
+await check("deny blocks the call", denyBlocks);
+await check("rewrite with a string command mutates and passes", rewriteMutates);
+await check(
+  "tool forwards over the socket with the real result shape",
+  toolForwarding,
+);
+for (const [error, reason] of ERROR_REASONS) {
+  await check(
+    "reply error " + error + " denies " + reason,
+    () => denyFromReply(reply("error", { error, message: "from daemon" }), reason),
+  );
+}
+await check("TACK_STATE_DIR is used as-is", () =>
+  stateDirRule((dir, marker) => ({
+    TACK_STATE_DIR: path.join(dir, "explicit"),
+    TACK_STUB_MARKER: marker,
+  }), (dir) => path.join(dir, "explicit")));
+await check("XDG_STATE_HOME gains a tack suffix", () =>
+  stateDirRule((dir, marker) => ({
+    XDG_STATE_HOME: path.join(dir, "xdg"),
+    TACK_STUB_MARKER: marker,
+  }), (dir) => path.join(dir, "xdg", "tack")));
+await check("HOME fallback is .local/state/tack", () =>
+  stateDirRule((dir, marker) => ({
+    HOME: path.join(dir, "home"),
+    TACK_STUB_MARKER: marker,
+  }), (dir) => path.join(dir, "home", ".local", "state", "tack")));
+await check("cold start launches the daemon and succeeds", coldStartSuccess);
+await check(
+  "slow start denies socket_missing, not timeout",
+  slowStartFailsWithSocketMissing,
+);
+await check("a later call restarts a daemon that died", restartAfterDaemonDeath);
+await check(
+  "ECONNREFUSED on a stale socket restarts the daemon",
+  staleSocketRestarts,
+);
 
+if (buildDir) rmSync(buildDir, { recursive: true, force: true });
 process.exitCode = failures === 0 ? 0 : 1;

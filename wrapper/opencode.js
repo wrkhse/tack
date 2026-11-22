@@ -17,22 +17,52 @@ const KINDS = new Set(["hook", "tool", "error"]);
 const MAX_LINE = 1024 * 1024;
 const POLL_MS = 25;
 
-const base = process.env.TACK_STATE_DIR || process.env.XDG_STATE_HOME ||
-  path.join(process.env.HOME || os.homedir(), ".local", "state");
-const STATE = path.join(base, "tack");
+// State folder shared with the daemon: an explicit TACK_STATE_DIR is used
+// as-is; XDG_STATE_HOME is suffixed with "tack"; the home fallback is
+// ".local/state/tack".
+let state;
+if (process.env.TACK_STATE_DIR) {
+  state = process.env.TACK_STATE_DIR;
+} else if (process.env.XDG_STATE_HOME) {
+  state = path.join(process.env.XDG_STATE_HOME, "tack");
+} else {
+  state = path.join(process.env.HOME || os.homedir(), ".local", "state", "tack");
+}
+const STATE = state;
 const SOCKET = process.env.TACK_SOCKET || path.join(STATE, "tack.sock");
 const DAEMON_LOG = path.join(STATE, "daemon.log");
 
+// Reply::Error classes map to named reasons, never a single catch-all.
+const ERROR_REASONS = new Map([
+  ["limit", "limit"],
+  ["script", "script"],
+  ["unknown_tool", "unknown_tool"],
+  ["malformed", "daemon_error"],
+  ["too_large", "daemon_error"],
+  ["unsupported_hook", "daemon_error"],
+]);
+
+const REASONS = new Set(DENY_REASONS);
 let sequence = 0;
 let starting;
+let daemonChild;
 
 function nextId() {
   sequence = (sequence + 1) % Number.MAX_SAFE_INTEGER;
   return sequence;
 }
 
-function reason(name) {
-  return DENY_REASONS.find((entry) => entry === name) || name;
+// A reason the protocol does not declare degrades to the safe fallback.
+function denyName(name) {
+  return REASONS.has(name) ? name : "malformed_reply";
+}
+
+function errorReason(kind) {
+  return ERROR_REASONS.get(kind) || "daemon_error";
+}
+
+function daemonBin() {
+  return process.env.TACK_DAEMON_BIN || DAEMON_BIN;
 }
 
 function startDaemon() {
@@ -41,28 +71,43 @@ function startDaemon() {
       let done = false;
       let timer;
       let poll;
+      let child;
+
       const finish = (ok) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         clearInterval(poll);
+        daemonChild = ok ? child : undefined;
+        // A failed or dead start must not poison later calls.
+        starting = undefined;
         resolve(ok);
       };
+
       timer = setTimeout(() => finish(fs.existsSync(SOCKET)), START_TIMEOUT_MS);
+
       try {
+        // A refused connection leaves a stale socket file. Remove it so the
+        // readiness poll can only observe the new daemon's socket.
+        if (fs.existsSync(SOCKET)) fs.unlinkSync(SOCKET);
         fs.mkdirSync(STATE, { recursive: true });
         const log = fs.openSync(DAEMON_LOG, "a");
-        const daemon = process.env.TACK_DAEMON_BIN || DAEMON_BIN;
-        const child = spawn(daemon, ["--socket", SOCKET, "--plugin", PLUGIN_DIR], {
-          detached: true, stdio: ["ignore", log, log],
+        child = spawn(daemonBin(), ["--socket", SOCKET, "--plugin", PLUGIN_DIR], {
+          detached: true,
+          stdio: ["ignore", log, log],
         });
         child.on("error", () => finish(fs.existsSync(SOCKET)));
+        child.on("exit", () => {
+          if (daemonChild === child) daemonChild = undefined;
+          finish(fs.existsSync(SOCKET));
+        });
         child.unref();
         fs.closeSync(log);
       } catch {
         finish(false);
         return;
       }
+
       poll = setInterval(() => {
         if (fs.existsSync(SOCKET)) finish(true);
       }, POLL_MS);
@@ -74,55 +119,86 @@ function startDaemon() {
 function forward(request) {
   return new Promise((resolve) => {
     let settled = false;
-    let started = false;
     let active;
     let timer;
+    let waitingForStart = false;
+
+    const stopTimer = () => {
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timer = undefined;
+    };
+
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      stopTimer();
       if (active && !active.destroyed) active.destroy();
       resolve(result);
     };
-    const deny = (name) => finish({ ok: false, reason: reason(name) });
-    timer = setTimeout(() => deny("timeout"), CALL_TIMEOUT_MS);
+
+    const deny = (name) => finish({ ok: false, reason: denyName(name) });
 
     const connect = () => {
+      stopTimer();
+      if (settled) return;
+
       const sock = net.connect(SOCKET);
       let abandoned = false;
-      let buffer = "";
+      let buffer = Buffer.alloc(0);
       active = sock;
-      sock.on("connect", () => sock.write(JSON.stringify(request) + "\n"));
+      timer = setTimeout(() => deny("timeout"), CALL_TIMEOUT_MS);
+
+      sock.on("connect", () => {
+        sock.write(JSON.stringify(request) + "\n");
+      });
+
       sock.on("data", (chunk) => {
-        buffer += chunk.toString("utf8");
-        const newline = buffer.indexOf("\n");
-        if (newline < 0) {
-          if (buffer.length > MAX_LINE) deny("malformed_reply");
+        buffer = Buffer.concat([buffer, chunk]);
+        // The cap covers the whole buffer, even after the newline arrives.
+        if (buffer.length > MAX_LINE) {
+          deny("malformed_reply");
           return;
         }
+        const newline = buffer.indexOf(0x0a);
+        if (newline < 0) return;
+
         let reply;
         try {
-          reply = JSON.parse(buffer.slice(0, newline));
+          reply = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
         } catch {
           deny("malformed_reply");
           return;
         }
         if (!reply || typeof reply !== "object" || reply.id !== request.id ||
-            reply.version !== PROTOCOL_VERSION || !KINDS.has(reply.kind)) {
+            !KINDS.has(reply.kind)) {
           deny("malformed_reply");
+          return;
+        }
+        if (reply.version !== PROTOCOL_VERSION) {
+          deny("protocol_version");
+          return;
+        }
+        if (reply.kind === "error") {
+          deny(errorReason(reply.error));
           return;
         }
         finish({ ok: true, reply });
       });
+
       sock.on("close", () => {
         if (!abandoned) deny("socket_closed");
       });
+
       sock.on("error", (error) => {
         const code = error && error.code;
-        if (code === "ENOENT" && !started && process.env.TACK_NO_START !== "1") {
-          started = true;
+        const stale = code === "ENOENT" || code === "ECONNREFUSED";
+        if (stale && !waitingForStart && process.env.TACK_NO_START !== "1") {
+          waitingForStart = true;
           abandoned = true;
+          stopTimer();
           startDaemon().then((ok) => {
+            if (settled) return;
             if (ok) connect();
             else deny("socket_missing");
           });
@@ -131,6 +207,7 @@ function forward(request) {
         deny(code === "ENOENT" ? "socket_missing" : "socket_closed");
       });
     };
+
     connect();
   });
 }
@@ -138,47 +215,86 @@ function forward(request) {
 async function before(event) {
   const input = event.input || (event.input = {});
   const tool = event.tool || input.tool || "";
-  const call = { tool, name: event.name || input.name || tool, input,
-    session_id: event.sessionID || event.session_id || undefined };
+  const call = {
+    tool,
+    name: event.name || input.name || tool,
+    input,
+    session_id: event.sessionID || event.session_id || undefined,
+  };
   const result = await forward({
-    id: nextId(), kind: "hook", hook: "toolBefore",
-    version: PROTOCOL_VERSION, call,
+    id: nextId(),
+    kind: "hook",
+    hook: "toolBefore",
+    version: PROTOCOL_VERSION,
+    call,
   });
   if (!result.ok) throw new Error("tack: " + result.reason);
+  if (result.reply.kind !== "hook") {
+    throw new Error("tack: " + denyName("malformed_reply"));
+  }
+
   const outcome = result.reply.outcome;
-  if (!outcome) throw new Error("tack: " + reason("malformed_reply"));
-  if (outcome.kind === "deny") throw new Error("tack: " + (outcome.reason || "denied"));
+  if (!outcome || typeof outcome !== "object") {
+    throw new Error("tack: " + denyName("malformed_reply"));
+  }
+  if (outcome.kind === "deny") {
+    throw new Error("tack: " + (outcome.reason || "denied"));
+  }
   if (outcome.kind === "rewrite") {
-    const rewritten = outcome.input || {};
+    const rewritten = outcome.input;
+    if (!rewritten || typeof rewritten !== "object" ||
+        typeof rewritten.command !== "string") {
+      throw new Error("tack: " + denyName("malformed_reply"));
+    }
     if (tool === "shell") event.input.command = rewritten.command;
     else event.input = rewritten;
+    return;
+  }
+  if (outcome.kind !== "allow") {
+    throw new Error("tack: " + denyName("malformed_reply"));
   }
 }
 
 function setup(ctx) {
   const registrations = [ctx.tool.hook("execute.before", before)];
+
   for (const definition of MANIFEST.tools) {
-    registrations.push(ctx.tool.transform((editor) => editor.add({
-      name: definition.name,
-      description: definition.description,
-      input: definition.input,
-      options: { codemode: false },
-      async execute(args) {
-        const result = await forward({
-          id: nextId(), kind: "tool", name: definition.name, input: args,
-          version: PROTOCOL_VERSION,
-        });
-        if (!result.ok) throw new Error("tack: " + result.reason);
-        if (result.reply.kind === "error") throw new Error("tack: " + result.reply.message);
-        return { content: (result.reply.content || []).map((item) => ({
-          type: "text", text: item.text,
-        })) };
-      },
-    })));
+    registrations.push(
+      ctx.tool.transform((editor) =>
+        editor.add({
+          name: definition.name,
+          description: definition.description,
+          input: definition.input,
+          options: { codemode: false },
+          async execute(args) {
+            const result = await forward({
+              id: nextId(),
+              kind: "tool",
+              name: definition.name,
+              input: args,
+              version: PROTOCOL_VERSION,
+            });
+            if (!result.ok) throw new Error("tack: " + result.reason);
+            if (result.reply.kind !== "tool") {
+              throw new Error("tack: " + denyName("malformed_reply"));
+            }
+            return {
+              content: (result.reply.content || []).map((item) => ({
+                type: "text",
+                text: item.text,
+              })),
+            };
+          },
+        }),
+      ),
+    );
   }
+
   return async () => {
-    for (const dispose of registrations) {
-      if (typeof dispose === "function") await dispose();
+    for (const registration of registrations) {
+      if (registration && typeof registration.dispose === "function") {
+        await registration.dispose();
+      }
     }
   };
 }

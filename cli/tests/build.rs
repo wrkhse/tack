@@ -5,12 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tack_cli::{BuildOptions, DAEMON_BIN, build};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest};
-use tack_wrapper::WrapperConfig;
+use tack_wrapper::{WrapperConfig, WrapperError};
 
-#[allow(dead_code)]
-#[path = "../src/main.rs"]
-mod cli;
+const GOLDEN: &str = include_str!("golden/opencode.js");
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -53,45 +52,95 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/safe-push")
 }
 
-fn expected_script(folder: &Path, manifest: &PluginManifest) -> String {
-    let reasons: Vec<&str> = DenyReason::ALL
-        .iter()
-        .map(|reason| reason.as_str())
-        .collect();
-    let bin = cli::daemon_bin().expect("daemon path");
-    let plugin = folder.to_string_lossy();
-    let config = WrapperConfig {
-        manifest,
-        daemon_bin: &bin,
-        plugin_dir: &plugin,
-        protocol_version: PROTOCOL_VERSION,
-        deny_reasons: &reasons,
-        call_timeout_ms: 2000,
-        start_timeout_ms: 3000,
-    };
-    tack_wrapper::render(&config).expect("render")
-}
-
-#[test]
-fn build_emits_the_rendered_wrapper_without_rule_logic() {
-    let fixture = fixture();
-    let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-
-    let (index, _) = cli::build(&fixture, &out).expect("fixture builds");
-    let written = std::fs::read_to_string(&index).expect("wrapper is readable");
-
+fn manifest() -> PluginManifest {
     let sandbox = tack_runtime::Sandbox::new(
-        &fixture,
+        &fixture(),
         tack_protocol::DEFAULT_MEMORY_BYTES,
         tack_protocol::DEFAULT_DEADLINE_MS,
     )
     .expect("fixture loads");
-    let manifest = sandbox.manifest().expect("manifest reads");
+    sandbox.manifest().expect("manifest reads")
+}
 
-    assert_eq!(written, expected_script(&fixture, &manifest));
-    assert!(!written.contains("git push"));
-    assert!(!written.contains("push blocked"));
+fn reasons() -> Vec<&'static str> {
+    DenyReason::ALL
+        .iter()
+        .map(|reason| reason.as_str())
+        .collect()
+}
+
+fn config<'a>(
+    manifest: &'a PluginManifest,
+    plugin_dir: &'a str,
+    call_timeout_ms: u64,
+    start_timeout_ms: u64,
+    deny_reasons: &'a [&'a str],
+) -> WrapperConfig<'a> {
+    WrapperConfig {
+        manifest,
+        daemon_bin: DAEMON_BIN,
+        plugin_dir,
+        protocol_version: PROTOCOL_VERSION,
+        deny_reasons,
+        call_timeout_ms,
+        start_timeout_ms,
+    }
+}
+
+fn constant<'a>(script: &'a str, name: &str) -> &'a str {
+    let prefix = format!("const {name} = ");
+    let line = script
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .expect("emitted constant");
+    let value = line.strip_prefix(&prefix).expect("prefix");
+    value.strip_suffix(';').expect("semicolon")
+}
+
+#[test]
+fn render_matches_the_checked_in_golden() {
+    let manifest = manifest();
+    let reasons = reasons();
+    let config = config(&manifest, "/plugins/tack", 2000, 3000, &reasons);
+
+    let rendered = tack_wrapper::render(&config).expect("render");
+
+    assert_eq!(rendered, GOLDEN);
+}
+
+#[test]
+fn build_emits_exact_constants_and_a_canonical_plugin_dir() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+    let messy = fixture().join("..").join("safe-push");
+    let options = BuildOptions {
+        call_timeout_ms: 150,
+        start_timeout_ms: 300,
+    };
+
+    let (index, _) = build(&messy, &out, options).expect("fixture builds");
+    let script = std::fs::read_to_string(&index).expect("wrapper is readable");
+
+    let canonical = std::fs::canonicalize(fixture()).expect("canonical fixture");
+    assert_eq!(
+        constant(&script, "MANIFEST"),
+        serde_json::to_string(&manifest()).expect("manifest JSON")
+    );
+    assert_eq!(
+        constant(&script, "PLUGIN_DIR"),
+        format!("\"{}\"", canonical.display())
+    );
+    assert_eq!(constant(&script, "DAEMON_BIN"), format!("\"{DAEMON_BIN}\""));
+    assert_eq!(constant(&script, "CALL_TIMEOUT_MS"), "150");
+    assert_eq!(constant(&script, "START_TIMEOUT_MS"), "300");
+    assert_eq!(constant(&script, "PROTOCOL_VERSION"), "1");
+    assert_eq!(
+        constant(&script, "DENY_REASONS"),
+        serde_json::to_string(&reasons()).expect("reasons JSON")
+    );
+    assert!(!script.contains("__TACK_"));
+    assert!(!script.contains("git push"));
+    assert!(!script.contains("push blocked"));
 }
 
 #[test]
@@ -103,17 +152,30 @@ fn an_unknown_need_fails_by_name() {
     );
     let out = scratch.path().join("dist");
 
-    let error = cli::build(scratch.path(), &out).expect_err("unknown need is refused");
+    let error =
+        build(scratch.path(), &out, BuildOptions::default()).expect_err("unknown need is refused");
+
     assert_eq!(error.to_string(), "need_missing:barn");
 }
 
 #[test]
+fn an_unsafe_token_value_is_refused() {
+    let manifest = manifest();
+    let reasons = reasons();
+    let mut config = config(&manifest, "/plugins/tack", 2000, 3000, &reasons);
+    config.daemon_bin = "tack-daemon\nspawn other";
+
+    let error = tack_wrapper::render(&config).expect_err("unsafe value is refused");
+
+    assert_eq!(error, WrapperError::UnsafeValue("daemon_bin"));
+}
+
+#[test]
 fn the_manifest_json_has_the_plugin_contract() {
-    let fixture = fixture();
     let scratch = Scratch::new();
     let out = scratch.path().join("dist");
 
-    let (_, descriptor) = cli::build(&fixture, &out).expect("fixture builds");
+    let (_, descriptor) = build(&fixture(), &out, BuildOptions::default()).expect("fixture builds");
     let bytes = std::fs::read(&descriptor).expect("manifest is readable");
     let manifest: PluginManifest = serde_json::from_slice(&bytes).expect("manifest parses");
 

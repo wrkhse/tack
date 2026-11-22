@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.100
           components: rustfmt, clippy
@@ -37,10 +37,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.100
-      - run: npm install -g @opencode/cli@2.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.22.3
+      - name: Install OpenCode
+        run: |
+          bin="$RUNNER_TEMP/opencode-bin"
+          mkdir -p "$bin"
+          cd "$bin"
+          curl -fsSLO https://github.com/anomalyco/opencode/releases/download/v2.3.0/opencode-linux-x64.tar.gz
+          curl -fsSLO https://github.com/anomalyco/opencode/releases/download/v2.3.0/SHA256SUMS
+          echo 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b  opencode-linux-x64.tar.gz' | sha256sum -c -
+          tar -xzf opencode-linux-x64.tar.gz
+          chmod +x opencode
+          echo "$bin" >> "$GITHUB_PATH"
+          export PATH="$bin:$PATH"
+          opencode --version
       - run: cargo build --workspace --bins --locked
       - run: cargo run --locked -p tack-cli -- build fixtures/safe-push --out dist
       - run: node test/wrapper.test.mjs

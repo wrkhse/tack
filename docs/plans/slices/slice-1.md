@@ -36,32 +36,51 @@ flowchart LR
 
 ## What it builds
 
-- **Build** — `cli/src/main.rs` is the `tack` command-line entry point. The
-  `wrapper` crate emits the OpenCode wrapper from `wrapper/opencode.js` into
-  `dist/opencode/index.js` with a tool manifest. Verification: a fixture plugin
-  builds; a missing need fails with a named error; the output holds no rule
-  logic.
+- **Build** — `cli/src/lib.rs` is the public API of the build pipeline. It
+  checks a plugin's needs, renders the wrapper from `wrapper/opencode.js`,
+  and writes the wrapper and a tool manifest into `dist/opencode`.
+  `cli/src/main.rs` parses the command line and calls it. Verification: a
+  fixture plugin builds; a missing need fails with a named error; the output
+  holds no rule logic.
 
-  **Structure.** The CLI entry point and the manifest types the build emits:
+  **Structure.** `build` canonicalizes the plugin folder, checks every need,
+  and returns the wrapper and manifest paths it wrote:
 
 ```rust
-fn main();
+pub fn build(
+    plugin_dir: &Path,
+    out: &Path,
+    options: BuildOptions,
+) -> Result<(PathBuf, PathBuf), BuildError>;
 
-pub struct PluginManifest {
-    pub name: String,
-    pub needs: Vec<String>,
-    pub tools: Vec<ToolDef>,
-}
-
-pub struct ToolDef {
-    pub name: String,
-    pub description: String,
-    pub input: Value,
+pub struct BuildOptions {
+    pub call_timeout_ms: u64,
+    pub start_timeout_ms: u64,
 }
 ```
 
-  `needs` defaults to an empty list when a plugin omits it; `input` is a JSON
-  value. The manifest and `dist/opencode/index.js` are written side by side.
+  Tests shorten both budgets so a call denies in milliseconds. The defaults
+  are 2 s per call and 3 s for the first daemon start:
+
+```rust
+impl Default for BuildOptions {}
+```
+
+  **BuildError** names the stage that failed. `NeedMissing` carries the
+  unsupported need; the other variants wrap that stage's error:
+
+```rust
+pub enum BuildError {
+    NeedMissing(String),
+    Sandbox(EngineError),
+    Render(WrapperError),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for BuildError {}
+
+impl Error for BuildError {}
+```
 
 - **Wrapper** — `wrapper/opencode.js` sends each hook as NDJSON over the socket
   and fails closed. The first call starts the daemon when the socket is
@@ -130,6 +149,61 @@ pub enum ReplyError {
     Limit,
     Script,
     UnsupportedHook,
+    UnknownTool,
+}
+```
+
+  A `DenyReason` is the named reason the wrapper reports when it fails closed
+  without a verdict from the daemon. `ALL` is the set handed to the generated
+  script. A reason outside that set degrades to `malformed_reply`:
+
+```rust
+pub enum DenyReason {
+    SocketMissing,
+    Timeout,
+    SocketClosed,
+    MalformedReply,
+    ProtocolVersion,
+    Limit,
+    Script,
+    UnknownTool,
+    DaemonError,
+}
+
+impl DenyReason {
+    pub const ALL: [DenyReason; 9];
+    pub fn as_str(self) -> &'static str;
+}
+```
+
+  `WrapperConfig` carries the values the template needs. The daemon stays a
+  plain name in the generated script and is resolved from `TACK_DAEMON_BIN`
+  or `PATH` at run time:
+
+```rust
+pub struct WrapperConfig<'a> {
+    pub manifest: &'a PluginManifest,
+    pub daemon_bin: &'a str,
+    pub plugin_dir: &'a str,
+    pub protocol_version: u32,
+    pub deny_reasons: &'a [&'a str],
+    pub call_timeout_ms: u64,
+    pub start_timeout_ms: u64,
+}
+```
+
+  `render` fills the seven template slots with JSON literals and returns an
+  error if a slot is missing, a value carries a `__TACK_` token or a newline,
+  or a substitution leaves a token behind:
+
+```rust
+pub fn render(config: &WrapperConfig) -> Result<String, WrapperError>;
+
+pub enum WrapperError {
+    MissingToken(&'static str),
+    UnreplacedToken(&'static str),
+    UnsafeValue(&'static str),
+    Json(String),
 }
 ```
 
@@ -375,8 +449,9 @@ CI-only.
 
 Base commit: `663045b8e9a931a188d011484a425144cd2a1885`.
 
-The e2e part re-adds `conformance/model/stand-in.ts` and
-`conformance/harness/recorder.ts` from that base as the CI fixture.
+The e2e part ports ideas from the deleted `conformance/model/stand-in.ts` and
+`conformance/harness/recorder.ts` into the CI fixture. Recording of tack-tool
+calls from the old suite was dropped in this slice.
 
 ## Left open
 

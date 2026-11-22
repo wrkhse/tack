@@ -49,6 +49,32 @@ function readOptional(file) {
   }
 }
 
+async function stopDaemon(dir) {
+  let pid;
+  try {
+    pid = Number(readFileSync(path.join(dir, "tack.lock"), "utf8").trim());
+  } catch {
+    return;
+  }
+  if (!Number.isSafeInteger(pid) || pid <= 0) return;
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 function findExecutable(name) {
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
     if (!dir) continue;
@@ -190,25 +216,23 @@ async function main() {
 
   const home = path.join(base, "home");
   const configHome = path.join(base, "xdg", "config");
-  const stateHome = path.join(base, "xdg", "state");
+  const stateDir = path.join(base, "xdg", "state");
   const dataHome = path.join(base, "xdg", "data");
   const cacheHome = path.join(base, "xdg", "cache");
   const tmpHome = path.join(base, "tmp");
   const binDir = path.join(base, "bin");
   const projectDir = path.join(base, "project");
-  const stateDir = path.join(stateHome, "tack");
   const recorder = path.join(base, "recorder.log");
 
   for (const dir of [
     home,
     configHome,
-    stateHome,
+    stateDir,
     dataHome,
     cacheHome,
     tmpHome,
     binDir,
     projectDir,
-    stateDir,
   ]) {
     mkdirSync(dir, { recursive: true });
   }
@@ -230,9 +254,9 @@ async function main() {
       TMPDIR: tmpHome,
       XDG_CONFIG_HOME: configHome,
       XDG_DATA_HOME: dataHome,
-      XDG_STATE_HOME: stateHome,
+      XDG_STATE_HOME: stateDir,
       XDG_CACHE_HOME: cacheHome,
-      TACK_STATE_DIR: stateHome,
+      TACK_STATE_DIR: stateDir,
       TACK_DAEMON_BIN: daemonBin,
       TACK_RECORDER: recorder,
       TACK_REAL_GIT: findExecutable("git") ?? "",
@@ -275,6 +299,7 @@ async function main() {
   } finally {
     if (opencode && opencode.exitCode === null) opencode.kill("SIGKILL");
     if (model && model.child.exitCode === null) model.child.kill("SIGKILL");
+    if (process.env.CI) await stopDaemon(stateDir);
     if (created) rmSync(base, { recursive: true, force: true });
   }
 }

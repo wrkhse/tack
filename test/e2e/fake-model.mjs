@@ -6,7 +6,9 @@ import { createServer } from "node:http";
 
 const MAX_REQUESTS = 50;
 const MAX_BODY_BYTES = 1024 * 1024;
-const LIFETIME_MS = 20_000;
+// Outlives the runner's 90 s OpenCode bound with a margin, so CI never
+// stops the provider before the session finishes.
+const LIFETIME_MS = 120_000;
 
 const CHUNK_HEAD = {
   id: "chatcmpl-e2e",

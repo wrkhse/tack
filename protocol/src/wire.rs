@@ -125,14 +125,24 @@ pub enum DenyReason {
     Timeout,
     SocketClosed,
     MalformedReply,
+    ProtocolVersion,
+    Limit,
+    Script,
+    UnknownTool,
+    DaemonError,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 4] = [
+    pub const ALL: [DenyReason; 9] = [
         DenyReason::SocketMissing,
         DenyReason::Timeout,
         DenyReason::SocketClosed,
         DenyReason::MalformedReply,
+        DenyReason::ProtocolVersion,
+        DenyReason::Limit,
+        DenyReason::Script,
+        DenyReason::UnknownTool,
+        DenyReason::DaemonError,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -141,6 +151,11 @@ impl DenyReason {
             DenyReason::Timeout => "timeout",
             DenyReason::SocketClosed => "socket_closed",
             DenyReason::MalformedReply => "malformed_reply",
+            DenyReason::ProtocolVersion => "protocol_version",
+            DenyReason::Limit => "limit",
+            DenyReason::Script => "script",
+            DenyReason::UnknownTool => "unknown_tool",
+            DenyReason::DaemonError => "daemon_error",
         }
     }
 }
@@ -411,6 +426,11 @@ mod tests {
             (DenyReason::Timeout, "timeout"),
             (DenyReason::SocketClosed, "socket_closed"),
             (DenyReason::MalformedReply, "malformed_reply"),
+            (DenyReason::ProtocolVersion, "protocol_version"),
+            (DenyReason::Limit, "limit"),
+            (DenyReason::Script, "script"),
+            (DenyReason::UnknownTool, "unknown_tool"),
+            (DenyReason::DaemonError, "daemon_error"),
         ] {
             assert_eq!(reason.as_str(), expected);
             assert_eq!(

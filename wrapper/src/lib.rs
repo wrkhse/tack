@@ -18,6 +18,7 @@ const TOKENS: [&str; 7] = [
     "__TACK_PROTOCOL_VERSION__",
 ];
 
+#[derive(Debug)]
 pub struct WrapperConfig<'a> {
     pub manifest: &'a PluginManifest,
     pub daemon_bin: &'a str,

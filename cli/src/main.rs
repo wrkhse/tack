@@ -1,105 +1,10 @@
 //! The tack command-line entry point.
 
-use std::error::Error;
-use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION};
-use tack_protocol::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
-use tack_runtime::{EngineError, Sandbox};
-use tack_wrapper::{WrapperConfig, WrapperError};
+use tack_cli::{BuildError, BuildOptions, build};
 
-const CALL_TIMEOUT_MS: u64 = 2000;
-const START_TIMEOUT_MS: u64 = 3000;
-const SUPPORTED: [&str; 3] = ["sandbox", "daemon", "opencode"];
-
-#[derive(Debug)]
-pub enum BuildError {
-    NeedMissing(String),
-    Sandbox(EngineError),
-    Render(WrapperError),
-    Io(std::io::Error),
-}
-
-impl fmt::Display for BuildError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BuildError::NeedMissing(name) => write!(f, "need_missing:{name}"),
-            BuildError::Sandbox(error) => write!(f, "sandbox:{error}"),
-            BuildError::Render(error) => write!(f, "render:{error}"),
-            BuildError::Io(error) => write!(f, "io:{error}"),
-        }
-    }
-}
-
-impl Error for BuildError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            BuildError::NeedMissing(_) => None,
-            BuildError::Sandbox(error) => Some(error),
-            BuildError::Render(error) => Some(error),
-            BuildError::Io(error) => Some(error),
-        }
-    }
-}
-
-/// Daemon binary injected into the wrapper; never invoked by the build itself.
-pub fn daemon_bin() -> Result<String, BuildError> {
-    if let Ok(value) = std::env::var("TACK_DAEMON_BIN") {
-        return Ok(value);
-    }
-    let exe = std::env::current_exe().map_err(BuildError::Io)?;
-    let parent = exe.parent().ok_or_else(|| {
-        BuildError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "current executable has no parent folder",
-        ))
-    })?;
-    Ok(parent.join("tack-daemon").to_string_lossy().into_owned())
-}
-
-/// Read one plugin, check its needs, and emit the OpenCode wrapper and manifest.
-pub fn build(plugin_dir: &Path, out: &Path) -> Result<(PathBuf, PathBuf), BuildError> {
-    let sandbox = Sandbox::new(plugin_dir, DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
-        .map_err(BuildError::Sandbox)?;
-    let manifest = sandbox.manifest().map_err(BuildError::Sandbox)?;
-
-    for need in &manifest.needs {
-        if !SUPPORTED.contains(&need.as_str()) {
-            return Err(BuildError::NeedMissing(need.clone()));
-        }
-    }
-
-    let reasons: Vec<&str> = DenyReason::ALL
-        .iter()
-        .map(|reason| reason.as_str())
-        .collect();
-    let bin = daemon_bin()?;
-    let plugin = plugin_dir.to_string_lossy();
-    let config = WrapperConfig {
-        manifest: &manifest,
-        daemon_bin: &bin,
-        plugin_dir: &plugin,
-        protocol_version: PROTOCOL_VERSION,
-        deny_reasons: &reasons,
-        call_timeout_ms: CALL_TIMEOUT_MS,
-        start_timeout_ms: START_TIMEOUT_MS,
-    };
-    let script = tack_wrapper::render(&config).map_err(BuildError::Render)?;
-
-    let dest = out.join("opencode");
-    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
-    let index = dest.join("index.js");
-    let descriptor = dest.join("manifest.json");
-    std::fs::write(&index, script).map_err(BuildError::Io)?;
-
-    let pretty = serde_json::to_string_pretty(&manifest).map_err(|error| {
-        BuildError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-    })?;
-    std::fs::write(&descriptor, pretty).map_err(BuildError::Io)?;
-
-    Ok((index, descriptor))
-}
+const MAX_TIMEOUT_MS: u64 = 60_000;
 
 enum CliError {
     Usage(String),
@@ -110,11 +15,44 @@ fn print_version() {
     println!("tack {}", env!("CARGO_PKG_VERSION"));
 }
 
-fn parse_output(rest: &[String]) -> Result<&str, CliError> {
-    match rest {
-        [flag, value] if flag == "--out" => Ok(value.as_str()),
-        _ => Err(CliError::Usage("build needs --out <dist-dir>".into())),
+fn parse_timeout(flag: &str, value: &str) -> Result<u64, CliError> {
+    let timeout = value
+        .parse::<u64>()
+        .map_err(|_| CliError::Usage(format!("{flag} needs a non-negative number")))?;
+    if timeout > MAX_TIMEOUT_MS {
+        return Err(CliError::Usage(format!(
+            "{flag} must be at most {MAX_TIMEOUT_MS}"
+        )));
     }
+    Ok(timeout)
+}
+
+fn parse_build_args(rest: &[String]) -> Result<(&str, BuildOptions), CliError> {
+    let mut out = None;
+    let mut options = BuildOptions::default();
+    let mut index = 0;
+
+    while index < rest.len() {
+        let flag = rest[index].as_str();
+        let value = rest
+            .get(index + 1)
+            .ok_or_else(|| CliError::Usage(format!("{flag} needs a value")))?
+            .as_str();
+        match flag {
+            "--out" => out = Some(value),
+            "--call-timeout-ms" => {
+                options.call_timeout_ms = parse_timeout(flag, value)?;
+            }
+            "--start-timeout-ms" => {
+                options.start_timeout_ms = parse_timeout(flag, value)?;
+            }
+            _ => return Err(CliError::Usage(format!("unknown build option {flag}"))),
+        }
+        index += 2;
+    }
+
+    let out = out.ok_or_else(|| CliError::Usage("build needs --out <dist-dir>".into()))?;
+    Ok((out, options))
 }
 
 fn dispatch(args: &[String]) -> Result<(), CliError> {
@@ -122,9 +60,9 @@ fn dispatch(args: &[String]) -> Result<(), CliError> {
         [] => print_version(),
         [flag] if flag == "--version" => print_version(),
         [command, plugin_dir, rest @ ..] if command == "build" => {
-            let out = parse_output(rest)?;
+            let (out, options) = parse_build_args(rest)?;
             let (index, manifest) =
-                build(Path::new(plugin_dir), Path::new(out)).map_err(CliError::Build)?;
+                build(Path::new(plugin_dir), Path::new(out), options).map_err(CliError::Build)?;
             println!("{}", index.display());
             println!("{}", manifest.display());
         }
@@ -139,7 +77,10 @@ fn main() {
         match error {
             CliError::Usage(message) => {
                 eprintln!("tack: {message}");
-                eprintln!("usage: tack [--version | build <plugin-dir> --out <dist-dir>]");
+                eprintln!(
+                    "usage: tack [--version | build <plugin-dir> --out <dist-dir> \
+                     [--call-timeout-ms <n>] [--start-timeout-ms <n>]]"
+                );
                 std::process::exit(2);
             }
             CliError::Build(error) => {
