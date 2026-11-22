@@ -34,7 +34,7 @@ An abstraction is justified only when it removes concepts from the caller's ment
 - Explain and obtain approval before adding a production dependency.
 - Do not modify a quality gate, suppression, test, or health floor merely to make a change pass.
 
-For Workhorse TypeScript, use Bun for package management and scripts, Effect for effects, Vitest for tests, Oxlint with the vendored anti-slop and landmines rules, and Fallow for repository health.
+For tack Rust code, use Cargo with the pinned 1.100 toolchain. cargo fmt --all, cargo clippy --workspace --all-targets -- -D warnings and cargo test --workspace gate every change. JavaScript is generated output only; Node/Bun appear only to run OpenCode in end-to-end checks, never in the build toolchain.
 
 ## Work
 

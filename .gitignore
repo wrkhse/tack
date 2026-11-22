@@ -1,6 +1,7 @@
 .DS_Store
 /target/
 **/target/
+/dist
 node_modules/
 .env
 .env.*
