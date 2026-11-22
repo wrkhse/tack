@@ -52,8 +52,8 @@ cd tack
 cargo build --release
 ```
 
-The binary is at `target/release/tack`. A command to build a Luau plugin does
-not exist yet; that is part of slice 1.
+The binary is at `target/release/tack`. A command to build a Luau plugin is
+planned in slice 1.
 
 ## Roadmap
 
