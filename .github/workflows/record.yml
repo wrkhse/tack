@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to record, for example v0.1.0-rc.1"
+        description: "Release tag to record, for example v0.1.0-rc.2"
         required: true
         type: string
 
@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag || 'v0.1.0-rc.1' }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
       TARGET: x86_64-unknown-linux-gnu
       OPENCODE_VERSION: "2.3.0"
     steps:
