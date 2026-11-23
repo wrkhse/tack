@@ -131,10 +131,11 @@ pub enum DenyReason {
     Script,
     UnknownTool,
     DaemonError,
+    Aborted,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 9] = [
+    pub const ALL: [DenyReason; 10] = [
         DenyReason::SocketMissing,
         DenyReason::Timeout,
         DenyReason::SocketClosed,
@@ -144,6 +145,7 @@ impl DenyReason {
         DenyReason::Script,
         DenyReason::UnknownTool,
         DenyReason::DaemonError,
+        DenyReason::Aborted,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -157,6 +159,7 @@ impl DenyReason {
             DenyReason::Script => "script",
             DenyReason::UnknownTool => "unknown_tool",
             DenyReason::DaemonError => "daemon_error",
+            DenyReason::Aborted => "aborted",
         }
     }
 }
@@ -438,6 +441,7 @@ mod tests {
             (DenyReason::Script, "script"),
             (DenyReason::UnknownTool, "unknown_tool"),
             (DenyReason::DaemonError, "daemon_error"),
+            (DenyReason::Aborted, "aborted"),
         ] {
             assert_eq!(reason.as_str(), expected);
             assert_eq!(

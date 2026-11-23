@@ -180,7 +180,7 @@ async function loadPlugin(env, modulePath = wrapperPath) {
   );
 
   const fake = fakeContext();
-  const cleanup = plugin.setup(fake.ctx);
+  const cleanup = await plugin.setup(fake.ctx);
   assert.equal(typeof cleanup, "function", "setup must return a cleanup function");
   assert.equal(fake.hooks.size, 1, "one execute.before hook must be registered");
   assert.equal(fake.transforms.size, 1, "one tool transform must be registered");
@@ -554,6 +554,131 @@ async function rewriteMutates() {
   assert.equal(event.input.command, "git push --dry-run");
 }
 
+// OpenCode registers hooks and tools asynchronously. A tool call cannot be
+// delivered until setup() resolves, so setup() must wait for every
+// registration; cleanup must dispose the resolved objects, not their promises.
+async function setupAwaitsAsyncRegistrations() {
+  const dir = tempDir();
+
+  try {
+    applyEnv(baseEnv(dir));
+    for (const key of Object.keys(require.cache)) delete require.cache[key];
+    const plugin = require(wrapperPath);
+
+    let resolveHook;
+    const hookPromise = new Promise((resolve) => {
+      resolveHook = resolve;
+    });
+    let beforeRegistered = false;
+    let beforeCallback;
+    let hookDisposed = false;
+    let transformDisposed = false;
+
+    const hookRegistration = {
+      async dispose() {
+        hookDisposed = true;
+      },
+    };
+    const transformRegistration = {
+      async dispose() {
+        transformDisposed = true;
+      },
+    };
+
+    let settled = false;
+    const ctx = {
+      tool: {
+        hook(name, callback) {
+          assert.equal(name, "execute.before");
+          beforeCallback = callback;
+          // The registration becomes active only when this promise resolves.
+          return hookPromise.then((registration) => {
+            beforeRegistered = true;
+            return registration;
+          });
+        },
+        transform(callback) {
+          assert.equal(typeof callback, "function");
+          return Promise.resolve(transformRegistration);
+        },
+      },
+    };
+
+    const cleanupPromise = plugin.setup(ctx);
+    cleanupPromise.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(settled, false, "setup resolved before the registrations");
+    assert.equal(beforeRegistered, false, "the hook activated too early");
+
+    resolveHook(hookRegistration);
+    const cleanup = await cleanupPromise;
+
+    // setup() resolves only after the late hook registration, so no call can
+    // be delivered before execute.before is active.
+    assert.equal(beforeRegistered, true, "hook must be active before setup resolves");
+    assert.equal(typeof beforeCallback, "function");
+
+    await cleanup();
+    assert.equal(hookDisposed, true, "cleanup disposes the resolved hook");
+    assert.equal(transformDisposed, true, "cleanup disposes the resolved transform");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// An AbortController must cancel the in-flight daemon request and settle the
+// tool call with the named "aborted" reason instead of waiting for the timeout.
+async function toolExecuteHonorsAbortSignal() {
+  const dir = tempDir();
+  let server;
+
+  try {
+    const env = baseEnv(dir);
+    const loaded = await loadPlugin(env);
+    const tool = loaded.added[0];
+
+    // Accept the connection but never reply: only the abort settles this call.
+    server = await listen(env.TACK_SOCKET, () => {});
+
+    const controller = new AbortController();
+    const pending = tool.execute({ verbose: true }, {
+      signal: controller.signal,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+
+    let error;
+    try {
+      await pending;
+    } catch (thrown) {
+      error = thrown;
+    }
+    assert.ok(error instanceof Error, "an aborted execute must reject");
+    assert.equal(error.message, "tack: aborted", "abort must deny by name");
+
+    // A signal already aborted at call time denies before any connect.
+    const pre = new AbortController();
+    pre.abort();
+    let preError;
+    try {
+      await tool.execute({ verbose: true }, { signal: pre.signal });
+    } catch (thrown) {
+      preError = thrown;
+    }
+    assert.ok(preError instanceof Error, "a pre-aborted execute must reject");
+    assert.equal(preError.message, "tack: aborted");
+  } finally {
+    if (server) await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function toolForwarding() {
   const dir = tempDir();
   const marker = path.join(dir, "daemons.log");
@@ -898,10 +1023,19 @@ async function rebindWithMatchingIdentity() {
   }
 }
 
+// The matching-identity case with no daemon: a stale socket file whose
+// identity never changes, and a daemon that exits without binding. Readiness
+// cannot see a fresh bind, so the one real connect finds no listener and the
+// ECONNREFUSED fails closed as the pinned "socket_closed" name.
 async function rebindWithNoDaemonFailsClosed() {
   const dir = tempDir();
+  const socket = path.join(dir, "tack.sock");
 
   try {
+    const stale = writeScript(dir, "stale.js", STALE_SOCKET);
+    execFileSync(process.execPath, [stale, socket], { stdio: "ignore" });
+    assert.ok(existsSync(socket), "stale socket was not created");
+
     globalThis.__tackFs = fixedIdentityFs();
     const exiting = writeScript(dir, "exiting-daemon.js", EXITING_DAEMON);
     const env = baseEnv(dir, { TACK_DAEMON_BIN: exiting });
@@ -909,9 +1043,31 @@ async function rebindWithNoDaemonFailsClosed() {
     const target = raceWrapper(dir, "matching-identity-closed.js");
     const before = await loadBefore(env, target);
 
-    await expectDeny(before, "socket_missing");
+    await expectDeny(before, "socket_closed");
+    assert.ok(existsSync(socket), "no daemon replaced the stale socket");
   } finally {
     delete globalThis.__tackFs;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A leftover socket file that refuses connections is the named
+// "socket_closed" reason: the path exists but nothing accepts connections.
+// ENOENT (no path at all) keeps the distinct "socket_missing" name pinned by
+// the "socket_missing fails closed" check. The two names are not interchangeable.
+async function staleSocketFileDeniesSocketClosed() {
+  const dir = tempDir();
+  const socket = path.join(dir, "tack.sock");
+
+  try {
+    const stale = writeScript(dir, "stale.js", STALE_SOCKET);
+    execFileSync(process.execPath, [stale, socket], { stdio: "ignore" });
+    assert.ok(existsSync(socket), "stale socket was not created");
+
+    // TACK_NO_START=1 keeps ECONNREFUSED from triggering a daemon start.
+    const before = await loadBefore(baseEnv(dir));
+    await expectDeny(before, "socket_closed");
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -989,6 +1145,18 @@ await check(
 await check(
   "a rebind with matching identity fails closed when no daemon appears",
   rebindWithNoDaemonFailsClosed,
+);
+await check(
+  "a stale socket file with no daemon denies socket_closed",
+  staleSocketFileDeniesSocketClosed,
+);
+await check(
+  "setup awaits async registrations and disposes them",
+  setupAwaitsAsyncRegistrations,
+);
+await check(
+  "tool execute honors an abort signal",
+  toolExecuteHonorsAbortSignal,
 );
 
 if (buildDir) rmSync(buildDir, { recursive: true, force: true });

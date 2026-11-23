@@ -8,7 +8,7 @@ const { spawn } = require("node:child_process");
 const MANIFEST = {"name":"safe-push","needs":[],"tools":[{"name":"guard_status","description":"Reports whether the tack daemon is running","input":{}}]};
 const DAEMON_BIN = "tack-daemon";
 const PLUGIN_DIR = "/plugins/tack";
-const DENY_REASONS = ["socket_missing","timeout","socket_closed","malformed_reply","protocol_version","limit","script","unknown_tool","daemon_error"];
+const DENY_REASONS = ["socket_missing","timeout","socket_closed","malformed_reply","protocol_version","limit","script","unknown_tool","daemon_error","aborted"];
 const CALL_TIMEOUT_MS = 2000;
 const START_TIMEOUT_MS = 3000;
 const PROTOCOL_VERSION = 1;
@@ -94,8 +94,10 @@ function startDaemon() {
         resolve(ok);
       };
 
-      // A stale socket file can survive a dead daemon. Record its identity so
-      // readiness means a fresh bind, not just a path that already exists.
+      // A stale socket file can survive a dead daemon. dev:ino:mtimeMs sees
+      // a rebind only when the inode or mtime changes; dev cannot distinguish
+      // an inode-reusing rebind. Readiness is only a hint: a real connect is
+      // the authority on reachability.
       const stale = socketIdentity();
 
       const ready = () => {
@@ -133,14 +135,12 @@ function startDaemon() {
   return starting;
 }
 
-function forward(request) {
+function forward(request, signal) {
   return new Promise((resolve) => {
     let settled = false;
     let active;
     let timer;
     let waitingForStart = false;
-    let startedIdentity;
-    let restartedOnce = false;
 
     const stopTimer = () => {
       if (timer === undefined) return;
@@ -152,30 +152,18 @@ function forward(request) {
       if (settled) return;
       settled = true;
       stopTimer();
+      if (signal) signal.removeEventListener("abort", onAbort);
       if (active && !active.destroyed) active.destroy();
       resolve(result);
     };
 
     const deny = (name) => finish({ ok: false, reason: denyName(name) });
 
+    const onAbort = () => deny("aborted");
+
     const connect = () => {
       stopTimer();
       if (settled) return;
-
-      // A fresh socket can be unlinked and rebound after the start attempt
-      // resolved. Re-check here, not only in the poll: another change is a
-      // stale socket, so restart once at most.
-      if (startedIdentity !== undefined && !restartedOnce &&
-          socketIdentity() !== startedIdentity) {
-        restartedOnce = true;
-        startedIdentity = undefined;
-        startDaemon().then(() => {
-          if (settled) return;
-          startedIdentity = socketIdentity();
-          connect();
-        });
-        return;
-      }
 
       const sock = net.connect(SOCKET);
       let abandoned = false;
@@ -231,19 +219,32 @@ function forward(request) {
           waitingForStart = true;
           abandoned = true;
           stopTimer();
-          startDaemon().then(() => {
-            if (settled) return;
-            // Readiness can lag a competing daemon's bind. A real connect is
-            // the only proof of reachability; waitingForStart bounds this to
-            // one retry, and this connect has not written a request.
-            startedIdentity = socketIdentity();
-            connect();
-          });
+          startDaemon()
+            .then(() => {
+              if (settled) return;
+              // Readiness can lag a competing daemon's bind. A real connect
+              // is the only proof of reachability; waitingForStart bounds
+              // this to one retry, and this connect wrote no request.
+              try {
+                connect();
+              } catch {
+                deny("daemon_error");
+              }
+            })
+            .catch(() => deny("daemon_error"));
           return;
         }
         deny(code === "ENOENT" ? "socket_missing" : "socket_closed");
       });
     };
+
+    if (signal) {
+      if (signal.aborted) {
+        deny("aborted");
+        return;
+      }
+      signal.addEventListener("abort", onAbort);
+    }
 
     connect();
   });
@@ -290,25 +291,25 @@ async function before(event) {
   }
 }
 
-function setup(ctx) {
-  const registrations = [ctx.tool.hook("execute.before", before)];
+async function setup(ctx) {
+  const pending = [ctx.tool.hook("execute.before", before)];
 
   for (const definition of MANIFEST.tools) {
-    registrations.push(
+    pending.push(
       ctx.tool.transform((editor) =>
         editor.add({
           name: definition.name,
           description: definition.description,
           input: definition.input,
           options: { codemode: false },
-          async execute(args) {
+          async execute(args, context) {
             const result = await forward({
               id: nextId(),
               kind: "tool",
               name: definition.name,
               input: args,
               version: PROTOCOL_VERSION,
-            });
+            }, context && context.signal);
             if (!result.ok) throw new Error("tack: " + result.reason);
             if (result.reply.kind !== "tool") {
               throw new Error("tack: " + denyName("malformed_reply"));
@@ -324,6 +325,8 @@ function setup(ctx) {
       ),
     );
   }
+
+  const registrations = await Promise.all(pending);
 
   return async () => {
     for (const registration of registrations) {
