@@ -46,7 +46,7 @@ jobs:
           set -euo pipefail
 
           sudo apt-get update
-          sudo apt-get -y install --no-install-recommends tmux ffmpeg
+          sudo apt-get -y install --no-install-recommends ffmpeg
 
           cd "$RUNNER_TEMP"
           curl -fsSLO \
@@ -112,42 +112,23 @@ jobs:
           export TACK_DAEMON_BIN="$RUNNER_TEMP/tack-bin/tack-daemon"
           export OPENCODE_BIN="$RUNNER_TEMP/opencode-bin/opencode"
 
-          node test/e2e/record.mjs &
-          helper=$!
-          ready=0
-          for _ in $(seq 1 150); do
-            if [ -f session-ready ]; then ready=1; break; fi
-            kill -0 "$helper" 2>/dev/null || break
-            sleep 0.1
-          done
-          if [ "$ready" -ne 1 ]; then
-            echo "session-ready was not written" >&2
-            exit 1
-          fi
-
           termctrl start rec --cols 160 --rows 42 --record run.termctrl -- \
-            tmux attach-session -t tack-rec
-          termctrl wait rec "OpenCode session" --timeout 20000
+            node test/e2e/record.mjs
+          termctrl wait rec "OpenCode session" --timeout 30000
           termctrl mark rec ready
 
           cmd="opencode run --standalone --format json -m fake/scripted"
           cmd="$cmd 'push my branch'"
           termctrl send rec "text:$cmd" enter
-          termctrl wait rec "deny" --timeout 30000
+          termctrl wait rec "push blocked" --timeout 30000
           termctrl mark rec denied
           termctrl wait rec "guard_status" --timeout 30000
           termctrl mark rec tool
 
           termctrl send rec "text:git log origin/main" enter
-          termctrl wait rec "initial" --timeout 20000
+          termctrl wait rec "initial" --timeout 30000
           termctrl mark rec proof
           termctrl stop rec
-
-          for _ in $(seq 1 150); do
-            kill -0 "$helper" 2>/dev/null || break
-            sleep 0.1
-          done
-          kill "$helper" 2>/dev/null || true
 
       - name: Render the GIF
         run: |

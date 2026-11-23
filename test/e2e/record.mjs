@@ -1,7 +1,6 @@
-// Prepares a scratch session for the Terminal Control recording: real git
-// repo, throwaway HOME, fake model, rc-built wrapper, two tmux panes, and a
-// bounded verdict watcher. The driver types the real commands; this script
-// renders no panes and prints no digest.
+// Prepares a scratch session and renders it in two NORMAL-SCREEN panes.
+// Terminal Control records and drives this process directly; commands typed
+// into stdin are executed with the prepared environment and streamed raw.
 
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -26,17 +25,46 @@ const fakeModel = path.join(here, "fake-model.mjs");
 const gitShim = path.join(here, "git-shim");
 const pluginSource = path.join(repoRoot, "fixtures", "safe-push");
 const verdictPath = path.join(repoRoot, "verdict.txt");
-const readyPath = path.join(repoRoot, "session-ready");
 
 const tackCli = process.env.TACK_CLI || "tack";
 
-const SESSION = "tack-rec";
+const COLS = 160;
+const ROWS = 38;
+const PANE_W = 76;
+const LEFT_COL = 1;
+const SEP_COL = 78;
+const RIGHT_COL = 80;
+const VIEW_ROWS = ROWS - 4;
+const REDRAW_MS = 200;
+const MAX_LINES = 200;
+const WATCH_MS = 250;
+const SESSION_MS = 30_000;
+const HOLD_AFTER_PROOF_MS = 6_000;
+
 const BUILD_TIMEOUT_MS = 4_000;
 const MODEL_TIMEOUT_MS = 4_000;
-const WATCH_MS = 250;
-const HOLD_MS = 22_000;
 
 const children = new Set();
+const leftLines = [];
+const rightLines = [];
+
+let sessionEnv;
+let projectDir;
+let daemonLog;
+let recorder;
+let baseDir;
+let createdBase;
+let lastCommand = "";
+let inputBuffer = "";
+let redrawTimer;
+let watchTimer;
+let holdTimer;
+let finished = false;
+let resolveDone;
+
+const done = new Promise((resolve) => {
+  resolveDone = resolve;
+});
 
 function track(child) {
   children.add(child);
@@ -188,38 +216,6 @@ function startModel() {
   });
 }
 
-function shellQuote(value) {
-  return "'" + String(value).replace(/'/g, "'\\''") + "'";
-}
-
-function paneShell(env, dir) {
-  const exported = Object.entries(env)
-    .map(([key, value]) => "export " + key + "=" + shellQuote(value))
-    .join("; ");
-  return "cd " + shellQuote(dir) + "; " + exported +
-    "; exec bash --noprofile --norc -i";
-}
-
-function tmux(args, env) {
-  spawnSync("tmux", args, { stdio: "ignore", env });
-}
-
-function launchTmux(env, dir, daemonLog) {
-  const runEnv = { ...process.env, ...env };
-  tmux(["new-session", "-d", "-s", SESSION, paneShell(env, dir)], runEnv);
-  tmux(["split-window", "-h", "-t", SESSION + ":0",
-    "exec tail -f " + shellQuote(daemonLog)], runEnv);
-  tmux(["set-option", "-g", "status", "off"], runEnv);
-  tmux(["set-option", "-g", "pane-border-status", "top"], runEnv);
-  tmux(["set-option", "-g", "pane-border-format", "#{pane_title}"], runEnv);
-  tmux(["select-pane", "-t", SESSION + ":0.0", "-T",
-    "OpenCode session"], runEnv);
-  tmux(["select-pane", "-t", SESSION + ":0.1", "-T", "daemon.log"], runEnv);
-  tmux(["select-pane", "-t", SESSION + ":0.0"], runEnv);
-
-  writeFileSync(readyPath, "ready\n");
-}
-
 function judgement(daemonText, recorderText) {
   const denied = daemonText.includes("hook toolBefore deny");
   const guarded = daemonText.includes("tool guard_status ok");
@@ -235,23 +231,135 @@ function judgement(daemonText, recorderText) {
   };
 }
 
+function pushWrapped(buffer, text) {
+  const clean = String(text).replace(/\r/g, "").replace(/\t/g, "  ");
+  for (let i = 0; i < clean.length; i += PANE_W) {
+    buffer.push(clean.slice(i, i + PANE_W));
+    if (buffer.length > MAX_LINES) buffer.shift();
+  }
+}
+
+function addLines(stream, handle) {
+  let buffer = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (text) => {
+    buffer += text;
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+    for (const line of lines) handle(line);
+  });
+  return () => {
+    if (buffer.length > 0) handle(buffer);
+  };
+}
+
+function clip(text) {
+  const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
+  return clean.length > PANE_W ? clean.slice(0, PANE_W) : clean.padEnd(PANE_W);
+}
+
+function at(row, col, text) {
+  return "\x1b[" + row + ";" + col + "H" + text;
+}
+
+function render() {
+  const daemonText = readOptional(daemonLog);
+  const recorderText = readOptional(recorder);
+  const denied = daemonText.includes("hook toolBefore deny");
+  const guarded = daemonText.includes("tool guard_status ok");
+  const noPush = !recorderText.split("\n")
+    .some((line) => line.startsWith("push"));
+
+  const first = denied ? "[1] git push blocked" : "[1] push pending";
+  const second = guarded ? "[2] guard_status ran" : "[2] guard pending";
+  const third = noPush ? "[3] no git push" : "[3] PUSH EXECUTED";
+  const rule = "-".repeat(PANE_W);
+  const left = leftLines.slice(-VIEW_ROWS);
+  const right = rightLines.slice(-VIEW_ROWS);
+  const out = ["\x1b[H\x1b[2J"];
+
+  out.push(at(1, 1, (first + "    " + second + "    " + third)
+    .slice(0, COLS)));
+  out.push(at(2, LEFT_COL, clip("OpenCode session")));
+  out.push(at(2, SEP_COL, "|"));
+  out.push(at(2, RIGHT_COL, clip("daemon.log")));
+  out.push(at(3, LEFT_COL, ("> " + lastCommand).slice(0, PANE_W)));
+  out.push(at(4, LEFT_COL, rule));
+  out.push(at(4, SEP_COL, "|"));
+  out.push(at(4, RIGHT_COL, rule));
+
+  for (let i = 0; i < VIEW_ROWS; i += 1) {
+    const row = 5 + i;
+    out.push(at(row, LEFT_COL, clip(left[i] ?? "")));
+    out.push(at(row, SEP_COL, "|"));
+    out.push(at(row, RIGHT_COL, clip(right[i] ?? "")));
+  }
+
+  process.stdout.write(out.join(""));
+}
+
+function finish() {
+  if (finished) return;
+  finished = true;
+  clearInterval(redrawTimer);
+  clearInterval(watchTimer);
+  clearTimeout(holdTimer);
+
+  const result = judgement(readOptional(daemonLog), readOptional(recorder));
+  writeFileSync(verdictPath, result.lines.join("\n") + "\n");
+  process.exitCode = result.ok ? 0 : 1;
+
+  killChildren();
+  if (createdBase) rmSync(baseDir, { recursive: true, force: true });
+  resolveDone();
+}
+
+function runCommand(line) {
+  const child = track(spawn("sh", ["-c", line], {
+    cwd: projectDir,
+    env: sessionEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  }));
+  const collect = (text) => pushWrapped(leftLines, text);
+  addLines(child.stdout, collect);
+  addLines(child.stderr, collect);
+
+  if (/git log|recorder/.test(line)) {
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(finish, HOLD_AFTER_PROOF_MS);
+  }
+}
+
+function onInput(chunk) {
+  inputBuffer += String(chunk).replace(/\r/g, "\n");
+  const lines = inputBuffer.split("\n");
+  inputBuffer = lines.pop();
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    lastCommand = line;
+    runCommand(line);
+  }
+}
+
 async function main() {
-  const base = process.env.TACK_E2E_DIR
+  baseDir = process.env.TACK_E2E_DIR
     ? path.resolve(process.env.TACK_E2E_DIR)
     : mkdtempSync(path.join(tmpdir(), "tack-rec-"));
-  const created = !process.env.TACK_E2E_DIR;
+  createdBase = !process.env.TACK_E2E_DIR;
 
-  const home = path.join(base, "home");
-  const configHome = path.join(base, "xdg", "config");
-  const stateDir = path.join(base, "xdg", "state");
-  const dataHome = path.join(base, "xdg", "data");
-  const cacheHome = path.join(base, "xdg", "cache");
-  const tmpHome = path.join(base, "tmp");
-  const binDir = path.join(base, "bin");
-  const projectDir = path.join(base, "project");
-  const dist = path.join(base, "dist");
-  const recorder = path.join(projectDir, "recorder.log");
-  const daemonLog = path.join(stateDir, "daemon.log");
+  const home = path.join(baseDir, "home");
+  const configHome = path.join(baseDir, "xdg", "config");
+  const stateDir = path.join(baseDir, "xdg", "state");
+  const dataHome = path.join(baseDir, "xdg", "data");
+  const cacheHome = path.join(baseDir, "xdg", "cache");
+  const tmpHome = path.join(baseDir, "tmp");
+  const binDir = path.join(baseDir, "bin");
+  projectDir = path.join(baseDir, "project");
+  const dist = path.join(baseDir, "dist");
+  recorder = path.join(projectDir, "recorder.log");
+  daemonLog = path.join(stateDir, "daemon.log");
 
   for (const dir of [
     home, configHome, stateDir, dataHome, cacheHome, tmpHome, binDir,
@@ -259,8 +367,6 @@ async function main() {
   ]) {
     mkdirSync(dir, { recursive: true });
   }
-
-  let watchTimer;
 
   try {
     initRepo(projectDir);
@@ -280,7 +386,7 @@ async function main() {
     writeFileSync(daemonLog, "");
     writeFileSync(recorder, "");
 
-    const env = {
+    sessionEnv = {
       PATH: binDir + path.delimiter + (process.env.PATH ?? ""),
       HOME: home,
       TMPDIR: tmpHome,
@@ -292,13 +398,19 @@ async function main() {
       TACK_DAEMON_BIN: process.env.TACK_DAEMON_BIN || "tack-daemon",
       TACK_RECORDER: recorder,
       TACK_REAL_GIT: findExecutable("git") ?? "",
-      OPENCODE_DB: path.join(base, "opencode.sqlite"),
+      OPENCODE_DB: path.join(baseDir, "opencode.sqlite"),
       OPENCODE_DISABLE_MODELS_FETCH: "1",
       OPENCODE_DISABLE_CLAUDE_CODE: "1",
       OPENCODE_DISABLE_FILEWATCHER: "1",
     };
 
-    launchTmux(env, projectDir, daemonLog);
+    const tail = track(spawn("tail", ["-f", daemonLog], {
+      stdio: ["ignore", "pipe", "pipe"],
+    }));
+    addLines(tail.stdout, (line) => pushWrapped(rightLines, line));
+
+    render();
+    redrawTimer = setInterval(render, REDRAW_MS);
     watchTimer = setInterval(() => {
       const result = judgement(
         readOptional(daemonLog),
@@ -306,18 +418,16 @@ async function main() {
       );
       writeFileSync(verdictPath, result.lines.join("\n") + "\n");
     }, WATCH_MS);
+    holdTimer = setTimeout(finish, SESSION_MS);
 
-    await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
-  } finally {
-    clearInterval(watchTimer);
-    const result = judgement(readOptional(daemonLog), readOptional(recorder));
-    writeFileSync(verdictPath, result.lines.join("\n") + "\n");
-    process.exitCode = result.ok ? 0 : 1;
+    process.stdin.setEncoding("utf8");
+    process.stdin.resume();
+    process.stdin.on("data", onInput);
+    process.stdin.on("end", finish);
 
-    spawnSync("tmux", ["kill-session", "-t", SESSION], { stdio: "ignore" });
-    killChildren();
-    rmSync(readyPath, { force: true });
-    if (created) rmSync(base, { recursive: true, force: true });
+    await done;
+  } catch {
+    finish();
   }
 }
 
