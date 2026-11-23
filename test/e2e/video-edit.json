@@ -2,22 +2,10 @@
   "clips": [
     {
       "from": "ready",
-      "to": "denied",
-      "caption": "1. OpenCode session reads for the push",
-      "speed": 1.5
-    },
-    {
-      "from": "denied",
-      "to": "tool",
-      "caption": "2. Push denied, guard_status ran",
-      "speed": 1.5
-    },
-    {
-      "from": "tool",
       "to": "proof",
-      "caption": "3. Nothing was pushed",
+      "caption": "tack slice 1: git push denied, guard_status ran, nothing pushed",
       "speed": 1,
-      "hold_ms": 1500
+      "hold_ms": 2000
     }
   ]
 }
