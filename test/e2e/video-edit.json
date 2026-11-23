@@ -1,0 +1,23 @@
+{
+  "clips": [
+    {
+      "from": "ready",
+      "to": "denied",
+      "caption": "1. git push is denied",
+      "speed": 0.5
+    },
+    {
+      "from": "denied",
+      "to": "tool",
+      "caption": "2. guard_status runs",
+      "speed": 0.5
+    },
+    {
+      "from": "tool",
+      "to": "proof",
+      "caption": "3. nothing reached origin",
+      "speed": 0.75,
+      "hold_ms": 2000
+    }
+  ]
+}
