@@ -46,6 +46,8 @@ jobs:
 
           sudo apt-get update
           sudo apt-get -y install --no-install-recommends ffmpeg
+          sudo apt-get install -y fonts-dejavu-core fontconfig
+          fc-cache -f
 
           cd "$RUNNER_TEMP"
           curl -fsSLO \
@@ -60,6 +62,21 @@ jobs:
 
           cargo install --locked --version 1.2.1 terminal-control
           termctrl --version
+
+          echo "--- fc-list ---" > termctrl-font-diagnostics.txt
+          fc-list | head -20 >> termctrl-font-diagnostics.txt 2>&1
+          echo "--- save help ---" >> termctrl-font-diagnostics.txt
+          termctrl save --help >> termctrl-font-diagnostics.txt 2>&1
+          echo "--- video help ---" >> termctrl-font-diagnostics.txt
+          termctrl video --help >> termctrl-font-diagnostics.txt 2>&1
+
+      - name: Font probe
+        run: |
+          set -euo pipefail
+
+          printf 'FONT_PROBE_VISIBLE\n' | \
+            termctrl save --pipe --format png --cols 100 --rows 10 \
+              --font-family 'DejaVu Sans Mono' --out fontprobe -- cat
 
       - name: Install the rc binaries
         env:
@@ -117,23 +134,27 @@ jobs:
             node test/e2e/record.mjs
           termctrl wait rec "OpenCode session" --timeout 30000
           termctrl mark rec ready
-          termctrl save rec --format png --out frames/01-ready
+          termctrl save rec --format png --font-family 'DejaVu Sans Mono' \
+            --out frames/01-ready
 
           cmd="opencode run --standalone --format json -m fake/scripted"
           cmd="$cmd 'push my branch'"
           termctrl send rec "text:$cmd" enter
           termctrl wait rec "push blocked" --timeout 30000
           termctrl mark rec denied
-          termctrl save rec --format png --out frames/02-denied
+          termctrl save rec --format png --font-family 'DejaVu Sans Mono' \
+            --out frames/02-denied
           termctrl wait rec "guard_status" --timeout 30000
           termctrl mark rec tool
-          termctrl save rec --format png --out frames/03-tool
+          termctrl save rec --format png --font-family 'DejaVu Sans Mono' \
+            --out frames/03-tool
 
           proof="git log origin/main --oneline; echo PROOF_NO_PUSH"
           termctrl send rec "text:$proof" enter
           termctrl wait rec "PROOF_NO_PUSH" --timeout 30000
           termctrl mark rec proof
-          termctrl save rec --format png --out frames/04-proof
+          termctrl save rec --format png --font-family 'DejaVu Sans Mono' \
+            --out frames/04-proof
           termctrl stop rec
 
       - name: Render the GIF
@@ -206,6 +227,8 @@ jobs:
           path: |
             run.termctrl
             recording-diagnostics.txt
+            termctrl-font-diagnostics.txt
+            fontprobe.png
             verdict.txt
             demo.gif
             frames/*.png
