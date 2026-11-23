@@ -1,0 +1,103 @@
+name: record
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to record, for example v0.1.0-rc.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: record-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TARGET: x86_64-unknown-linux-gnu
+      OPENCODE_VERSION: "2.3.0"
+      VHS_IMAGE: ghcr.io/charmbracelet/vhs:v0.12.1@sha256:ea49a6a1c529be83153e88321892b5585964418f0b9055e8c1e0d732194234a3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+
+      - name: Stage Node for the VHS container
+        run: |
+          set -euo pipefail
+
+          prefix="$(dirname "$(dirname "$(command -v node)")")"
+          cp -a "$prefix" "$RUNNER_TEMP/node"
+          test -x "$RUNNER_TEMP/node/bin/node"
+          "$RUNNER_TEMP/node/bin/node" --version
+
+      - name: Install the rc binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          cd "$RUNNER_TEMP"
+          mkdir -p tack-release tack-bin
+          cd tack-release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "tack-$TAG-$TARGET.tar.gz"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "SHA256SUMS"
+          grep -F "tack-$TAG-$TARGET.tar.gz" SHA256SUMS | sha256sum -c -
+          tar -xzf "tack-$TAG-$TARGET.tar.gz" -C "$RUNNER_TEMP/tack-bin"
+
+          echo "$RUNNER_TEMP/tack-bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/tack-bin:$PATH"
+          tack --version
+          tack --version | grep -q '0.1.0-rc.1'
+
+      - name: Install OpenCode
+        run: |
+          set -euo pipefail
+
+          bin="$RUNNER_TEMP/opencode-bin"
+          mkdir -p "$bin"
+          cd "$bin"
+          base="https://github.com/anomalyco/opencode/releases/download"
+          curl -fsSLO "$base/v$OPENCODE_VERSION/opencode-linux-x64.tar.gz"
+          sha='fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b'
+          echo "$sha  opencode-linux-x64.tar.gz" | sha256sum -c -
+          tar -xzf opencode-linux-x64.tar.gz
+          chmod +x opencode
+
+          echo "$bin" >> "$GITHUB_PATH"
+          export PATH="$bin:$PATH"
+          opencode --version
+
+      - name: Record the session
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$PWD:/vhs" \
+            -v "$RUNNER_TEMP:/bins" \
+            -v "$RUNNER_TEMP/node:/node" \
+            -w /vhs \
+            -e PATH=/node/bin:/usr/bin:/bin \
+            -e TACK_CLI=/bins/tack-bin/tack \
+            -e TACK_DAEMON_BIN=/bins/tack-bin/tack-daemon \
+            -e OPENCODE_BIN=/bins/opencode-bin/opencode \
+            "$VHS_IMAGE" test/e2e/record.tape
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: slice-1-recording
+          path: demo.gif

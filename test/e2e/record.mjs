@@ -1,0 +1,449 @@
+// Records the slice 1 flow in two panes: OpenCode session and daemon.log.
+// CI / disposable container only: throwaway HOME, local fake provider, no key.
+
+import { spawn, spawnSync } from "node:child_process";
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = fileURLToPath(new URL("./", import.meta.url));
+const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+
+const fakeModel = path.join(here, "fake-model.mjs");
+const gitShim = path.join(here, "git-shim");
+const pluginSource = path.join(repoRoot, "fixtures", "safe-push");
+
+const openCodeBin = process.env.OPENCODE_BIN || "opencode";
+const tackCli = process.env.TACK_CLI || "tack";
+const daemonBin = process.env.TACK_DAEMON_BIN || "tack-daemon";
+
+const COLS = 120;
+const ROWS = 28;
+const PANE_W = 58;
+const LEFT_COL = 1;
+const SEP_COL = 60;
+const RIGHT_COL = 62;
+const VIEW_ROWS = ROWS - 3;
+const REDRAW_MS = 200;
+const MAX_FRAMES = 90;
+const MAX_BUFFER = 120;
+
+const BUILD_TIMEOUT_MS = 4_000;
+const MODEL_TIMEOUT_MS = 4_000;
+const RUN_TIMEOUT_MS = 9_000;
+const WALL_TIMEOUT_MS = 12_000;
+
+const children = new Set();
+const codeBuffer = [];
+const daemonBuffer = [];
+let markerPush = false;
+let markerGuard = false;
+let recorderLine = "[3] recorder pending";
+let frames = 0;
+let redrawTimer;
+
+function track(child) {
+  children.add(child);
+  child.once("exit", () => children.delete(child));
+  return child;
+}
+
+function killChildren() {
+  for (const child of children) {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+}
+
+function clip(text, width) {
+  const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
+  return clean.length > width ? clean.slice(0, width) : clean.padEnd(width);
+}
+
+function pushLine(buffer, line) {
+  buffer.push(line);
+  if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
+}
+
+function at(row, col, text) {
+  return "\x1b[" + row + ";" + col + "H" + text;
+}
+
+function render() {
+  if (frames >= MAX_FRAMES) return;
+  frames += 1;
+
+  const first = markerPush ? "[1] git push blocked" : "[1] push pending";
+  const second = markerGuard ? "[2] guard_status ran" : "[2] guard pending";
+  const rule = "-".repeat(PANE_W);
+  const left = codeBuffer.slice(-VIEW_ROWS);
+  const right = daemonBuffer.slice(-VIEW_ROWS);
+  const out = ["\x1b[H\x1b[2J"];
+
+  out.push(at(1, 1, clip(first + "    " + second + "    " + recorderLine, COLS)));
+  out.push(at(2, LEFT_COL, clip("OpenCode session", PANE_W)));
+  out.push(at(2, SEP_COL, "|"));
+  out.push(at(2, RIGHT_COL, clip("daemon.log", PANE_W)));
+  out.push(at(3, LEFT_COL, rule));
+  out.push(at(3, SEP_COL, "|"));
+  out.push(at(3, RIGHT_COL, rule));
+
+  for (let i = 0; i < VIEW_ROWS; i += 1) {
+    const row = 4 + i;
+    out.push(at(row, LEFT_COL, clip(left[i] ?? "", PANE_W)));
+    out.push(at(row, SEP_COL, "|"));
+    out.push(at(row, RIGHT_COL, clip(right[i] ?? "", PANE_W)));
+  }
+
+  process.stdout.write(out.join(""));
+}
+
+function startRedraw() {
+  process.stdout.write("\x1b[?25l");
+  render();
+  redrawTimer = setInterval(render, REDRAW_MS);
+}
+
+function stopRedraw() {
+  clearInterval(redrawTimer);
+  process.stdout.write("\x1b[?25h" + at(ROWS + 1, 1, ""));
+}
+
+function handleCode(line) {
+  if (line.trim().length === 0) return;
+  pushLine(codeBuffer, line);
+  if (line.includes("push blocked")) markerPush = true;
+  if (line.includes("guard_status: daemon ok")) markerGuard = true;
+}
+
+function handleDaemon(line) {
+  if (line.trim().length === 0) return;
+  pushLine(daemonBuffer, line);
+  if (line.includes("hook toolBefore deny push blocked")) markerPush = true;
+  if (line.includes("tool guard_status ok")) markerGuard = true;
+}
+
+function addLines(stream, handle) {
+  let buffer = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (text) => {
+    buffer += text;
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+    for (const line of lines) handle(line);
+  });
+  return () => {
+    if (buffer.length > 0) handle(buffer);
+  };
+}
+
+function readOptional(file) {
+  try {
+    return readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function findExecutable(name) {
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function initRepo(dir) {
+  const git = findExecutable("git");
+  if (git) {
+    const result = spawnSync(git, ["init", "-q"], { cwd: dir });
+    if (result.status === 0) return;
+  }
+  // The VHS image has no git; a minimal on-disk skeleton is enough here.
+  const gitDir = path.join(dir, ".git");
+  mkdirSync(path.join(gitDir, "objects"), { recursive: true });
+  mkdirSync(path.join(gitDir, "refs"), { recursive: true });
+  writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(path.join(gitDir, "config"), "[core]\n\tbare = false\n");
+}
+
+function writeConfig(configHome, pluginDir, baseUrl) {
+  const config = {
+    $schema: "https://opencode.ai/config.json",
+    model: "fake/scripted",
+    update: "disable",
+    providers: {
+      fake: {
+        name: "Fake",
+        package: "@opencode/ai/providers/openai-compatible",
+        settings: { baseURL: baseUrl, apiKey: "test" },
+        models: {
+          scripted: {
+            capabilities: { tools: true, input: ["text"], output: ["text"] },
+            limit: { context: 32768, output: 4096 },
+          },
+        },
+      },
+    },
+    permissions: [{ action: "shell", resource: "*", effect: "allow" }],
+    compaction: { auto: false },
+    plugins: [pluginDir],
+  };
+  const target = path.join(configHome, "opencode", "opencode.json");
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, JSON.stringify(config, null, 2) + "\n");
+}
+
+function buildPlugin(dist) {
+  return new Promise((resolve, reject) => {
+    const child = track(spawn(tackCli, ["build", pluginSource, "--out", dist], {
+      cwd: repoRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+    }));
+    let error = "";
+    const flush = addLines(child.stdout, (line) => pushLine(codeBuffer, line));
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (text) => {
+      error += text;
+    });
+    const timer = setTimeout(() => child.kill("SIGKILL"), BUILD_TIMEOUT_MS);
+    child.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      flush();
+      if (code === 0) resolve();
+      else reject(new Error("tack build failed: " + error.trim()));
+    });
+  });
+}
+
+function startModel() {
+  return new Promise((resolve, reject) => {
+    const child = track(spawn(process.execPath, [fakeModel], {
+      stdio: ["ignore", "pipe", "pipe"],
+    }));
+    let buffer = "";
+    let error = "";
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new Error("fake model did not report a port"));
+    }, MODEL_TIMEOUT_MS);
+
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (text) => {
+      buffer += text;
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        const value = line.trim();
+        const port = Number(value);
+        if (/^\d+$/.test(value) && port > 0) finish(null, { child, port });
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (text) => {
+      error += text;
+    });
+    child.once("error", (err) => finish(err));
+    child.once("exit", (code) => {
+      finish(new Error("fake model exited " + code + ": " + error.trim()));
+    });
+  });
+}
+
+function runOpenCode(env, projectDir) {
+  return new Promise((resolve, reject) => {
+    const child = track(spawn(
+      openCodeBin,
+      ["run", "--standalone", "--format", "json", "-m", "fake/scripted", "push it"],
+      { cwd: projectDir, env, stdio: ["ignore", "pipe", "pipe"] },
+    ));
+    let timedOut = false;
+    const flushOut = addLines(child.stdout, handleCode);
+    const flushErr = addLines(child.stderr, handleCode);
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, RUN_TIMEOUT_MS);
+
+    child.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      flushOut();
+      flushErr();
+      resolve({ code, timedOut });
+    });
+  });
+}
+
+function tailDaemon(logPath) {
+  let offset = 0;
+  let partial = "";
+  const timer = setInterval(() => {
+    let text;
+    try {
+      text = readFileSync(logPath, "utf8");
+    } catch {
+      return;
+    }
+    if (text.length <= offset) return;
+    const fresh = text.slice(offset);
+    offset = text.length;
+    partial += fresh;
+    const lines = partial.split("\n");
+    partial = lines.pop();
+    for (const line of lines) handleDaemon(line);
+  }, 100);
+  return () => clearInterval(timer);
+}
+
+async function stopDaemon(stateDir) {
+  let pid;
+  try {
+    pid = Number(readFileSync(path.join(stateDir, "tack.lock"), "utf8").trim());
+  } catch {
+    return;
+  }
+  if (!Number.isSafeInteger(pid) || pid <= 0) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function main() {
+  const base = process.env.TACK_E2E_DIR
+    ? path.resolve(process.env.TACK_E2E_DIR)
+    : mkdtempSync(path.join(tmpdir(), "tack-rec-"));
+  const created = !process.env.TACK_E2E_DIR;
+
+  const home = path.join(base, "home");
+  const configHome = path.join(base, "xdg", "config");
+  const stateDir = path.join(base, "xdg", "state");
+  const dataHome = path.join(base, "xdg", "data");
+  const cacheHome = path.join(base, "xdg", "cache");
+  const tmpHome = path.join(base, "tmp");
+  const binDir = path.join(base, "bin");
+  const projectDir = path.join(base, "project");
+  const dist = path.join(base, "dist");
+  const recorder = path.join(base, "recorder.log");
+
+  for (const dir of [
+    home, configHome, stateDir, dataHome, cacheHome, tmpHome, binDir, projectDir, dist,
+  ]) {
+    mkdirSync(dir, { recursive: true });
+  }
+
+  initRepo(projectDir);
+  const shim = path.join(binDir, "git");
+  copyFileSync(gitShim, shim);
+  chmodSync(shim, 0o755);
+
+  let model;
+  let stopTail = () => {};
+  let wallTimer;
+  startRedraw();
+
+  try {
+    wallTimer = setTimeout(() => killChildren(), WALL_TIMEOUT_MS);
+
+    await buildPlugin(dist);
+    const pluginDir = path.join(dist, "opencode");
+
+    model = await startModel();
+    writeConfig(configHome, pluginDir, "http://127.0.0.1:" + model.port + "/v1");
+
+    const env = {
+      PATH: binDir + path.delimiter + (process.env.PATH ?? ""),
+      HOME: home,
+      TMPDIR: tmpHome,
+      XDG_CONFIG_HOME: configHome,
+      XDG_DATA_HOME: dataHome,
+      XDG_STATE_HOME: stateDir,
+      XDG_CACHE_HOME: cacheHome,
+      TACK_STATE_DIR: stateDir,
+      TACK_DAEMON_BIN: daemonBin,
+      TACK_RECORDER: recorder,
+      TACK_REAL_GIT: findExecutable("git") ?? "",
+      OPENCODE_DB: path.join(base, "opencode.sqlite"),
+      OPENCODE_DISABLE_MODELS_FETCH: "1",
+      OPENCODE_DISABLE_CLAUDE_CODE: "1",
+      OPENCODE_DISABLE_FILEWATCHER: "1",
+    };
+
+    stopTail = tailDaemon(path.join(stateDir, "daemon.log"));
+    const run = await runOpenCode(env, projectDir);
+    stopTail();
+    stopTail = () => {};
+
+    if (run.timedOut) pushLine(codeBuffer, "[setup] opencode hit the " + RUN_TIMEOUT_MS + "ms bound");
+
+    const pushes = readOptional(recorder)
+      .split("\n")
+      .filter((line) => line.startsWith("push"));
+    recorderLine = pushes.length === 0 ? "[3] no git push" : "[3] PUSH EXECUTED";
+    render();
+  } catch (error) {
+    recorderLine = "[3] error: " + error.message;
+    render();
+  } finally {
+    clearTimeout(wallTimer);
+    stopTail();
+    killChildren();
+    stopRedraw();
+    await stopDaemon(stateDir);
+    if (created) rmSync(base, { recursive: true, force: true });
+    process.stdout.write(
+      recorderLine === "[3] no git push"
+        ? "[recorder] no git push executed\n"
+        : "[recorder] " + recorderLine + "\n",
+    );
+  }
+}
+
+await main();
