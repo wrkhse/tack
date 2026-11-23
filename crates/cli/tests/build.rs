@@ -1,6 +1,8 @@
 //! In-process proofs of the build pipeline. No daemon, `OpenCode` or child
 //! process runs; only the library APIs and a temporary folder are used.
 
+#![cfg(test)]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,7 +22,6 @@ struct Scratch {
     root: PathBuf,
 }
 
-#[cfg(test)]
 impl Scratch {
     fn new() -> Self {
         let unique = SystemTime::now()
@@ -56,7 +57,6 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/safe-push")
 }
 
-#[cfg(test)]
 fn manifest() -> PluginManifest {
     let sandbox = tack_runtime::Sandbox::new(
         &fixture(),
@@ -74,7 +74,6 @@ fn reasons() -> Vec<&'static str> {
         .collect()
 }
 
-#[cfg(test)]
 const fn config<'a>(
     manifest: &'a PluginManifest,
     plugin_dir: &'a str,
@@ -93,7 +92,6 @@ const fn config<'a>(
     }
 }
 
-#[cfg(test)]
 fn constant<'a>(script: &'a str, name: &str) -> &'a str {
     let prefix = format!("const {name} = ");
     let line = script

@@ -40,20 +40,30 @@ fn lua_index(index: usize) -> Result<i64, EngineError> {
 }
 
 /// Accept a whole Lua float inside the entry ceiling as an array key.
-///
-/// Decimal text avoids an unchecked float-to-integer cast; the bounded parse
-/// keeps the conversion exact for the small range this loader permits.
 fn float_position(index: f64) -> Result<usize, EngineError> {
-    if index.is_finite()
-        && index.fract() == 0.0
-        && let Ok(position) = index.to_string().parse::<usize>()
-        && (1..=MAX_ENTRIES).contains(&position)
-    {
-        return Ok(position);
+    let unsupported = || EngineError::InvalidResult("tack: unsupported table key".into());
+
+    if !index.is_finite() || index.fract() != 0.0 {
+        return Err(unsupported());
     }
-    Err(EngineError::InvalidResult(
-        "tack: unsupported table key".into(),
-    ))
+
+    let ceiling = u32::try_from(MAX_ENTRIES)
+        .map(f64::from)
+        .map_err(|_| unsupported())?;
+    if !(1.0..=ceiling).contains(&index) {
+        return Err(unsupported());
+    }
+
+    // The range and whole-number checks make this cast exact; the fallible
+    // conversion below is the only step that can still reject the key.
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "index is a whole number inside 1..=MAX_ENTRIES"
+    )]
+    let whole = index as i64;
+
+    usize::try_from(whole).map_err(|_| unsupported())
 }
 
 /// Accept only positive integers inside the entry ceiling as array keys.

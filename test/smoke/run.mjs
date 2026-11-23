@@ -54,12 +54,13 @@ function unpack() {
 }
 
 function checkVersion() {
-  const output = execVersion();
+  const output = execVersion().trim();
+  const expected = "tack " + expectedVersion;
   assert(
-    output.includes(expectedVersion),
-    "tack --version did not contain " + expectedVersion + ": " + output.trim(),
+    output === expected,
+    "tack --version printed '" + output + "', expected '" + expected + "'",
   );
-  console.log("PASS tack --version contains " + expectedVersion);
+  console.log("PASS tack --version is " + expectedVersion);
 }
 
 function execVersion() {

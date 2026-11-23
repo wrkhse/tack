@@ -37,6 +37,7 @@ pub enum RequireCause {
     Missing(String),
     TooLarge(String),
     Unreadable { spec: String, detail: String },
+    Poisoned,
 }
 
 impl fmt::Display for RequireCause {
@@ -53,6 +54,7 @@ impl fmt::Display for RequireCause {
             Self::Unreadable { spec, detail } => {
                 write!(f, "tack: require cannot read {spec}: {detail}")
             }
+            Self::Poisoned => f.write_str("tack: require state lock poisoned"),
         }
     }
 }
@@ -208,7 +210,7 @@ fn scoped_require(
         let resolved = {
             let mut guard = state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .map_err(|_| mlua::Error::external(RequireCause::Poisoned))?;
             guard.resolve(&spec, &base).map_err(mlua::Error::external)?
         };
         match resolved {
@@ -233,7 +235,7 @@ fn scoped_require(
                     .eval::<LuaValue>();
                 state
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .map_err(|_| mlua::Error::external(RequireCause::Poisoned))?
                     .finish(canonical, outcome)
             }
         }

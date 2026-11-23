@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rustix::process::geteuid;
 use tack_protocol::wire::{self, MAX_PENDING, PROTOCOL_VERSION, Reply, ReplyError, Request};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
@@ -101,7 +102,7 @@ fn acquire_lock(lock_path: &Path) -> Result<Lock, TransportError> {
 /// Create a missing state folder, or verify that an existing one is ours.
 fn ensure_state_dir(state_dir: &Path) -> Result<(), TransportError> {
     match fs::metadata(state_dir) {
-        Ok(meta) if meta.is_dir() => verify_state_dir(state_dir, &meta),
+        Ok(meta) if meta.is_dir() => verify_state_dir(&meta),
         Ok(_) => Err(TransportError::Bind(format!(
             "{} is not a directory",
             state_dir.display()
@@ -124,28 +125,10 @@ const fn state_dir_is_safe(uid: u32, mode: u32, euid: u32) -> bool {
     uid == euid && mode & 0o022 == 0
 }
 
-/// A newly created file is owned by this process's effective uid. Reading
-/// that owner from a probe file avoids a direct libc call under the workspace
-/// `forbid(unsafe_code)` gate.
-fn effective_uid(state_dir: &Path) -> Result<u32, TransportError> {
-    let probe = state_dir.join(format!(".tack-uid-{}", std::process::id()));
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&probe)
-        .map_err(|_| TransportError::StateNotOwned)?;
-    let uid = file
-        .metadata()
-        .map(|meta| meta.uid())
-        .map_err(|_| TransportError::StateNotOwned)?;
-    drop(file);
-    let _ = fs::remove_file(&probe);
-    Ok(uid)
-}
-
-fn verify_state_dir(state_dir: &Path, meta: &fs::Metadata) -> Result<(), TransportError> {
-    let euid = effective_uid(state_dir)?;
+/// Verify an existing state folder using only its metadata and the effective
+/// uid. No file is written inside the folder before the check.
+fn verify_state_dir(meta: &fs::Metadata) -> Result<(), TransportError> {
+    let euid = geteuid().as_raw();
     if state_dir_is_safe(meta.uid(), meta.mode(), euid) {
         Ok(())
     } else {
@@ -358,6 +341,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -395,6 +379,30 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct DirSnapshot {
+        entries: Vec<OsString>,
+        mode: u32,
+        uid: u32,
+        modified: SystemTime,
+    }
+
+    fn snapshot_dir(dir: &Path) -> io::Result<DirSnapshot> {
+        let mut entries = fs::read_dir(dir)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<Vec<_>>>()?;
+        entries.sort();
+
+        let meta = fs::metadata(dir)?;
+
+        Ok(DirSnapshot {
+            entries,
+            mode: meta.mode() & 0o777,
+            uid: meta.uid(),
+            modified: meta.modified()?,
+        })
     }
 
     fn allow_all(request: &Request) -> Reply {
@@ -477,6 +485,25 @@ mod tests {
         let after = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
 
         assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn unsafe_state_dir_is_refused_before_writing_anything() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        fs::create_dir(&state).unwrap();
+
+        // A group- or world-writable folder is unsafe even when we own it.
+        fs::set_permissions(&state, Permissions::from_mode(0o777)).unwrap();
+
+        let before = snapshot_dir(&state).unwrap();
+
+        let err = bind(&state, &socket).unwrap_err();
+        assert_eq!(err, TransportError::StateNotOwned);
+
+        let after = snapshot_dir(&state).unwrap();
+        assert_eq!(after, before);
     }
 
     #[tokio::test]

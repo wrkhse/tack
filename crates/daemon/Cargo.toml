@@ -11,6 +11,7 @@ name = "tack-daemon"
 path = "src/main.rs"
 
 [dependencies]
+rustix = { version = "1", default-features = false, features = ["process"] }
 serde_json.workspace = true
 tokio.workspace = true
 tack_protocol = { path = "../protocol" }
