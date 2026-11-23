@@ -47,8 +47,8 @@ const REASONS = new Set(DENY_REASONS);
 let sequence = 0;
 let starting;
 
-// Identity of the socket's filesystem object. dev belongs to it: a fast
-// unlink/rebind can reuse the inode and leave mtime in the same millisecond.
+// Identity of the socket's filesystem object. dev cannot distinguish an
+// inode-reusing rebind; the real connect is the proof of reachability.
 function socketIdentity() {
   try {
     const info = fs.statSync(SOCKET);
@@ -84,14 +84,14 @@ function startDaemon() {
       let poll;
       let child;
 
-      const finish = (ok) => {
+      const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         clearInterval(poll);
         // A failed or dead start must not poison later calls.
         starting = undefined;
-        resolve(ok);
+        resolve();
       };
 
       // A stale socket file can survive a dead daemon. dev:ino:mtimeMs sees
@@ -107,7 +107,7 @@ function startDaemon() {
           (stale === undefined || current !== stale);
       };
 
-      timer = setTimeout(() => finish(ready()), START_TIMEOUT_MS);
+      timer = setTimeout(() => finish(), START_TIMEOUT_MS);
 
       try {
         // The daemon unlinks a stale socket only after it holds the lock, so
@@ -118,17 +118,17 @@ function startDaemon() {
           detached: true,
           stdio: ["ignore", log, log],
         });
-        child.on("error", () => finish(ready()));
-        child.on("exit", () => finish(ready()));
+        child.on("error", () => finish());
+        child.on("exit", () => finish());
         child.unref();
         fs.closeSync(log);
       } catch {
-        finish(false);
+        finish();
         return;
       }
 
       poll = setInterval(() => {
-        if (ready()) finish(true);
+        if (ready()) finish();
       }, POLL_MS);
     });
   }
@@ -291,6 +291,14 @@ async function before(event) {
   }
 }
 
+async function disposeAll(registrations) {
+  for (const registration of registrations) {
+    if (registration && typeof registration.dispose === "function") {
+      await registration.dispose();
+    }
+  }
+}
+
 async function setup(ctx) {
   const pending = [ctx.tool.hook("execute.before", before)];
 
@@ -326,15 +334,19 @@ async function setup(ctx) {
     );
   }
 
-  const registrations = await Promise.all(pending);
+  const settled = await Promise.allSettled(pending);
+  const failed = settled.find((item) => item.status === "rejected");
 
-  return async () => {
-    for (const registration of registrations) {
-      if (registration && typeof registration.dispose === "function") {
-        await registration.dispose();
-      }
-    }
-  };
+  if (failed) {
+    const resolved = settled
+      .filter((item) => item.status === "fulfilled")
+      .map((item) => item.value);
+    await disposeAll(resolved);
+    throw failed.reason;
+  }
+
+  const registrations = settled.map((item) => item.value);
+  return async () => disposeAll(registrations);
 }
 
 module.exports = { id: "tack." + MANIFEST.name, setup };

@@ -571,6 +571,7 @@ async function setupAwaitsAsyncRegistrations() {
     });
     let beforeRegistered = false;
     let beforeCallback;
+    let toolDefinition;
     let hookDisposed = false;
     let transformDisposed = false;
 
@@ -599,6 +600,11 @@ async function setupAwaitsAsyncRegistrations() {
         },
         transform(callback) {
           assert.equal(typeof callback, "function");
+          callback({
+            add(definition) {
+              toolDefinition = definition;
+            },
+          });
           return Promise.resolve(transformRegistration);
         },
       },
@@ -614,6 +620,24 @@ async function setupAwaitsAsyncRegistrations() {
     await Promise.resolve();
     assert.equal(settled, false, "setup resolved before the registrations");
     assert.equal(beforeRegistered, false, "the hook activated too early");
+
+    // OpenCode cannot deliver a tool call until setup() resolves. A call
+    // attempted now cannot reach a daemon unguarded: it fails closed, and
+    // no execute.before hook is active yet.
+    assert.ok(toolDefinition, "the tool must be defined");
+    let earlyError;
+    try {
+      await toolDefinition.execute({ command: "echo hello" });
+    } catch (thrown) {
+      earlyError = thrown;
+    }
+    assert.ok(earlyError instanceof Error, "an early tool call must fail closed");
+    assert.equal(
+      earlyError.message,
+      "tack: socket_missing",
+      "an early tool call cannot reach a daemon",
+    );
+    assert.equal(beforeRegistered, false, "no call ran before the hook was active");
 
     resolveHook(hookRegistration);
     const cleanup = await cleanupPromise;
@@ -933,9 +957,9 @@ async function secondColdStartKeepsLiveDaemon() {
     for (const key of Object.keys(require.cache)) delete require.cache[key];
     const second = require(instrumented);
     // The second daemon loses the lock, so its socket never replaces the
-    // live one and the start cannot claim a fresh bind.
-    const ready = await second.__startDaemon();
-    assert.equal(ready, false, "an unchanged socket is not a fresh bind");
+    // live one. startDaemon settles without a readiness value; the connects
+    // below prove the first daemon is still reachable.
+    await second.__startDaemon();
 
     const lines = readFileSync(marker, "utf8").trim().split("\n");
     assert.equal(lines.length, 2, "the second daemon also tried to start");
@@ -1072,6 +1096,126 @@ async function staleSocketFileDeniesSocketClosed() {
   }
 }
 
+// A wrapper with two tools: the rollback proof needs one transform to fail
+// while the other resolves.
+function twoToolWrapper(dir) {
+  const source = readFileSync(wrapperPath, "utf8");
+  const target = path.join(dir, "two-tools.js");
+  const manifest =
+    '{"name":"safe-push","needs":[],"tools":[' +
+    '{"name":"guard_status","description":"status","input":{}},' +
+    '{"name":"other_tool","description":"other","input":{}}' +
+    "]}";
+  writeFileSync(
+    target,
+    source.replace(/^const MANIFEST = .*;$/m, "const MANIFEST = " + manifest + ";"),
+  );
+  return target;
+}
+
+// A failed registration must not leak the ones that did resolve: setup()
+// disposes every fulfilled registration and rethrows the first rejection.
+async function setupRollsBackOnFailedRegistration() {
+  const dir = tempDir();
+
+  try {
+    applyEnv(baseEnv(dir));
+    for (const key of Object.keys(require.cache)) delete require.cache[key];
+    const plugin = require(twoToolWrapper(dir));
+
+    const disposed = [];
+    const registration = (tag) => ({
+      async dispose() {
+        disposed.push(tag);
+      },
+    });
+    let transformCalls = 0;
+
+    const ctx = {
+      tool: {
+        hook(name, callback) {
+          assert.equal(name, "execute.before");
+          assert.equal(typeof callback, "function");
+          return Promise.resolve(registration("hook"));
+        },
+        transform(callback) {
+          assert.equal(typeof callback, "function");
+          transformCalls += 1;
+          if (transformCalls === 1) {
+            return Promise.reject(new Error("tack: registration failed"));
+          }
+          return Promise.resolve(registration("transform"));
+        },
+      },
+    };
+
+    let error;
+    try {
+      await plugin.setup(ctx);
+    } catch (thrown) {
+      error = thrown;
+    }
+
+    assert.ok(error instanceof Error, "setup must reject on a failed registration");
+    assert.equal(
+      error.message,
+      "tack: registration failed",
+      "first rejection is rethrown",
+    );
+    assert.equal(transformCalls, 2, "both transforms were attempted");
+    assert.deepEqual(
+      disposed,
+      ["hook", "transform"],
+      "only fulfilled registrations are disposed",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The first connect gets ENOENT so a daemon starts; the retry after start
+// resolves throws synchronously. The continuation must deny by name instead
+// of leaving the call dangling.
+function throwingRetryNet() {
+  const real = require("node:net");
+  let calls = 0;
+  return {
+    ...real,
+    connect(...args) {
+      calls += 1;
+      if (calls === 1) {
+        const sock = new real.Socket();
+        setImmediate(() => {
+          const error = new Error("connect ENOENT");
+          error.code = "ENOENT";
+          sock.emit("error", error);
+          sock.destroy();
+        });
+        return sock;
+      }
+      throw new Error("connect exploded");
+    },
+  };
+}
+
+async function startContinuationThrowDeniesDaemonError() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+
+  try {
+    delete globalThis.__tackFs;
+    globalThis.__tackNet = throwingRetryNet();
+    const target = raceWrapper(dir, "throw-continuation.js");
+    const before = await coldBefore(baseEnv(dir), marker, dir, target);
+
+    await expectDeny(before, "daemon_error");
+  } finally {
+    delete globalThis.__tackNet;
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 await check("socket_missing fails closed", missingSocket);
 await check("timeout fails closed", timeout);
 await check("socket_closed fails closed", closedSocket);
@@ -1153,6 +1297,14 @@ await check(
 await check(
   "setup awaits async registrations and disposes them",
   setupAwaitsAsyncRegistrations,
+);
+await check(
+  "setup disposes fulfilled registrations when one fails",
+  setupRollsBackOnFailedRegistration,
+);
+await check(
+  "a throw in the start continuation denies daemon_error",
+  startContinuationThrowDeniesDaemonError,
 );
 await check(
   "tool execute honors an abort signal",
