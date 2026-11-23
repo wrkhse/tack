@@ -264,7 +264,7 @@ pub enum TransportError {
 }
 ```
 
-- **Daemon and SDK** — `crates/daemon/src/main.rs` and `crates/sdk/` run the
+- **Daemon and SDK** — `crates/daemon/src/lib.rs` and `crates/sdk/` run the
   plugin's Luau in an `mlua` sandbox at 16 MiB and 100 ms per call.
   Verification: a hook denies the call; a runaway loop and a memory hog are
   denied by the limits.
@@ -440,11 +440,6 @@ so no API key is needed, in CI or a container with a throwaway `HOME`:
    returns to the session.
 
 A passing build or a unit test alone is not the proof.
-
-The scripted provider is decided: a minimal local OpenAI-compatible SSE
-stand-in ported from `conformance/model/stand-in.ts` at base commit
-`663045b8e9a931a188d011484a425144cd2a1885`, with a git-shim recorder,
-CI-only.
 
 ## Left open
 

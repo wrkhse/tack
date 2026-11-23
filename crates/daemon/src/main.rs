@@ -1,14 +1,39 @@
 //! Entry point for the per-user tack daemon.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tack_daemon::transport::{TransportError, bind};
 use tack_daemon::{
     ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, dispatch,
-    parse_args, socket_in_state_dir, state_dir,
+    socket_in_state_dir, state_dir,
 };
 use tack_protocol::wire::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
 use tack_runtime::Sandbox;
+
+struct Args {
+    socket: PathBuf,
+    plugin: PathBuf,
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut socket = None;
+    let mut plugin = None;
+    let mut args = std::env::args().skip(1);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--socket" => socket = Some(args.next().ok_or("--socket needs a path")?.into()),
+            "--plugin" => plugin = Some(args.next().ok_or("--plugin needs a dir")?.into()),
+            other => return Err(format!("unknown argument {other}")),
+        }
+    }
+
+    Ok(Args {
+        socket: socket.ok_or("missing --socket <path>")?,
+        plugin: plugin.ok_or("missing --plugin <dir>")?,
+    })
+}
 
 #[tokio::main]
 async fn main() {

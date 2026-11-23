@@ -4,4 +4,4 @@
 mod require;
 pub mod sandbox;
 
-pub use sandbox::{EngineError, LimitCause, LoadCause, Sandbox};
+pub use sandbox::{EngineError, Sandbox};

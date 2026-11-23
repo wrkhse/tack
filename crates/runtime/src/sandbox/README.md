@@ -27,6 +27,6 @@ flowchart LR
   `decode_content`, which turn hook and tool returns into protocol values.
 - `values.rs`: `read_tool`, `lua_key`, `json_to_lua`, `lua_to_json`
   and `lua_table_to_json`, the bounded JSON/Lua conversion boundary.
-- `tools.rs`: `ctx` and `call_table`, the per-call tables handed to
+- `call.rs`: `ctx` and `call_table`, the per-call tables handed to
   plugin functions.
 - `tests.rs`: the sandbox test suite, compiled only under `cfg(test)`.

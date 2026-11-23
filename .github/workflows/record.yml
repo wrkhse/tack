@@ -6,8 +6,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/record.yml
-      - adapters/opencode/wrapper.test.mjs
-      - test/e2e/**
+      - test/e2e/record.mjs
   workflow_dispatch:
     inputs:
       tag:

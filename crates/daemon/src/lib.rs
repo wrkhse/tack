@@ -17,31 +17,7 @@ pub const EXIT_ENGINE: i32 = 4;
 pub const SOCKET_NAME: &str = "tack.sock";
 pub const ERR_SOCKET_MISMATCH: &str = "socket_not_in_state_dir";
 
-pub struct Args {
-    pub socket: PathBuf,
-    pub plugin: PathBuf,
-}
-
-pub fn parse_args() -> Result<Args, String> {
-    let mut socket = None;
-    let mut plugin = None;
-    let mut args = std::env::args().skip(1);
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--socket" => socket = Some(args.next().ok_or("--socket needs a path")?.into()),
-            "--plugin" => plugin = Some(args.next().ok_or("--plugin needs a dir")?.into()),
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-
-    Ok(Args {
-        socket: socket.ok_or("missing --socket <path>")?,
-        plugin: plugin.ok_or("missing --plugin <dir>")?,
-    })
-}
-
-pub fn state_dir_from(
+fn state_dir_from(
     tack_state_dir: Option<&str>,
     xdg_state_home: Option<&str>,
     home: Option<&str>,
@@ -72,7 +48,7 @@ pub fn socket_in_state_dir(state_dir: &Path, socket: &Path) -> bool {
     socket == state_dir.join(SOCKET_NAME)
 }
 
-pub fn reply_error(id: u64, error: EngineError) -> Reply {
+fn reply_error(id: u64, error: EngineError) -> Reply {
     let kind = match &error {
         EngineError::Limit(_) => ReplyError::Limit,
         EngineError::UnknownTool(_) => ReplyError::UnknownTool,
@@ -91,7 +67,7 @@ pub fn reply_error(id: u64, error: EngineError) -> Reply {
     }
 }
 
-pub fn version_error(id: u64, version: u32) -> Reply {
+fn version_error(id: u64, version: u32) -> Reply {
     eprintln!("tack-daemon: unsupported protocol version {version}");
 
     Reply::Error {
