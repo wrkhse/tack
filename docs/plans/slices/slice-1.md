@@ -1,6 +1,8 @@
 # Slice 1: one plugin, OpenCode, unsandboxed daemon
 
-**Status:** In progress (rc.2 not tagged yet).
+**Status:** Implemented (v0.1.0-rc.2).
+
+[Release: v0.1.0-rc.2](https://github.com/wrkhse/tack/releases/tag/v0.1.0-rc.2).
 
 You can write one Luau plugin with a `toolBefore` hook and one tool, build it
 for OpenCode, and have the hook deny a tool call in a real OpenCode session.
