@@ -7,7 +7,6 @@ on:
     paths:
       - .github/workflows/record.yml
       - test/e2e/record.mjs
-      - test/e2e/video-edit.json
   workflow_dispatch:
     inputs:
       tag:
@@ -108,6 +107,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          mkdir -p frames
+
           export TACK_CLI="$RUNNER_TEMP/tack-bin/tack"
           export TACK_DAEMON_BIN="$RUNNER_TEMP/tack-bin/tack-daemon"
           export OPENCODE_BIN="$RUNNER_TEMP/opencode-bin/opencode"
@@ -116,30 +117,44 @@ jobs:
             node test/e2e/record.mjs
           termctrl wait rec "OpenCode session" --timeout 30000
           termctrl mark rec ready
+          termctrl save rec --format png --out frames/01-ready
 
           cmd="opencode run --standalone --format json -m fake/scripted"
           cmd="$cmd 'push my branch'"
           termctrl send rec "text:$cmd" enter
           termctrl wait rec "push blocked" --timeout 30000
           termctrl mark rec denied
+          termctrl save rec --format png --out frames/02-denied
           termctrl wait rec "guard_status" --timeout 30000
           termctrl mark rec tool
+          termctrl save rec --format png --out frames/03-tool
 
           termctrl send rec "text:git log origin/main" enter
           termctrl wait rec "initial" --timeout 30000
           termctrl mark rec proof
+          termctrl save rec --format png --out frames/04-proof
           termctrl stop rec
 
       - name: Render the GIF
         run: |
           set -euo pipefail
 
-          termctrl video run.termctrl --edit test/e2e/video-edit.json \
-            --footer --out run.mp4
+          : > frames/concat.txt
+          for frame in \
+            frames/01-ready.png \
+            frames/02-denied.png \
+            frames/03-tool.png \
+            frames/04-proof.png
+          do
+            echo "file '$PWD/$frame'" >> frames/concat.txt
+            echo "duration 3" >> frames/concat.txt
+          done
+          echo "file '$PWD/frames/04-proof.png'" >> frames/concat.txt
 
           filter="fps=10,scale=1200:-1:flags=lanczos,split[s0][s1];"
           filter="${filter}[s0]palettegen[p];[s1][p]paletteuse"
-          ffmpeg -y -i run.mp4 -vf "$filter" -loop 0 demo.gif
+          ffmpeg -y -f concat -safe 0 -i frames/concat.txt \
+            -vf "$filter" -loop 0 demo.gif
 
       - name: Check the verdict and the GIF
         run: |
@@ -188,6 +203,7 @@ jobs:
           path: |
             run.termctrl
             recording-diagnostics.txt
+            frames/*.png
           if-no-files-found: warn
 
       - name: Capture recording diagnostics
@@ -201,7 +217,7 @@ jobs:
           echo "--- session status ---" >> termctrl-diagnostics.txt
           termctrl status rec >> termctrl-diagnostics.txt 2>&1
           echo "--- artefacts ---" >> termctrl-diagnostics.txt
-          ls -l verdict.txt demo.gif run.termctrl run.mp4 \
+          ls -l verdict.txt demo.gif run.termctrl frames \
             >> termctrl-diagnostics.txt 2>&1
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
