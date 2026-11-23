@@ -48,7 +48,8 @@ let recorder;
 let baseDir;
 let createdBase;
 let inputBuffer = "";
-let printedRows = 0;
+let leftCursor = 0;
+let rightCursor = 0;
 let headerState = "";
 let watchTimer;
 let holdTimer;
@@ -254,11 +255,12 @@ function printTitles() {
 }
 
 function emitRow() {
-  const index = printedRows;
-  const left = leftLines[index] ?? "";
-  const right = rightLines[index] ?? "";
+  const left = leftCursor < leftLines.length ? leftLines[leftCursor++] : "";
+  const right = rightCursor < rightLines.length
+    ? rightLines[rightCursor++]
+    : "";
+  if (!left && !right) return;
   process.stdout.write(pad(left) + "| " + right.slice(0, PANE_W) + "\n");
-  printedRows += 1;
   printHeader();
 }
 
@@ -299,6 +301,10 @@ function finish() {
   finished = true;
   clearInterval(watchTimer);
   clearTimeout(holdTimer);
+
+  while (leftCursor < leftLines.length || rightCursor < rightLines.length) {
+    emitRow();
+  }
 
   const result = judgement(readOptional(daemonLog), readOptional(recorder));
   writeFileSync(verdictPath, result.lines.join("\n") + "\n");
