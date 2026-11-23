@@ -38,7 +38,8 @@ const SEP_COL = 59;
 const RIGHT_COL = 61;
 const VIEW_ROWS = ROWS - 3;
 const REDRAW_MS = 200;
-const MAX_FRAMES = 90;
+const MAX_FRAMES = 160;
+const HOLD_MS = 25_000;
 const MAX_BUFFER = 120;
 const MAX_CODE_LINES = 8;
 
@@ -92,6 +93,7 @@ function at(row, col, text) {
 }
 
 function firstString(value, keys) {
+  if (!value) return "";
   for (const key of keys) {
     const found = value[key];
     if (typeof found === "string" && found.length > 0) return found;
@@ -100,6 +102,7 @@ function firstString(value, keys) {
 }
 
 function firstObject(value, keys) {
+  if (!value) return null;
   for (const key of keys) {
     const found = value[key];
     if (found && typeof found === "object" && !Array.isArray(found)) return found;
@@ -107,11 +110,16 @@ function firstObject(value, keys) {
   return null;
 }
 
-function inputSummary(input) {
-  if (!input) return "{}";
-  const args = firstObject(input, ["input", "arguments", "args"]) ?? input;
-  if (typeof args.command === "string") return args.command;
-  return JSON.stringify(args);
+function briefText(value) {
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function textOf(value) {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    return firstString(value, ["message", "text", "error", "name", "detail"]);
+  }
+  return "";
 }
 
 function describeCode(line) {
@@ -126,29 +134,30 @@ function describeCode(line) {
   }
 
   const type = String(event.type ?? "");
-  const tool = firstString(event, ["tool", "name", "toolName"]);
-  const input = firstObject(event, ["input", "arguments", "args", "state"]);
-  let text = firstString(event, ["text", "output", "message", "error"]);
-  if (!text) {
-    const nested = [
-      "part", "content", "result", "output", "state", "metadata",
-    ];
-    const part = firstObject(event, nested);
-    if (part) text = firstString(part, ["text", "output", "message", "error"]);
-  }
-  const brief = text.replace(/\s+/g, " ").trim();
+  const part = firstObject(event, ["part"]) ?? event;
+  const state = firstObject(part, ["state"]);
+  const tool = firstString(part, ["tool", "name", "toolName"]) ||
+    firstString(state, ["tool", "name"]);
+  const input = firstObject(part, ["input"]) ?? firstObject(state, ["input"]);
+  const command = firstString(input, ["command"]);
+  const error = textOf(state && state.error) ||
+    textOf(part.error) || textOf(event.error);
+  const text = briefText(
+    firstString(part, ["text", "output", "message"]) ||
+    firstString(state, ["text", "output", "message"]) ||
+    firstString(event, ["text", "output", "message"]),
+  );
 
-  if (type === "error" || /blocked|denied|tack:/i.test(brief)) {
-    return "opencode: blocked - " + brief;
+  if (error) return "opencode: blocked - " + briefText(error);
+  if (tool) {
+    const args = command || (input ? JSON.stringify(input) : "{}");
+    return "opencode: tool " + tool + " - " + args;
   }
-  if (type.includes("tool") && type.includes("use")) {
-    return "opencode: tool " + (tool || "?") + " - " + inputSummary(input);
+  if (command) return "opencode: command - " + briefText(command);
+  if (type.includes("text") || type.includes("result")) {
+    return text ? "opencode: result - " + text : null;
   }
-  if (type.includes("tool") && type.includes("result")) {
-    return "opencode: result - " + brief;
-  }
-  if (brief) return "opencode: " + brief;
-  return null;
+  return text ? "opencode: result - " + text : null;
 }
 
 function render() {
@@ -188,11 +197,6 @@ function startRedraw() {
   process.stdout.write("\x1b[?25l");
   render();
   redrawTimer = setInterval(render, REDRAW_MS);
-}
-
-function stopRedraw() {
-  clearInterval(redrawTimer);
-  process.stdout.write("\x1b[?25h\x1b[1;1H");
 }
 
 function handleCode(line) {
@@ -523,7 +527,6 @@ async function main() {
     clearTimeout(wallTimer);
     stopTail();
     killChildren();
-    stopRedraw();
     await stopDaemon(stateDir);
 
     // The verdict reads the real artefacts, never OpenCode's own output.
@@ -541,7 +544,21 @@ async function main() {
     writeFileSync(path.join(repoRoot, "verdict.txt"), verdict.join("\n") + "\n");
     process.exitCode = denied && guarded && noPush ? 0 : 1;
 
+    if (denied) markerPush = true;
+    if (guarded) markerGuard = true;
+    for (const key of KEY_DAEMON) {
+      if (daemonText.includes(key)) seenDaemon.add(key);
+    }
+    render();
+
     if (created) rmSync(base, { recursive: true, force: true });
+
+    // Hold past the tape so bash never draws a prompt over the caption.
+    const holdUntil = Date.now() + HOLD_MS;
+    while (Date.now() < holdUntil) {
+      await new Promise((resolve) => setTimeout(resolve, REDRAW_MS));
+    }
+    clearInterval(redrawTimer);
   }
 }
 
