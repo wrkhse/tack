@@ -28,21 +28,32 @@ const openCodeBin = process.env.OPENCODE_BIN || "opencode";
 const tackCli = process.env.TACK_CLI || "tack";
 const daemonBin = process.env.TACK_DAEMON_BIN || "tack-daemon";
 
+// Twenty rows fit inside the VHS viewport with room to spare, so the
+// caption and the pane headers are never pushed off by auto-wrap.
+const ROWS = 20;
 const COLS = 120;
-const ROWS = 28;
-const PANE_W = 58;
+const PANE_W = 56;
 const LEFT_COL = 1;
-const SEP_COL = 60;
-const RIGHT_COL = 62;
+const SEP_COL = 59;
+const RIGHT_COL = 61;
 const VIEW_ROWS = ROWS - 3;
 const REDRAW_MS = 200;
 const MAX_FRAMES = 90;
 const MAX_BUFFER = 120;
+const MAX_CODE_LINES = 8;
 
 const BUILD_TIMEOUT_MS = 4_000;
 const MODEL_TIMEOUT_MS = 4_000;
 const RUN_TIMEOUT_MS = 9_000;
 const WALL_TIMEOUT_MS = 12_000;
+
+const KEY_DAEMON = [
+  "tack-daemon: hook toolBefore deny push blocked",
+  "tack-daemon: hook toolBefore allow",
+  "tack-daemon: tool guard_status ok",
+];
+const KEY_SET = new Set(KEY_DAEMON);
+const seenDaemon = new Set();
 
 const children = new Set();
 const codeBuffer = [];
@@ -70,13 +81,74 @@ function clip(text, width) {
   return clean.length > width ? clean.slice(0, width) : clean.padEnd(width);
 }
 
-function pushLine(buffer, line) {
-  buffer.push(line);
-  if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
+function keepLast(buffer, text, limit) {
+  if (!text || buffer.includes(text)) return;
+  buffer.push(text);
+  if (buffer.length > limit) buffer.shift();
 }
 
 function at(row, col, text) {
   return "\x1b[" + row + ";" + col + "H" + text;
+}
+
+function firstString(value, keys) {
+  for (const key of keys) {
+    const found = value[key];
+    if (typeof found === "string" && found.length > 0) return found;
+  }
+  return "";
+}
+
+function firstObject(value, keys) {
+  for (const key of keys) {
+    const found = value[key];
+    if (found && typeof found === "object" && !Array.isArray(found)) return found;
+  }
+  return null;
+}
+
+function inputSummary(input) {
+  if (!input) return "{}";
+  const args = firstObject(input, ["input", "arguments", "args"]) ?? input;
+  if (typeof args.command === "string") return args.command;
+  return JSON.stringify(args);
+}
+
+function describeCode(line) {
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (event === null || typeof event !== "object" || Array.isArray(event)) {
+    return null;
+  }
+
+  const type = String(event.type ?? "");
+  const tool = firstString(event, ["tool", "name", "toolName"]);
+  const input = firstObject(event, ["input", "arguments", "args", "state"]);
+  let text = firstString(event, ["text", "output", "message", "error"]);
+  if (!text) {
+    const nested = [
+      "part", "content", "result", "output", "state", "metadata",
+    ];
+    const part = firstObject(event, nested);
+    if (part) text = firstString(part, ["text", "output", "message", "error"]);
+  }
+  const brief = text.replace(/\s+/g, " ").trim();
+
+  if (type === "error" || /blocked|denied|tack:/i.test(brief)) {
+    return "opencode: blocked - " + brief;
+  }
+  if (type.includes("tool") && type.includes("use")) {
+    return "opencode: tool " + (tool || "?") + " - " + inputSummary(input);
+  }
+  if (type.includes("tool") && type.includes("result")) {
+    return "opencode: result - " + brief;
+  }
+  if (brief) return "opencode: " + brief;
+  return null;
 }
 
 function render() {
@@ -85,12 +157,16 @@ function render() {
 
   const first = markerPush ? "[1] git push blocked" : "[1] push pending";
   const second = markerGuard ? "[2] guard_status ran" : "[2] guard pending";
+  const caption = first + "    " + second + "    " + recorderLine;
   const rule = "-".repeat(PANE_W);
   const left = codeBuffer.slice(-VIEW_ROWS);
-  const right = daemonBuffer.slice(-VIEW_ROWS);
-  const out = ["\x1b[H\x1b[2J"];
+  const right = KEY_DAEMON.map((key) => (seenDaemon.has(key) ? key : ""));
+  const extras = daemonBuffer.filter((line) => !KEY_SET.has(line));
+  right.push(...extras.slice(-(VIEW_ROWS - KEY_DAEMON.length)));
+  while (right.length < VIEW_ROWS) right.push("");
 
-  out.push(at(1, 1, clip(first + "    " + second + "    " + recorderLine, COLS)));
+  const out = ["\x1b[H\x1b[2J"];
+  out.push(at(1, 1, caption.slice(0, COLS)));
   out.push(at(2, LEFT_COL, clip("OpenCode session", PANE_W)));
   out.push(at(2, SEP_COL, "|"));
   out.push(at(2, RIGHT_COL, clip("daemon.log", PANE_W)));
@@ -102,7 +178,7 @@ function render() {
     const row = 4 + i;
     out.push(at(row, LEFT_COL, clip(left[i] ?? "", PANE_W)));
     out.push(at(row, SEP_COL, "|"));
-    out.push(at(row, RIGHT_COL, clip(right[i] ?? "", PANE_W)));
+    out.push(at(row, RIGHT_COL, clip(right[i], PANE_W)));
   }
 
   process.stdout.write(out.join(""));
@@ -116,19 +192,24 @@ function startRedraw() {
 
 function stopRedraw() {
   clearInterval(redrawTimer);
-  process.stdout.write("\x1b[?25h" + at(ROWS + 1, 1, ""));
+  process.stdout.write("\x1b[?25h\x1b[1;1H");
 }
 
 function handleCode(line) {
-  if (line.trim().length === 0) return;
-  pushLine(codeBuffer, line);
+  keepLast(codeBuffer, describeCode(line), MAX_CODE_LINES);
 }
 
 function handleDaemon(line) {
   if (line.trim().length === 0) return;
   pushLine(daemonBuffer, line);
+  if (KEY_SET.has(line)) seenDaemon.add(line);
   if (line.includes("hook toolBefore deny push blocked")) markerPush = true;
   if (line.includes("tool guard_status ok")) markerGuard = true;
+}
+
+function pushLine(buffer, line) {
+  buffer.push(line);
+  if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
 }
 
 function addLines(stream, handle) {
@@ -211,7 +292,7 @@ function buildPlugin(dist) {
       stdio: ["ignore", "pipe", "pipe"],
     }));
     let error = "";
-    const flush = addLines(child.stdout, (line) => pushLine(codeBuffer, line));
+    child.stdout.resume();
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (text) => {
       error += text;
@@ -223,7 +304,6 @@ function buildPlugin(dist) {
     });
     child.once("close", (code) => {
       clearTimeout(timer);
-      flush();
       if (code === 0) resolve();
       else reject(new Error("tack build failed: " + error.trim()));
     });
@@ -423,12 +503,18 @@ async function main() {
     stopTail = () => {};
 
     if (run.timedOut) {
-      pushLine(codeBuffer, "opencode hit " + RUN_TIMEOUT_MS + "ms bound");
+      keepLast(codeBuffer, "opencode: hit " + RUN_TIMEOUT_MS + "ms bound",
+        MAX_CODE_LINES);
     }
 
     const recorded = readOptional(recorder);
     const pushed = recorded.split("\n").some((line) => line.startsWith("push"));
     recorderLine = pushed ? "[3] PUSH EXECUTED" : "[3] no git push";
+    keepLast(
+      codeBuffer,
+      "recorder: " + (pushed ? "push was executed" : "no git push executed"),
+      MAX_CODE_LINES,
+    );
     render();
   } catch (error) {
     recorderLine = "[3] error: " + error.message;
@@ -456,11 +542,6 @@ async function main() {
     process.exitCode = denied && guarded && noPush ? 0 : 1;
 
     if (created) rmSync(base, { recursive: true, force: true });
-    process.stdout.write(
-      recorderLine === "[3] no git push"
-        ? "[recorder] no git push executed\n"
-        : "[recorder] " + recorderLine + "\n",
-    );
   }
 }
 

@@ -1,6 +1,6 @@
 # Record the real slice 1 flow in two synchronized panes.
 
-Output demo.gif
+Output vhs.gif
 
 Set FontSize 14
 Set Width 1200
