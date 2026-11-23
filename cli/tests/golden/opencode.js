@@ -47,6 +47,17 @@ const REASONS = new Set(DENY_REASONS);
 let sequence = 0;
 let starting;
 
+// Identity of the socket's filesystem object. dev belongs to it: a fast
+// unlink/rebind can reuse the inode and leave mtime in the same millisecond.
+function socketIdentity() {
+  try {
+    const info = fs.statSync(SOCKET);
+    return info.dev + ":" + info.ino + ":" + info.mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
 function nextId() {
   sequence = (sequence + 1) % Number.MAX_SAFE_INTEGER;
   return sequence;
@@ -85,23 +96,13 @@ function startDaemon() {
 
       // A stale socket file can survive a dead daemon. Record its identity so
       // readiness means a fresh bind, not just a path that already exists.
-      let stale;
-      try {
-        const info = fs.statSync(SOCKET);
-        stale = info.ino + ":" + info.mtimeMs;
-      } catch {
-        stale = undefined;
-      }
+      const stale = socketIdentity();
 
       const ready = () => {
         if (!fs.existsSync(SOCKET)) return false;
-        if (stale === undefined) return true;
-        try {
-          const info = fs.statSync(SOCKET);
-          return info.ino + ":" + info.mtimeMs !== stale;
-        } catch {
-          return false;
-        }
+        const current = socketIdentity();
+        return current !== undefined &&
+          (stale === undefined || current !== stale);
       };
 
       timer = setTimeout(() => finish(ready()), START_TIMEOUT_MS);
@@ -138,6 +139,8 @@ function forward(request) {
     let active;
     let timer;
     let waitingForStart = false;
+    let startedIdentity;
+    let restartedOnce = false;
 
     const stopTimer = () => {
       if (timer === undefined) return;
@@ -158,6 +161,21 @@ function forward(request) {
     const connect = () => {
       stopTimer();
       if (settled) return;
+
+      // A fresh socket can be unlinked and rebound after the start attempt
+      // resolved. Re-check here, not only in the poll: another change is a
+      // stale socket, so restart once at most.
+      if (startedIdentity !== undefined && !restartedOnce &&
+          socketIdentity() !== startedIdentity) {
+        restartedOnce = true;
+        startedIdentity = undefined;
+        startDaemon().then(() => {
+          if (settled) return;
+          startedIdentity = socketIdentity();
+          connect();
+        });
+        return;
+      }
 
       const sock = net.connect(SOCKET);
       let abandoned = false;
@@ -213,10 +231,13 @@ function forward(request) {
           waitingForStart = true;
           abandoned = true;
           stopTimer();
-          startDaemon().then((ok) => {
+          startDaemon().then(() => {
             if (settled) return;
-            if (ok) connect();
-            else deny("socket_missing");
+            // Readiness can lag a competing daemon's bind. A real connect is
+            // the only proof of reachability; waitingForStart bounds this to
+            // one retry, and this connect has not written a request.
+            startedIdentity = socketIdentity();
+            connect();
           });
           return;
         }

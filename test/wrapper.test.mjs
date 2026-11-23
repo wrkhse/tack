@@ -655,11 +655,11 @@ async function slowStartFailsWithSocketMissing() {
   }
 }
 
-async function coldBefore(env, marker, dir) {
+async function coldBefore(env, marker, dir, modulePath = wrapperPath) {
   const stub = writeScript(dir, "stub-daemon.js", STUB_DAEMON);
   const full = { ...env, TACK_DAEMON_BIN: stub, TACK_STUB_MARKER: marker };
   delete full.TACK_NO_START;
-  return loadBefore(full);
+  return loadBefore(full, modulePath);
 }
 
 async function restartAfterDaemonDeath() {
@@ -724,6 +724,69 @@ function instrumentedWrapper(dir) {
   return target;
 }
 
+// A daemon that exits without binding: a start that cannot claim a fresh
+// socket, so forward must prove reachability with a real connect.
+const EXITING_DAEMON = [
+  "#!/usr/bin/env node",
+  "process.exit(0);",
+  "",
+].join("\n");
+
+// An instrumented copy whose socket stat and connect calls the test can
+// drive. The shipped wrapper is untouched.
+function raceWrapper(dir, name) {
+  const source = readFileSync(wrapperPath, "utf8")
+    .replace(
+      'const net = require("node:net");',
+      'const net = globalThis.__tackNet || require("node:net");',
+    )
+    .replace(
+      'const fs = require("node:fs");',
+      'const fs = globalThis.__tackFs || require("node:fs");',
+    );
+  const target = path.join(dir, name);
+  writeFileSync(target, source);
+  return target;
+}
+
+// Every stat of the socket reports one identity, so an unlink/rebind with
+// the same dev, inode and mtime is indistinguishable from the stale file.
+function fixedIdentityFs() {
+  const real = require("node:fs");
+  return {
+    ...real,
+    statSync(p) {
+      const info = real.statSync(p);
+      if (p === process.env.TACK_SOCKET) {
+        return { dev: 7, ino: 11, mtimeMs: 5 };
+      }
+      return info;
+    },
+  };
+}
+
+// The first connect gets ENOENT even though a daemon is listening: a
+// competing daemon bound the socket after that connect began.
+function forcedEnoentNet() {
+  const real = require("node:net");
+  let forced = false;
+  return {
+    ...real,
+    connect(...args) {
+      if (forced) return real.connect(...args);
+      forced = true;
+      const sock = new real.Socket();
+      setImmediate(() => {
+        const error = new Error("connect ENOENT");
+        error.code = "ENOENT";
+        sock.emit("error", error);
+        sock.destroy();
+      });
+      return sock;
+    },
+  };
+}
+
 async function secondColdStartKeepsLiveDaemon() {
   const dir = tempDir();
   const marker = path.join(dir, "daemons.log");
@@ -759,6 +822,96 @@ async function secondColdStartKeepsLiveDaemon() {
     await beforeFresh(ALLOW_CALL);
   } finally {
     await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A competing daemon binds between the first ENOENT and the stat check.
+// The start cannot see a fresh bind, but one real connect must reach the
+// live daemon instead of denying socket_missing.
+async function competingBindBeforeStatUsesLiveSocket() {
+  const dir = tempDir();
+  let server;
+
+  try {
+    const exiting = writeScript(dir, "exiting-daemon.js", EXITING_DAEMON);
+    const env = baseEnv(dir, { TACK_DAEMON_BIN: exiting });
+    delete env.TACK_NO_START;
+    delete globalThis.__tackFs;
+
+    globalThis.__tackNet = forcedEnoentNet();
+    const target = raceWrapper(dir, "competing-bind.js");
+    const before = await loadBefore(env, target);
+
+    server = await listen(env.TACK_SOCKET, (conn) => {
+      let buffer = "";
+      conn.setEncoding("utf8");
+      conn.on("error", () => {});
+      conn.on("data", (chunk) => {
+        buffer += chunk;
+        if (buffer.indexOf("\n") < 0) return;
+        conn.write(reply("hook", { outcome: { kind: "allow" } }) + "\n");
+      });
+    });
+
+    let error;
+    try {
+      await before(ALLOW_CALL);
+    } catch (thrown) {
+      error = thrown;
+    }
+    assert.equal(
+      error, undefined, "the live socket must be used, not a named deny",
+    );
+  } finally {
+    delete globalThis.__tackNet;
+    if (server) await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A stale socket is replaced by a fresh listener with the same dev, inode
+// and mtime. The start cannot see an identity change, but the one connect
+// after it resolves succeeds. With no daemon at all the call fails closed.
+async function rebindWithMatchingIdentity() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+  const socket = path.join(dir, "tack.sock");
+
+  try {
+    const stale = writeScript(dir, "stale.js", STALE_SOCKET);
+    execFileSync(process.execPath, [stale, socket], { stdio: "ignore" });
+    assert.ok(existsSync(socket), "stale socket was not created");
+
+    globalThis.__tackFs = fixedIdentityFs();
+    const target = raceWrapper(dir, "matching-identity.js");
+    const env = baseEnv(dir, { TACK_STUB_DELAY_MS: "20" });
+    const before = await coldBefore(env, marker, dir, target);
+
+    await before(ALLOW_CALL);
+
+    assert.ok(existsSync(marker), "a refused socket did not trigger a start");
+  } finally {
+    delete globalThis.__tackFs;
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function rebindWithNoDaemonFailsClosed() {
+  const dir = tempDir();
+
+  try {
+    globalThis.__tackFs = fixedIdentityFs();
+    const exiting = writeScript(dir, "exiting-daemon.js", EXITING_DAEMON);
+    const env = baseEnv(dir, { TACK_DAEMON_BIN: exiting });
+    delete env.TACK_NO_START;
+    const target = raceWrapper(dir, "matching-identity-closed.js");
+    const before = await loadBefore(env, target);
+
+    await expectDeny(before, "socket_missing");
+  } finally {
+    delete globalThis.__tackFs;
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -824,6 +977,18 @@ await check(
 await check(
   "a second cold start leaves the live daemon reachable",
   secondColdStartKeepsLiveDaemon,
+);
+await check(
+  "a bind before the stat check uses the live socket, no deny",
+  competingBindBeforeStatUsesLiveSocket,
+);
+await check(
+  "a rebind with matching identity retries the connect and succeeds",
+  rebindWithMatchingIdentity,
+);
+await check(
+  "a rebind with matching identity fails closed when no daemon appears",
+  rebindWithNoDaemonFailsClosed,
 );
 
 if (buildDir) rmSync(buildDir, { recursive: true, force: true });
