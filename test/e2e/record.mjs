@@ -1,6 +1,7 @@
-// Prepares a scratch session for the VHS tape: real git repo, throwaway HOME,
-// fake model, rc-built wrapper, two tmux panes, and a bounded verdict watcher.
-// The tape types the real commands; this script writes no session digest.
+// Prepares a scratch session for the Terminal Control recording: real git
+// repo, throwaway HOME, fake model, rc-built wrapper, two tmux panes, and a
+// bounded verdict watcher. The driver types the real commands; this script
+// renders no panes and prints no digest.
 
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -25,8 +26,8 @@ const fakeModel = path.join(here, "fake-model.mjs");
 const gitShim = path.join(here, "git-shim");
 const pluginSource = path.join(repoRoot, "fixtures", "safe-push");
 const verdictPath = path.join(repoRoot, "verdict.txt");
+const readyPath = path.join(repoRoot, "session-ready");
 
-const openCodeBin = process.env.OPENCODE_BIN || "opencode";
 const tackCli = process.env.TACK_CLI || "tack";
 
 const SESSION = "tack-rec";
@@ -84,6 +85,9 @@ function initRepo(dir) {
     "-c", "user.name=demo",
     "commit", "--allow-empty", "-q", "-m", "initial",
   ], { cwd: dir });
+  spawnSync(git, ["update-ref", "refs/remotes/origin/main", "HEAD"], {
+    cwd: dir,
+  });
 }
 
 function writeConfig(configHome, pluginDir, baseUrl) {
@@ -212,10 +216,7 @@ function launchTmux(env, dir, daemonLog) {
   tmux(["select-pane", "-t", SESSION + ":0.1", "-T", "daemon.log"], runEnv);
   tmux(["select-pane", "-t", SESSION + ":0.0"], runEnv);
 
-  return track(spawn("tmux", ["attach-session", "-t", SESSION], {
-    stdio: "inherit",
-    env: runEnv,
-  }));
+  writeFileSync(readyPath, "ready\n");
 }
 
 function judgement(daemonText, recorderText) {
@@ -258,7 +259,6 @@ async function main() {
     mkdirSync(dir, { recursive: true });
   }
 
-  let attached;
   let watchTimer;
 
   try {
@@ -297,7 +297,7 @@ async function main() {
       OPENCODE_DISABLE_FILEWATCHER: "1",
     };
 
-    attached = launchTmux(env, projectDir, daemonLog);
+    launchTmux(env, projectDir, daemonLog);
     watchTimer = setInterval(() => {
       const result = judgement(
         readOptional(daemonLog),
@@ -313,9 +313,9 @@ async function main() {
     writeFileSync(verdictPath, result.lines.join("\n") + "\n");
     process.exitCode = result.ok ? 0 : 1;
 
-    if (attached && attached.exitCode === null) attached.kill("SIGKILL");
     spawnSync("tmux", ["kill-session", "-t", SESSION], { stdio: "ignore" });
     killChildren();
+    rmSync(readyPath, { force: true });
     if (created) rmSync(base, { recursive: true, force: true });
   }
 }

@@ -7,7 +7,7 @@ on:
     paths:
       - .github/workflows/record.yml
       - test/e2e/record.mjs
-      - test/e2e/record.tape
+      - test/e2e/video-edit.json
   workflow_dispatch:
     inputs:
       tag:
@@ -30,7 +30,6 @@ jobs:
       TAG: ${{ github.event.release.tag_name || inputs.tag || 'v0.1.0-rc.1' }}
       TARGET: x86_64-unknown-linux-gnu
       OPENCODE_VERSION: "2.3.0"
-      VHS_IMAGE: ghcr.io/charmbracelet/vhs:v0.12.1@sha256:ea49a6a1c529be83153e88321892b5585964418f0b9055e8c1e0d732194234a3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,15 +37,30 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.22.3
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
 
-      - name: Stage Node for the VHS container
+      - name: Install the recording prerequisites
         run: |
           set -euo pipefail
 
-          prefix="$(dirname "$(dirname "$(command -v node)")")"
-          cp -a "$prefix" "$RUNNER_TEMP/node"
-          test -x "$RUNNER_TEMP/node/bin/node"
-          "$RUNNER_TEMP/node/bin/node" --version
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends tmux ffmpeg
+
+          cd "$RUNNER_TEMP"
+          curl -fsSLO \
+            https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          sha='02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239'
+          echo "$sha  zig-x86_64-linux-0.15.2.tar.xz" | sha256sum -c -
+          tar -xf zig-x86_64-linux-0.15.2.tar.xz
+          zigdir="$RUNNER_TEMP/zig-x86_64-linux-0.15.2"
+          echo "$zigdir" >> "$GITHUB_PATH"
+          export PATH="$zigdir:$PATH"
+          zig version
+
+          cargo install --locked --version 1.2.1 terminal-control
+          termctrl --version
 
       - name: Install the rc binaries
         env:
@@ -90,43 +104,61 @@ jobs:
           export PATH="$bin:$PATH"
           opencode --version
 
-      - name: Build the VHS image with git
-        run: |
-          set -euo pipefail
-
-          docker build -t tack-vhs-git - <<EOF
-          FROM $VHS_IMAGE
-          RUN apt-get update && apt-get -y install --no-install-recommends git tmux
-          EOF
-
       - name: Record the session
         run: |
           set -euo pipefail
 
-          docker run --rm \
-            -v "$PWD:/vhs" \
-            -v "$RUNNER_TEMP:/bins" \
-            -v "$RUNNER_TEMP/node:/node" \
-            -w /vhs \
-            -e PATH=/node/bin:/usr/bin:/bin \
-            -e TACK_CLI=/bins/tack-bin/tack \
-            -e TACK_DAEMON_BIN=/bins/tack-bin/tack-daemon \
-            -e OPENCODE_BIN=/bins/opencode-bin/opencode \
-            tack-vhs-git test/e2e/record.tape
+          export TACK_CLI="$RUNNER_TEMP/tack-bin/tack"
+          export TACK_DAEMON_BIN="$RUNNER_TEMP/tack-bin/tack-daemon"
+          export OPENCODE_BIN="$RUNNER_TEMP/opencode-bin/opencode"
 
-      - name: Render the final GIF
+          node test/e2e/record.mjs &
+          helper=$!
+          ready=0
+          for _ in $(seq 1 150); do
+            if [ -f session-ready ]; then ready=1; break; fi
+            kill -0 "$helper" 2>/dev/null || break
+            sleep 0.1
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "session-ready was not written" >&2
+            exit 1
+          fi
+
+          termctrl start rec --record run.termctrl -- \
+            tmux attach-session -t tack-rec
+          termctrl wait rec "OpenCode session" --timeout 20000
+          termctrl mark rec ready
+
+          cmd="opencode run --standalone --format json -m fake/scripted"
+          cmd="$cmd 'push my branch'"
+          termctrl send rec "text:$cmd" enter
+          termctrl wait rec "push blocked" --timeout 30000
+          termctrl mark rec denied
+          termctrl wait rec "guard_status ok" --timeout 30000
+          termctrl mark rec tool
+
+          termctrl send rec "text:git log origin/main" enter
+          termctrl wait rec "initial" --timeout 20000
+          termctrl mark rec proof
+          termctrl stop rec
+
+          for _ in $(seq 1 150); do
+            kill -0 "$helper" 2>/dev/null || break
+            sleep 0.1
+          done
+          kill "$helper" 2>/dev/null || true
+
+      - name: Render the GIF
         run: |
           set -euo pipefail
 
+          termctrl video run.termctrl --edit test/e2e/video-edit.json \
+            --footer --out run.mp4
+
           filter="fps=10,scale=1200:-1:flags=lanczos,split[s0][s1];"
           filter="${filter}[s0]palettegen[p];[s1][p]paletteuse"
-
-          docker run --rm \
-            --entrypoint ffmpeg \
-            --volume "$PWD:/vhs" \
-            -w /vhs \
-            tack-vhs-git \
-            -y -i /vhs/vhs.gif -vf "$filter" -loop 0 /vhs/demo.gif
+          ffmpeg -y -i run.mp4 -vf "$filter" -loop 0 demo.gif
 
       - name: Check the verdict and the GIF
         run: |
@@ -144,15 +176,8 @@ jobs:
             exit 1
           fi
 
-          width="$(
-            docker run --rm \
-              --entrypoint ffprobe \
-              --volume "$PWD:/vhs" \
-              -w /vhs \
-              tack-vhs-git \
-              -v error -select_streams v \
-              -show_entries stream=width -of csv=p=0 demo.gif
-          )"
+          width="$(ffprobe -v error -select_streams v \
+            -show_entries stream=width -of csv=p=0 demo.gif)"
           if [ "$width" -gt 1200 ]; then
             echo "demo.gif too wide: $width" >&2
             exit 1
