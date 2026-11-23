@@ -63,11 +63,14 @@ jobs:
             --pattern "SHA256SUMS"
           grep -F "tack-$TAG-$TARGET.tar.gz" SHA256SUMS | sha256sum -c -
           tar -xzf "tack-$TAG-$TARGET.tar.gz" -C "$RUNNER_TEMP/tack-bin"
+          tar -tzf "tack-$TAG-$TARGET.tar.gz" > "$RUNNER_TEMP/tack-files.txt"
+          grep -qx 'tack' "$RUNNER_TEMP/tack-files.txt"
+          grep -qx 'tack-daemon' "$RUNNER_TEMP/tack-files.txt"
 
           echo "$RUNNER_TEMP/tack-bin" >> "$GITHUB_PATH"
           export PATH="$RUNNER_TEMP/tack-bin:$PATH"
           tack --version
-          tack --version | grep -q '0.1.0-rc.1'
+          tack --version | grep -F "${TAG#v}"
 
       - name: Install OpenCode
         run: |
@@ -87,6 +90,15 @@ jobs:
           export PATH="$bin:$PATH"
           opencode --version
 
+      - name: Build the VHS image with git
+        run: |
+          set -euo pipefail
+
+          docker build -t tack-vhs-git - <<EOF
+          FROM $VHS_IMAGE
+          RUN apt-get update && apt-get -y install --no-install-recommends git
+          EOF
+
       - name: Record the session
         run: |
           set -euo pipefail
@@ -100,9 +112,35 @@ jobs:
             -e TACK_CLI=/bins/tack-bin/tack \
             -e TACK_DAEMON_BIN=/bins/tack-bin/tack-daemon \
             -e OPENCODE_BIN=/bins/opencode-bin/opencode \
-            "$VHS_IMAGE" test/e2e/record.tape
+            tack-vhs-git test/e2e/record.tape
+
+      - name: Check the verdict and the GIF
+        run: |
+          set -euo pipefail
+
+          test -s verdict.txt
+          grep -qx 'push_denied=true' verdict.txt
+          grep -qx 'guard_status_ran=true' verdict.txt
+          grep -qx 'no_push_recorded=true' verdict.txt
+
+          test -f demo.gif
+          bytes="$(wc -c < demo.gif)"
+          if [ "$bytes" -ge 3000000 ]; then
+            echo "demo.gif too large: $bytes bytes" >&2
+            exit 1
+          fi
+
+          width="$(
+            ffprobe -v error -select_streams v \
+              -show_entries stream=width -of csv=p=0 demo.gif
+          )"
+          if [ "$width" -gt 1200 ]; then
+            echo "demo.gif too wide: $width" >&2
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: slice-1-recording
           path: demo.gif
+          if-no-files-found: error

@@ -10,4 +10,4 @@ Set Framerate 10
 Type "node test/e2e/record.mjs"
 Enter
 
-Sleep 16s
+Sleep 22s

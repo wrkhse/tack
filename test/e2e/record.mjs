@@ -122,8 +122,6 @@ function stopRedraw() {
 function handleCode(line) {
   if (line.trim().length === 0) return;
   pushLine(codeBuffer, line);
-  if (line.includes("push blocked")) markerPush = true;
-  if (line.includes("guard_status: daemon ok")) markerGuard = true;
 }
 
 function handleDaemon(line) {
@@ -171,16 +169,12 @@ function findExecutable(name) {
 
 function initRepo(dir) {
   const git = findExecutable("git");
-  if (git) {
-    const result = spawnSync(git, ["init", "-q"], { cwd: dir });
-    if (result.status === 0) return;
+  if (!git) throw new Error("git is required on PATH for the scratch repo");
+  const result = spawnSync(git, ["init", "-q"], { cwd: dir });
+  if (result.status !== 0) {
+    const detail = result.stderr?.toString().trim() ?? "unknown error";
+    throw new Error("git init failed: " + detail);
   }
-  // The VHS image has no git; a minimal on-disk skeleton is enough here.
-  const gitDir = path.join(dir, ".git");
-  mkdirSync(path.join(gitDir, "objects"), { recursive: true });
-  mkdirSync(path.join(gitDir, "refs"), { recursive: true });
-  writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
-  writeFileSync(path.join(gitDir, "config"), "[core]\n\tbare = false\n");
 }
 
 function writeConfig(configHome, pluginDir, baseUrl) {
@@ -354,6 +348,11 @@ async function stopDaemon(stateDir) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return;
+  }
 }
 
 async function main() {
@@ -372,17 +371,14 @@ async function main() {
   const projectDir = path.join(base, "project");
   const dist = path.join(base, "dist");
   const recorder = path.join(base, "recorder.log");
+  const daemonLog = path.join(stateDir, "daemon.log");
 
   for (const dir of [
-    home, configHome, stateDir, dataHome, cacheHome, tmpHome, binDir, projectDir, dist,
+    home, configHome, stateDir, dataHome, cacheHome, tmpHome, binDir,
+    projectDir, dist,
   ]) {
     mkdirSync(dir, { recursive: true });
   }
-
-  initRepo(projectDir);
-  const shim = path.join(binDir, "git");
-  copyFileSync(gitShim, shim);
-  chmodSync(shim, 0o755);
 
   let model;
   let stopTail = () => {};
@@ -391,6 +387,11 @@ async function main() {
 
   try {
     wallTimer = setTimeout(() => killChildren(), WALL_TIMEOUT_MS);
+
+    initRepo(projectDir);
+    const shim = path.join(binDir, "git");
+    copyFileSync(gitShim, shim);
+    chmodSync(shim, 0o755);
 
     await buildPlugin(dist);
     const pluginDir = path.join(dist, "opencode");
@@ -416,17 +417,18 @@ async function main() {
       OPENCODE_DISABLE_FILEWATCHER: "1",
     };
 
-    stopTail = tailDaemon(path.join(stateDir, "daemon.log"));
+    stopTail = tailDaemon(daemonLog);
     const run = await runOpenCode(env, projectDir);
     stopTail();
     stopTail = () => {};
 
-    if (run.timedOut) pushLine(codeBuffer, "[setup] opencode hit the " + RUN_TIMEOUT_MS + "ms bound");
+    if (run.timedOut) {
+      pushLine(codeBuffer, "opencode hit " + RUN_TIMEOUT_MS + "ms bound");
+    }
 
-    const pushes = readOptional(recorder)
-      .split("\n")
-      .filter((line) => line.startsWith("push"));
-    recorderLine = pushes.length === 0 ? "[3] no git push" : "[3] PUSH EXECUTED";
+    const recorded = readOptional(recorder);
+    const pushed = recorded.split("\n").some((line) => line.startsWith("push"));
+    recorderLine = pushed ? "[3] PUSH EXECUTED" : "[3] no git push";
     render();
   } catch (error) {
     recorderLine = "[3] error: " + error.message;
@@ -437,6 +439,22 @@ async function main() {
     killChildren();
     stopRedraw();
     await stopDaemon(stateDir);
+
+    // The verdict reads the real artefacts, never OpenCode's own output.
+    const daemonText = readOptional(daemonLog);
+    const denied = daemonText.includes("hook toolBefore deny");
+    const guarded = daemonText.includes("tool guard_status ok");
+    const noPush = !readOptional(recorder)
+      .split("\n")
+      .some((line) => line.startsWith("push"));
+    const verdict = [
+      "push_denied=" + denied,
+      "guard_status_ran=" + guarded,
+      "no_push_recorded=" + noPush,
+    ];
+    writeFileSync(path.join(repoRoot, "verdict.txt"), verdict.join("\n") + "\n");
+    process.exitCode = denied && guarded && noPush ? 0 : 1;
+
     if (created) rmSync(base, { recursive: true, force: true });
     process.stdout.write(
       recorderLine === "[3] no git push"
