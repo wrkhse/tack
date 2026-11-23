@@ -39,33 +39,6 @@ fn lua_index(index: usize) -> Result<i64, EngineError> {
         .map_err(|_| EngineError::InvalidResult("tack: table index out of range".into()))
 }
 
-/// Accept a whole Lua float inside the entry ceiling as an array key.
-fn float_position(index: f64) -> Result<usize, EngineError> {
-    let unsupported = || EngineError::InvalidResult("tack: unsupported table key".into());
-
-    if !index.is_finite() || index.fract() != 0.0 {
-        return Err(unsupported());
-    }
-
-    let ceiling = u32::try_from(MAX_ENTRIES)
-        .map(f64::from)
-        .map_err(|_| unsupported())?;
-    if !(1.0..=ceiling).contains(&index) {
-        return Err(unsupported());
-    }
-
-    // The range and whole-number checks make this cast exact; the fallible
-    // conversion below is the only step that can still reject the key.
-    #[expect(
-        clippy::as_conversions,
-        clippy::cast_possible_truncation,
-        reason = "index is a whole number inside 1..=MAX_ENTRIES"
-    )]
-    let whole = index as i64;
-
-    usize::try_from(whole).map_err(|_| unsupported())
-}
-
 /// Accept only positive integers inside the entry ceiling as array keys.
 fn array_position(index: impl TryInto<usize>) -> Result<usize, EngineError> {
     let position = index
@@ -176,15 +149,6 @@ fn lua_table_to_json(table: &Table, depth: usize) -> Result<Value, EngineError> 
                 let converted = lua_to_json(value, depth.saturating_add(1))?;
                 array.push((position, converted));
             }
-            LuaValue::Number(index) => {
-                let position = float_position(index)?;
-                if array_mode == Some(false) {
-                    return Err(EngineError::InvalidResult("tack: mixed table keys".into()));
-                }
-                array_mode = Some(true);
-                let converted = lua_to_json(value, depth.saturating_add(1))?;
-                array.push((position, converted));
-            }
             _ => {
                 return Err(EngineError::InvalidResult(
                     "tack: unsupported table key".into(),
@@ -231,28 +195,6 @@ mod tests {
     }
 
     #[test]
-    fn float_position_accepts_only_whole_in_range_keys() {
-        let ceiling = f64::from(u32::try_from(MAX_ENTRIES).unwrap());
-        let over = f64::from(u32::try_from(MAX_ENTRIES).unwrap().saturating_add(1));
-
-        assert_eq!(float_position(1.0), Ok(1));
-        assert_eq!(float_position(2.0), Ok(2));
-        assert_eq!(float_position(ceiling), Ok(MAX_ENTRIES));
-
-        for bad in [
-            0.0,
-            -1.0,
-            over,
-            1.5,
-            f64::NAN,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-        ] {
-            assert_eq!(float_position(bad), Err(unsupported()), "key {bad}");
-        }
-    }
-
-    #[test]
     fn array_position_accepts_only_positive_in_range_keys() {
         assert_eq!(array_position(1i64), Ok(1));
         assert_eq!(array_position(2i64), Ok(2));
@@ -261,7 +203,8 @@ mod tests {
             Ok(MAX_ENTRIES)
         );
 
-        for bad in [0i64, -1, 1025] {
+        let over = i64::try_from(MAX_ENTRIES + 1).unwrap();
+        for bad in [0i64, -1, over] {
             assert_eq!(array_position(bad), Err(unsupported()), "key {bad}");
         }
     }
@@ -284,10 +227,26 @@ mod tests {
             lua_table_to_json(&integers, 0).unwrap(),
             serde_json::json!(["a", "b"])
         );
+    }
 
-        let floats = lua.create_table().unwrap();
-        floats.set(1.5f64, "a").unwrap();
-        assert_eq!(lua_table_to_json(&floats, 0), Err(unsupported()));
+    #[test]
+    fn lua_table_to_json_rejects_a_fractional_key() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set(1.5f64, "a").unwrap();
+        assert_eq!(lua_table_to_json(&table, 0), Err(unsupported()));
+    }
+
+    #[test]
+    fn lua_table_to_json_treats_a_whole_float_key_as_an_integer() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set(1i64, "a").unwrap();
+        table.set(2.0f64, "b").unwrap();
+        assert_eq!(
+            lua_table_to_json(&table, 0).unwrap(),
+            serde_json::json!(["a", "b"])
+        );
     }
 
     #[test]

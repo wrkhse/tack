@@ -386,7 +386,6 @@ mod tests {
         entries: Vec<OsString>,
         mode: u32,
         uid: u32,
-        modified: SystemTime,
     }
 
     fn snapshot_dir(dir: &Path) -> io::Result<DirSnapshot> {
@@ -401,7 +400,6 @@ mod tests {
             entries,
             mode: meta.mode() & 0o777,
             uid: meta.uid(),
-            modified: meta.modified()?,
         })
     }
 
@@ -497,13 +495,23 @@ mod tests {
         // A group- or world-writable folder is unsafe even when we own it.
         fs::set_permissions(&state, Permissions::from_mode(0o777)).unwrap();
 
+        // The old uid probe created, truncated and removed this exact file
+        // before checking ownership. Its bytes and every directory entry
+        // must survive the refusal unchanged.
+        let probe = state.join(format!(".tack-uid-{}", std::process::id()));
+        let sentinel = b"do not touch".to_vec();
+        fs::write(&probe, &sentinel).unwrap();
+
         let before = snapshot_dir(&state).unwrap();
 
         let err = bind(&state, &socket).unwrap_err();
         assert_eq!(err, TransportError::StateNotOwned);
 
-        let after = snapshot_dir(&state).unwrap();
-        assert_eq!(after, before);
+        assert_eq!(
+            fs::read(&probe).expect("the uid probe must not be touched"),
+            sentinel
+        );
+        assert_eq!(snapshot_dir(&state).unwrap(), before);
     }
 
     #[tokio::test]

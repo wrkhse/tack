@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use mlua::{Function, Lua, Table, Value as LuaValue, VmState};
 use serde_json::Value;
@@ -85,23 +85,26 @@ impl Sandbox {
         })
     }
 
+    /// Take the call lock, refusing to run after a caller panicked holding it.
+    fn lock_call(&self) -> Result<MutexGuard<'_, ()>, EngineError> {
+        self.call_lock.lock().map_err(|_| EngineError::Poisoned)
+    }
+
     /// Run a named hook and decode its verdict.
     ///
     /// # Errors
     ///
     /// Returns [`EngineError::Limit`] when the call exceeds its deadline or
-    /// memory ceiling, and [`EngineError::InvalidResult`] when the hook returns
-    /// a malformed result.
+    /// memory ceiling, [`EngineError::InvalidResult`] when the hook returns
+    /// a malformed result, and [`EngineError::Poisoned`] when a previous
+    /// call panicked while holding the call lock.
     pub fn hook(
         &self,
         hook: &str,
         call: &ToolCall,
         deadline_ms: u64,
     ) -> Result<Outcome, EngineError> {
-        let _guard = self
-            .call_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = self.lock_call()?;
         self.deadline.begin(deadline_ms);
         let outcome = self.run_hook(hook, call);
         self.deadline.disarm();
@@ -113,18 +116,17 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns [`EngineError::UnknownTool`] when no such tool exists,
-    /// [`EngineError::Limit`] when the call is bounded, and
-    /// [`EngineError::InvalidResult`] when the tool returns malformed content.
+    /// [`EngineError::Limit`] when the call is bounded,
+    /// [`EngineError::InvalidResult`] when the tool returns malformed content,
+    /// and [`EngineError::Poisoned`] when a previous call panicked while
+    /// holding the call lock.
     pub fn tool(
         &self,
         name: &str,
         input: &Value,
         deadline_ms: u64,
     ) -> Result<Vec<Content>, EngineError> {
-        let _guard = self
-            .call_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = self.lock_call()?;
         self.deadline.begin(deadline_ms);
         let content = self.run_tool(name, input);
         self.deadline.disarm();
@@ -136,13 +138,11 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns [`EngineError::InvalidResult`] when the manifest is malformed
-    /// or repeats a tool name, and [`EngineError::Limit`] when reading is
-    /// bounded.
+    /// or repeats a tool name, [`EngineError::Limit`] when reading is bounded,
+    /// and [`EngineError::Poisoned`] when a previous call panicked while
+    /// holding the call lock.
     pub fn manifest(&self) -> Result<PluginManifest, EngineError> {
-        let _guard = self
-            .call_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = self.lock_call()?;
         self.deadline.begin(self.default_deadline_ms);
         let manifest = self.read_manifest();
         self.deadline.disarm();

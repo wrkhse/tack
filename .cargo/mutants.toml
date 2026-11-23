@@ -6,9 +6,6 @@ test_workspace = true
 test_tool = 'nextest'
 
 exclude_re = [
-  # Process entry point: replacing it with () is unobservable in-process.
+  # Untested by Rust tests; covered by the e2e job.
   'crates/daemon/src/main\.rs.*replace main with \(\)',
-  # Luau normalizes whole float keys to integers, so the Number arm only sees
-  # non-integral keys, which the fallback rejects with the same message.
-  'delete match arm LuaValue::Number\(index\) in lua_table_to_json',
 ]

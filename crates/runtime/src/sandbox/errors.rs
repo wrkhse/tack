@@ -53,6 +53,7 @@ pub enum EngineError {
     Limit(LimitCause),
     UnknownTool(String),
     InvalidResult(String),
+    Poisoned,
 }
 
 impl fmt::Display for EngineError {
@@ -62,6 +63,7 @@ impl fmt::Display for EngineError {
             Self::Script(message) | Self::InvalidResult(message) => f.write_str(message),
             Self::Limit(cause) => cause.fmt(f),
             Self::UnknownTool(name) => write!(f, "tack: unknown tool: {name}"),
+            Self::Poisoned => f.write_str("tack: engine call lock poisoned"),
         }
     }
 }
@@ -142,6 +144,10 @@ mod tests {
             (
                 EngineError::InvalidResult("bad result".into()),
                 "bad result".to_owned(),
+            ),
+            (
+                EngineError::Poisoned,
+                "tack: engine call lock poisoned".to_owned(),
             ),
         ] {
             assert_eq!(error.to_string(), expected);
