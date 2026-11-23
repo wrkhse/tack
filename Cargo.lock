@@ -343,7 +343,6 @@ dependencies = [
 name = "tack_daemon"
 version = "0.1.0-rc.2"
 dependencies = [
- "libc",
  "serde_json",
  "tack_protocol",
  "tack_runtime",

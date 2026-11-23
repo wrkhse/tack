@@ -17,12 +17,12 @@ pub enum LimitCause {
 impl fmt::Display for LimitCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LimitCause::Deadline => f.write_str("tack: script deadline exceeded"),
-            LimitCause::Memory => f.write_str("tack: memory limit exceeded"),
-            LimitCause::TooManyEntries { limit } => {
+            Self::Deadline => f.write_str("tack: script deadline exceeded"),
+            Self::Memory => f.write_str("tack: memory limit exceeded"),
+            Self::TooManyEntries { limit } => {
                 write!(f, "tack: too many table entries: {limit}")
             }
-            LimitCause::TooDeep { limit } => write!(f, "tack: nesting deeper than {limit}"),
+            Self::TooDeep { limit } => write!(f, "tack: nesting deeper than {limit}"),
         }
     }
 }
@@ -39,8 +39,8 @@ pub enum LoadCause {
 impl fmt::Display for LoadCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LoadCause::Require(cause) => cause.fmt(f),
-            LoadCause::Message(message) => f.write_str(message),
+            Self::Require(cause) => cause.fmt(f),
+            Self::Message(message) => f.write_str(message),
         }
     }
 }
@@ -58,12 +58,10 @@ pub enum EngineError {
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EngineError::Load(cause) => cause.fmt(f),
-            EngineError::Script(message) | EngineError::InvalidResult(message) => {
-                f.write_str(message)
-            }
-            EngineError::Limit(cause) => cause.fmt(f),
-            EngineError::UnknownTool(name) => write!(f, "tack: unknown tool: {name}"),
+            Self::Load(cause) => cause.fmt(f),
+            Self::Script(message) | Self::InvalidResult(message) => f.write_str(message),
+            Self::Limit(cause) => cause.fmt(f),
+            Self::UnknownTool(name) => write!(f, "tack: unknown tool: {name}"),
         }
     }
 }
@@ -73,14 +71,14 @@ impl std::error::Error for EngineError {}
 impl From<mlua::Error> for EngineError {
     fn from(error: mlua::Error) -> Self {
         if let Some(cause) = error.downcast_ref::<LimitCause>() {
-            return EngineError::Limit(cause.clone());
+            return Self::Limit(cause.clone());
         }
         if let Some(cause) = error.downcast_ref::<RequireCause>() {
-            return EngineError::Load(LoadCause::Require(cause.clone()));
+            return Self::Load(LoadCause::Require(cause.clone()));
         }
         match &error {
-            mlua::Error::MemoryError(_) => EngineError::Limit(LimitCause::Memory),
-            _ => EngineError::Script(error.to_string()),
+            mlua::Error::MemoryError(_) => Self::Limit(LimitCause::Memory),
+            _ => Self::Script(error.to_string()),
         }
     }
 }

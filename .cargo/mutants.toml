@@ -1,0 +1,6 @@
+# Mutants are found across the whole workspace, so run the workspace tests for
+# the baseline and for each mutant instead of only the mutated package's tests.
+test_workspace = true
+
+# nextest stops at the first failing test, which is what a mutant run wants.
+test_tool = 'nextest'

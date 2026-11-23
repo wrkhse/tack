@@ -16,7 +16,10 @@ impl Deadline {
     }
 
     pub(super) fn begin(&self, ms: u64) {
-        *self.started.lock().expect("deadline clock poisoned") = Instant::now();
+        *self
+            .started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
         self.budget_us
             .store(ms.saturating_mul(1000), Ordering::Relaxed);
     }
@@ -33,7 +36,7 @@ impl Deadline {
         let elapsed = self
             .started
             .lock()
-            .expect("deadline clock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed();
         elapsed.as_micros() >= u128::from(budget)
     }

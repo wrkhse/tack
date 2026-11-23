@@ -44,11 +44,14 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    pub fn new(
-        folder: &Path,
-        memory_bytes: usize,
-        deadline_ms: u64,
-    ) -> Result<Sandbox, EngineError> {
+    /// Build a sandbox rooted at `folder` under the given bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Load`] when the folder or entry module cannot be
+    /// loaded, and [`EngineError::Limit`] when a top-level loop exhausts the
+    /// startup deadline or memory ceiling.
+    pub fn new(folder: &Path, memory_bytes: usize, deadline_ms: u64) -> Result<Self, EngineError> {
         let lua = Lua::new();
         let state = require::RequireState::new(folder)
             .map_err(|message| EngineError::Load(LoadCause::Message(message)))?;
@@ -82,34 +85,64 @@ impl Sandbox {
         })
     }
 
+    /// Run a named hook and decode its verdict.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Limit`] when the call exceeds its deadline or
+    /// memory ceiling, and [`EngineError::InvalidResult`] when the hook returns
+    /// a malformed result.
     pub fn hook(
         &self,
         hook: &str,
         call: &ToolCall,
         deadline_ms: u64,
     ) -> Result<Outcome, EngineError> {
-        let _guard = self.call_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self
+            .call_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.deadline.begin(deadline_ms);
         let outcome = self.run_hook(hook, call);
         self.deadline.disarm();
         outcome
     }
 
+    /// Run a named tool and decode its content.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::UnknownTool`] when no such tool exists,
+    /// [`EngineError::Limit`] when the call is bounded, and
+    /// [`EngineError::InvalidResult`] when the tool returns malformed content.
     pub fn tool(
         &self,
         name: &str,
         input: &Value,
         deadline_ms: u64,
     ) -> Result<Vec<Content>, EngineError> {
-        let _guard = self.call_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self
+            .call_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.deadline.begin(deadline_ms);
         let content = self.run_tool(name, input);
         self.deadline.disarm();
         content
     }
 
+    /// Read the plugin manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidResult`] when the manifest is malformed
+    /// or repeats a tool name, and [`EngineError::Limit`] when reading is
+    /// bounded.
     pub fn manifest(&self) -> Result<PluginManifest, EngineError> {
-        let _guard = self.call_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self
+            .call_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.deadline.begin(self.default_deadline_ms);
         let manifest = self.read_manifest();
         self.deadline.disarm();
@@ -163,13 +196,10 @@ impl Sandbox {
         let Some(value) = self.plugin.get::<Option<LuaValue>>("needs")? else {
             return Ok(Vec::new());
         };
-        let table = match value {
-            LuaValue::Table(table) => table,
-            _ => {
-                return Err(EngineError::InvalidResult(
-                    "tack: needs must be an array".into(),
-                ));
-            }
+        let LuaValue::Table(table) = value else {
+            return Err(EngineError::InvalidResult(
+                "tack: needs must be an array".into(),
+            ));
         };
         let mut needs = Vec::new();
         for pair in table.pairs::<LuaValue, LuaValue>() {
@@ -206,13 +236,10 @@ impl Sandbox {
             }
             let (key, value) = pair?;
             let key = lua_key(key)?;
-            let table = match value {
-                LuaValue::Table(table) => table,
-                _ => {
-                    return Err(EngineError::InvalidResult(
-                        "tack: tool must be a table".into(),
-                    ));
-                }
+            let LuaValue::Table(table) = value else {
+                return Err(EngineError::InvalidResult(
+                    "tack: tool must be a table".into(),
+                ));
             };
             let definition = read_tool(&table, &key)?;
             if definition.name.is_empty() {

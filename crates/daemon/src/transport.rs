@@ -22,6 +22,14 @@ const MAX_REQUESTS_PER_CONNECTION: usize = 1000;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
+/// The frame deadline, falling back to `now` only if the clock cannot
+/// represent a deadline this far out.
+fn frame_deadline() -> Instant {
+    Instant::now()
+        .checked_add(IO_TIMEOUT)
+        .unwrap_or_else(Instant::now)
+}
+
 /// Failures from binding or serving the owner-only Unix socket.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransportError {
@@ -93,7 +101,7 @@ fn acquire_lock(lock_path: &Path) -> Result<Lock, TransportError> {
 /// Create a missing state folder, or verify that an existing one is ours.
 fn ensure_state_dir(state_dir: &Path) -> Result<(), TransportError> {
     match fs::metadata(state_dir) {
-        Ok(meta) if meta.is_dir() => verify_state_dir(&meta),
+        Ok(meta) if meta.is_dir() => verify_state_dir(state_dir, &meta),
         Ok(_) => Err(TransportError::Bind(format!(
             "{} is not a directory",
             state_dir.display()
@@ -112,13 +120,32 @@ fn ensure_state_dir(state_dir: &Path) -> Result<(), TransportError> {
 
 /// A state folder is safe when it belongs to us and cannot be written by its
 /// group or by other users, so nobody else can plant a socket inside it.
-fn state_dir_is_safe(uid: u32, mode: u32, euid: u32) -> bool {
+const fn state_dir_is_safe(uid: u32, mode: u32, euid: u32) -> bool {
     uid == euid && mode & 0o022 == 0
 }
 
-fn verify_state_dir(meta: &fs::Metadata) -> Result<(), TransportError> {
-    // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.
-    let euid = unsafe { libc::geteuid() };
+/// A newly created file is owned by this process's effective uid. Reading
+/// that owner from a probe file avoids a direct libc call under the workspace
+/// `forbid(unsafe_code)` gate.
+fn effective_uid(state_dir: &Path) -> Result<u32, TransportError> {
+    let probe = state_dir.join(format!(".tack-uid-{}", std::process::id()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe)
+        .map_err(|_| TransportError::StateNotOwned)?;
+    let uid = file
+        .metadata()
+        .map(|meta| meta.uid())
+        .map_err(|_| TransportError::StateNotOwned)?;
+    drop(file);
+    let _ = fs::remove_file(&probe);
+    Ok(uid)
+}
+
+fn verify_state_dir(state_dir: &Path, meta: &fs::Metadata) -> Result<(), TransportError> {
+    let euid = effective_uid(state_dir)?;
     if state_dir_is_safe(meta.uid(), meta.mode(), euid) {
         Ok(())
     } else {
@@ -150,7 +177,14 @@ pub struct Server {
 }
 
 /// Bind the owner-only socket inside a verified state folder.
-pub async fn bind(state_dir: &Path, socket: &Path) -> Result<Server, TransportError> {
+///
+/// # Errors
+///
+/// Returns [`TransportError::StateNotOwned`] when the state folder is unsafe,
+/// [`TransportError::LockBusy`] or [`TransportError::LockIo`] when the start
+/// lock cannot be taken, and [`TransportError::Bind`] when the socket cannot be
+/// prepared or bound.
+pub fn bind(state_dir: &Path, socket: &Path) -> Result<Server, TransportError> {
     ensure_state_dir(state_dir)?;
 
     let canonical_state = fs::canonicalize(state_dir)
@@ -191,6 +225,10 @@ impl Drop for Server {
 impl Server {
     /// Serve requests until the listener fails. Connections are bounded by
     /// `MAX_PENDING` in flight, and each by `MAX_REQUESTS_PER_CONNECTION` frames.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::Io`] when the listener cannot be polled.
     pub async fn serve<F>(self, handle: F) -> Result<(), TransportError>
     where
         F: Fn(Request) -> Reply + Send + Sync + 'static,
@@ -213,7 +251,7 @@ impl Server {
             };
 
             let task_handle = Arc::clone(&handle);
-            connections.spawn_blocking(move || run_connection(stream, task_handle));
+            connections.spawn_blocking(move || run_connection(stream, &task_handle));
         }
     }
 }
@@ -244,11 +282,11 @@ struct DeadlineReader<'a> {
 }
 
 impl<'a> DeadlineReader<'a> {
-    fn new(stream: &'a StdUnixStream, deadline: Instant) -> Self {
+    const fn new(stream: &'a StdUnixStream, deadline: Instant) -> Self {
         Self { stream, deadline }
     }
 
-    fn reset(&mut self, deadline: Instant) {
+    const fn reset(&mut self, deadline: Instant) {
         self.deadline = deadline;
     }
 }
@@ -270,13 +308,12 @@ impl Read for DeadlineReader<'_> {
     }
 }
 
-fn run_connection<F>(stream: UnixStream, handle: Arc<F>)
+fn run_connection<F>(stream: UnixStream, handle: &Arc<F>)
 where
     F: Fn(Request) -> Reply + Send + Sync + 'static,
 {
-    let stream = match stream.into_std() {
-        Ok(stream) => stream,
-        Err(_) => return,
+    let Ok(stream) = stream.into_std() else {
+        return;
     };
 
     if stream.set_nonblocking(false).is_err() || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
@@ -284,36 +321,33 @@ where
         return;
     }
 
-    let mut writer = match stream.try_clone() {
-        Ok(writer) => writer,
-        Err(_) => return,
+    let Ok(mut writer) = stream.try_clone() else {
+        return;
     };
-    let mut reader = io::BufReader::new(DeadlineReader::new(&stream, Instant::now() + IO_TIMEOUT));
+    let mut reader = io::BufReader::new(DeadlineReader::new(&stream, frame_deadline()));
 
     for _ in 0..MAX_REQUESTS_PER_CONNECTION {
         // Each frame gets one budget shared by all of its reads, so a peer
         // that dribbles bytes cannot keep a frame open indefinitely.
-        reader.get_mut().reset(Instant::now() + IO_TIMEOUT);
+        reader.get_mut().reset(frame_deadline());
 
         let line = match wire::read_line(&mut reader) {
             Ok(Some(line)) => line,
-            Ok(None) => break,
             Err(wire::WireError::TooLarge) => {
                 send_error(&mut writer, ReplyError::TooLarge, "too_large");
 
                 break;
             }
-            Err(_) => break,
+            Ok(None) | Err(_) => break,
         };
 
-        let reply = match serde_json::from_slice::<Request>(&line) {
-            Ok(request) => handle(request),
-            Err(_) => error_reply(ReplyError::Malformed, "malformed"),
-        };
+        let reply = serde_json::from_slice::<Request>(&line).map_or_else(
+            |_| error_reply(ReplyError::Malformed, "malformed"),
+            |request| handle(request),
+        );
 
-        let encoded = match wire::encode_line(&reply) {
-            Ok(encoded) => encoded,
-            Err(_) => break,
+        let Ok(encoded) = wire::encode_line(&reply) else {
+            break;
         };
 
         if writer.write_all(&encoded).is_err() || writer.flush().is_err() {
@@ -363,15 +397,15 @@ mod tests {
         }
     }
 
-    fn allow_all(request: Request) -> Reply {
+    fn allow_all(request: &Request) -> Reply {
         match request {
             Request::Hook { id, .. } => Reply::Hook {
-                id,
+                id: *id,
                 version: PROTOCOL_VERSION,
                 outcome: Outcome::Allow,
             },
             Request::Tool { id, .. } => Reply::Tool {
-                id,
+                id: *id,
                 version: PROTOCOL_VERSION,
                 content: vec![],
             },
@@ -393,14 +427,14 @@ mod tests {
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");
 
-        let (first, second) = tokio::join!(bind(&state, &socket), bind(&state, &socket));
+        let first = bind(&state, &socket);
+        let second = bind(&state, &socket);
 
         let wins = [first.is_ok(), second.is_ok()];
         assert_eq!(wins.iter().filter(|won| **won).count(), 1);
 
-        let loser = match (&first, &second) {
-            (Ok(_), Err(err)) | (Err(err), Ok(_)) => err,
-            _ => panic!("one bind must lose the lock"),
+        let ((Ok(_), Err(loser)) | (Err(loser), Ok(_))) = (&first, &second) else {
+            panic!("one bind must lose the lock")
         };
         assert_eq!(loser, &TransportError::LockBusy);
     }
@@ -411,7 +445,7 @@ mod tests {
         let state = dir.path().join("a/b/c");
         let socket = state.join("tack.sock");
 
-        let server = bind(&state, &socket).await.unwrap();
+        let server = bind(&state, &socket).unwrap();
         assert!(socket.exists());
 
         drop(server);
@@ -422,7 +456,7 @@ mod tests {
         let dir = TempDir::new();
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");
-        let _server = bind(&state, &socket).await.unwrap();
+        let _server = bind(&state, &socket).unwrap();
 
         let socket_mode = fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
         let state_mode = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
@@ -439,7 +473,7 @@ mod tests {
         fs::create_dir(&state).unwrap();
 
         let before = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
-        let _server = bind(&state, &socket).await.unwrap();
+        let _server = bind(&state, &socket).unwrap();
         let after = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
 
         assert_eq!(before, after);
@@ -451,7 +485,7 @@ mod tests {
         let state = dir.path().join("state");
         let socket = dir.path().join("elsewhere.sock");
 
-        let err = bind(&state, &socket).await.unwrap_err();
+        let err = bind(&state, &socket).unwrap_err();
         assert!(matches!(err, TransportError::Bind(_)));
     }
 
@@ -460,9 +494,9 @@ mod tests {
         let dir = TempDir::new();
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");
-        let server = bind(&state, &socket).await.unwrap();
+        let server = bind(&state, &socket).unwrap();
 
-        let task = tokio::spawn(server.serve(allow_all));
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
 
         let mut client = UnixStream::connect(&socket).await.unwrap();
         let line = wire::encode_line(&Request::Hook {
@@ -499,9 +533,9 @@ mod tests {
         let dir = TempDir::new();
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");
-        let server = bind(&state, &socket).await.unwrap();
+        let server = bind(&state, &socket).unwrap();
 
-        let task = tokio::spawn(server.serve(allow_all));
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
 
         let mut client = UnixStream::connect(&socket).await.unwrap();
         client.write_all(b"not json\n").await.unwrap();
@@ -526,9 +560,9 @@ mod tests {
         let dir = TempDir::new();
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");
-        let server = bind(&state, &socket).await.unwrap();
+        let server = bind(&state, &socket).unwrap();
 
-        let task = tokio::spawn(server.serve(allow_all));
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
 
         let mut client = UnixStream::connect(&socket).await.unwrap();
         let mut frame = vec![b'x'; MAX_FRAME_BYTES + 1];
@@ -560,7 +594,7 @@ mod tests {
         fs::create_dir_all(&state).unwrap();
         fs::write(&foreign, b"keep").unwrap();
 
-        let server = bind(&state, &socket).await.unwrap();
+        let server = bind(&state, &socket).unwrap();
         assert!(socket.exists());
         assert!(lock.exists());
 
@@ -577,10 +611,10 @@ mod tests {
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");
 
-        let first = bind(&state, &socket).await.unwrap();
+        let first = bind(&state, &socket).unwrap();
         drop(first);
 
-        let second = bind(&state, &socket).await;
+        let second = bind(&state, &socket);
         assert!(second.is_ok());
     }
 
@@ -590,7 +624,7 @@ mod tests {
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");
 
-        let _server = bind(&state, &socket).await.unwrap();
+        let _server = bind(&state, &socket).unwrap();
         let lock = state.join(LOCK_FILE);
         let content = fs::read_to_string(&lock).unwrap();
 
@@ -605,7 +639,7 @@ mod tests {
         fs::create_dir(&state).unwrap();
         fs::write(state.join(LOCK_FILE), b"999999999999").unwrap();
 
-        let _server = bind(&state, &socket).await.unwrap();
+        let _server = bind(&state, &socket).unwrap();
         let content = fs::read_to_string(state.join(LOCK_FILE)).unwrap();
 
         assert_eq!(content, std::process::id().to_string());
@@ -632,9 +666,9 @@ mod tests {
         let dir = TempDir::new();
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");
-        let server = bind(&state, &socket).await.unwrap();
+        let server = bind(&state, &socket).unwrap();
 
-        let task = tokio::spawn(server.serve(allow_all));
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
 
         let mut client = UnixStream::connect(&socket).await.unwrap();
         client

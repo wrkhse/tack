@@ -30,15 +30,14 @@ fn parse_timeout(flag: &str, value: &str) -> Result<u64, CliError> {
 fn parse_build_args(rest: &[String]) -> Result<(&str, BuildOptions), CliError> {
     let mut out = None;
     let mut options = BuildOptions::default();
-    let mut index = 0;
+    let mut args = rest.iter();
 
-    while index < rest.len() {
-        let flag = rest[index].as_str();
-        let value = rest
-            .get(index + 1)
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
             .ok_or_else(|| CliError::Usage(format!("{flag} needs a value")))?
             .as_str();
-        match flag {
+        match flag.as_str() {
             "--out" => out = Some(value),
             "--call-timeout-ms" => {
                 options.call_timeout_ms = parse_timeout(flag, value)?;
@@ -48,7 +47,6 @@ fn parse_build_args(rest: &[String]) -> Result<(&str, BuildOptions), CliError> {
             }
             _ => return Err(CliError::Usage(format!("unknown build option {flag}"))),
         }
-        index += 2;
     }
 
     let out = out.ok_or_else(|| CliError::Usage("build needs --out <dist-dir>".into()))?;

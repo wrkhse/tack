@@ -1,4 +1,4 @@
-//! In-process proofs of the build pipeline. No daemon, OpenCode or child
+//! In-process proofs of the build pipeline. No daemon, `OpenCode` or child
 //! process runs; only the library APIs and a temporary folder are used.
 
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ struct Scratch {
     root: PathBuf,
 }
 
+#[cfg(test)]
 impl Scratch {
     fn new() -> Self {
         let unique = SystemTime::now()
@@ -55,6 +56,7 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/safe-push")
 }
 
+#[cfg(test)]
 fn manifest() -> PluginManifest {
     let sandbox = tack_runtime::Sandbox::new(
         &fixture(),
@@ -72,7 +74,8 @@ fn reasons() -> Vec<&'static str> {
         .collect()
 }
 
-fn config<'a>(
+#[cfg(test)]
+const fn config<'a>(
     manifest: &'a PluginManifest,
     plugin_dir: &'a str,
     call_timeout_ms: u64,
@@ -90,6 +93,7 @@ fn config<'a>(
     }
 }
 
+#[cfg(test)]
 fn constant<'a>(script: &'a str, name: &str) -> &'a str {
     let prefix = format!("const {name} = ");
     let line = script
