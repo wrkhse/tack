@@ -129,8 +129,9 @@ jobs:
           termctrl mark rec tool
           termctrl save rec --format png --out frames/03-tool
 
-          termctrl send rec "text:git log origin/main" enter
-          termctrl wait rec "initial" --timeout 30000
+          proof="git log origin/main --oneline; echo PROOF_NO_PUSH"
+          termctrl send rec "text:$proof" enter
+          termctrl wait rec "PROOF_NO_PUSH" --timeout 30000
           termctrl mark rec proof
           termctrl save rec --format png --out frames/04-proof
           termctrl stop rec
