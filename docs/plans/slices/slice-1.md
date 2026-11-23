@@ -328,6 +328,7 @@ pub enum EngineError {
     Limit(LimitCause),
     UnknownTool(String),
     InvalidResult(String),
+    Poisoned,
 }
 ```
 

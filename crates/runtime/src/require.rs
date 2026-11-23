@@ -7,7 +7,7 @@
 //! environment whose require closes over that module's folder, so a deferred
 //! call still resolves against the file that defined it.
 //!
-//! Luau's stock global require (FsRequirer) is replaced with a refuser before
+//! Luau's stock global require (`FsRequirer`) is replaced with a refuser before
 //! the VM is sandboxed. A module's scoped require shadows it in its own
 //! environment; code that reaches globals through getfenv or setfenv finds the
 //! refuser instead of a loader for arbitrary files.
@@ -25,7 +25,7 @@ use mlua::{Function, Lua, Result as LuaResult, Table, Value as LuaValue};
 const MAX_MODULE_BYTES: u64 = 1024 * 1024;
 
 /// Error raised by the global require refuser. Scoped requires shadow it.
-pub(crate) const REQUIRE_CONFINED: &str = "tack: require is confined to the plugin folder";
+pub const REQUIRE_CONFINED: &str = "tack: require is confined to the plugin folder";
 
 /// A refused module load, carrying the specifier that caused it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,29 +37,31 @@ pub enum RequireCause {
     Missing(String),
     TooLarge(String),
     Unreadable { spec: String, detail: String },
+    Poisoned,
 }
 
 impl fmt::Display for RequireCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RequireCause::Absolute(spec) => {
+            Self::Absolute(spec) => {
                 write!(f, "tack: require rejects absolute path: {spec}")
             }
-            RequireCause::Parent(spec) => write!(f, "tack: require rejects parent path: {spec}"),
-            RequireCause::Escape(spec) => write!(f, "tack: require escapes plugin folder: {spec}"),
-            RequireCause::Cycle(spec) => write!(f, "tack: require cycle detected: {spec}"),
-            RequireCause::Missing(spec) => write!(f, "tack: require module not found: {spec}"),
-            RequireCause::TooLarge(spec) => write!(f, "tack: require module too large: {spec}"),
-            RequireCause::Unreadable { spec, detail } => {
+            Self::Parent(spec) => write!(f, "tack: require rejects parent path: {spec}"),
+            Self::Escape(spec) => write!(f, "tack: require escapes plugin folder: {spec}"),
+            Self::Cycle(spec) => write!(f, "tack: require cycle detected: {spec}"),
+            Self::Missing(spec) => write!(f, "tack: require module not found: {spec}"),
+            Self::TooLarge(spec) => write!(f, "tack: require module too large: {spec}"),
+            Self::Unreadable { spec, detail } => {
                 write!(f, "tack: require cannot read {spec}: {detail}")
             }
+            Self::Poisoned => f.write_str("tack: require state lock poisoned"),
         }
     }
 }
 
 impl std::error::Error for RequireCause {}
 
-pub(crate) struct RequireState {
+pub struct RequireState {
     root: PathBuf,
     cache: HashMap<PathBuf, LuaValue>,
     loading: Vec<PathBuf>,
@@ -75,7 +77,7 @@ enum Resolved {
 }
 
 impl RequireState {
-    pub(crate) fn new(folder: &Path) -> Result<Self, String> {
+    pub fn new(folder: &Path) -> Result<Self, String> {
         let root = std::fs::canonicalize(folder)
             .map_err(|error| format!("tack: plugin folder unavailable: {error}"))?;
         Ok(Self {
@@ -167,7 +169,7 @@ fn read_source(path: &Path, spec: &str) -> Result<String, RequireCause> {
             spec: spec.to_owned(),
             detail: error.to_string(),
         })?;
-    if bytes.len() as u64 > MAX_MODULE_BYTES {
+    if u64::try_from(bytes.len()).is_ok_and(|len| len > MAX_MODULE_BYTES) {
         return Err(RequireCause::TooLarge(spec.to_owned()));
     }
     String::from_utf8(bytes).map_err(|error| RequireCause::Unreadable {
@@ -178,7 +180,7 @@ fn read_source(path: &Path, spec: &str) -> Result<String, RequireCause> {
 
 /// Build the scoped loader rooted at the plugin folder, returning the function
 /// so the host can load the entry module through the same path and cache.
-pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
+pub fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
     let root = state.root.clone();
     let state = Arc::new(Mutex::new(state));
     scoped_require(lua, state, root)
@@ -187,7 +189,7 @@ pub(crate) fn install(lua: &Lua, state: RequireState) -> LuaResult<Function> {
 /// Replace Luau's stock global require with a function that always refuses.
 /// Called before `Lua::sandbox(true)` makes the globals table read-only; each
 /// module's scoped require shadows this global in its own environment.
-pub(crate) fn confine_global_require(lua: &Lua) -> LuaResult<()> {
+pub fn confine_global_require(lua: &Lua) -> LuaResult<()> {
     let source = format!("return function() error('{REQUIRE_CONFINED}', 0) end");
     let refuser: Function = lua.load(&source).eval()?;
     lua.globals().set("require", refuser)
@@ -206,7 +208,9 @@ fn scoped_require(
         };
 
         let resolved = {
-            let mut guard = state.lock().expect("require state poisoned");
+            let mut guard = state
+                .lock()
+                .map_err(|_| mlua::Error::external(RequireCause::Poisoned))?;
             guard.resolve(&spec, &base).map_err(mlua::Error::external)?
         };
         match resolved {
@@ -231,7 +235,7 @@ fn scoped_require(
                     .eval::<LuaValue>();
                 state
                     .lock()
-                    .expect("require state poisoned")
+                    .map_err(|_| mlua::Error::external(RequireCause::Poisoned))?
                     .finish(canonical, outcome)
             }
         }
@@ -246,4 +250,91 @@ fn module_env(lua: &Lua, require: Function) -> LuaResult<Table> {
     metatable.set("__index", lua.globals())?;
     env.set_metatable(Some(metatable))?;
     Ok(env)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    struct Source {
+        path: PathBuf,
+    }
+
+    impl Source {
+        fn new(bytes: usize) -> Self {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("tack-require-source-{id}-{bytes}.luau"));
+            std::fs::write(&path, "x".repeat(bytes)).expect("write source");
+            Self { path }
+        }
+    }
+
+    impl Drop for Source {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn require_causes_display_their_messages() {
+        for (cause, expected) in [
+            (
+                RequireCause::Absolute("/etc/passwd".into()),
+                "tack: require rejects absolute path: /etc/passwd".to_owned(),
+            ),
+            (
+                RequireCause::Parent("../x".into()),
+                "tack: require rejects parent path: ../x".to_owned(),
+            ),
+            (
+                RequireCause::Escape("./linked".into()),
+                "tack: require escapes plugin folder: ./linked".to_owned(),
+            ),
+            (
+                RequireCause::Cycle("./a".into()),
+                "tack: require cycle detected: ./a".to_owned(),
+            ),
+            (
+                RequireCause::Missing("./nope".into()),
+                "tack: require module not found: ./nope".to_owned(),
+            ),
+            (
+                RequireCause::TooLarge("./big".into()),
+                "tack: require module too large: ./big".to_owned(),
+            ),
+            (
+                RequireCause::Unreadable {
+                    spec: "./x".into(),
+                    detail: "boom".into(),
+                },
+                "tack: require cannot read ./x: boom".to_owned(),
+            ),
+            (
+                RequireCause::Poisoned,
+                "tack: require state lock poisoned".to_owned(),
+            ),
+        ] {
+            assert_eq!(cause.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn read_source_accepts_the_cap_and_rejects_one_byte_over() {
+        let cap = usize::try_from(MAX_MODULE_BYTES).expect("cap fits in usize");
+
+        let at_cap = Source::new(cap);
+        let source = read_source(&at_cap.path, "./at-cap").expect("the cap is allowed");
+        assert_eq!(source.len(), cap);
+
+        let over = Source::new(cap.saturating_add(1));
+        assert_eq!(
+            read_source(&over.path, "./over").expect_err("one byte over is refused"),
+            RequireCause::TooLarge("./over".into())
+        );
+    }
 }

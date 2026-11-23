@@ -5,14 +5,14 @@ use tack_protocol::wire::{Content, Outcome};
 use super::errors::{EngineError, LimitCause, MAX_ENTRIES};
 
 pub(super) fn decode_outcome(value: LuaValue, input: &Value) -> Result<Outcome, EngineError> {
-    let table = match value {
-        LuaValue::Nil => return Ok(Outcome::Allow),
-        LuaValue::Table(table) => table,
-        _ => {
-            return Err(EngineError::InvalidResult(
-                "tack: hook must return a table or nil".into(),
-            ));
-        }
+    if matches!(value, LuaValue::Nil) {
+        return Ok(Outcome::Allow);
+    }
+
+    let LuaValue::Table(table) = value else {
+        return Err(EngineError::InvalidResult(
+            "tack: hook must return a table or nil".into(),
+        ));
     };
     if let Some(reason) = table.get::<Option<String>>("deny")? {
         return Ok(Outcome::Deny { reason });
@@ -43,13 +43,10 @@ fn merge_command(input: &Value, command: String) -> Value {
 }
 
 pub(super) fn decode_content(value: LuaValue) -> Result<Vec<Content>, EngineError> {
-    let table = match value {
-        LuaValue::Table(table) => table,
-        _ => {
-            return Err(EngineError::InvalidResult(
-                "tack: tool must return a table".into(),
-            ));
-        }
+    let LuaValue::Table(table) = value else {
+        return Err(EngineError::InvalidResult(
+            "tack: tool must return a table".into(),
+        ));
     };
     let content = table
         .get::<Option<Table>>("content")?
@@ -62,13 +59,10 @@ pub(super) fn decode_content(value: LuaValue) -> Result<Vec<Content>, EngineErro
             }));
         }
         let (_, item) = pair?;
-        let item = match item {
-            LuaValue::Table(table) => table,
-            _ => {
-                return Err(EngineError::InvalidResult(
-                    "tack: content item must be a table".into(),
-                ));
-            }
+        let LuaValue::Table(item) = item else {
+            return Err(EngineError::InvalidResult(
+                "tack: content item must be a table".into(),
+            ));
         };
         let kind = item
             .get::<Option<String>>("kind")?

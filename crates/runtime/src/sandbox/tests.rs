@@ -630,3 +630,23 @@ fn manifest_refuses_a_duplicate_tool_name() {
         EngineError::InvalidResult("tack: duplicate tool name: repeated".into())
     );
 }
+
+#[test]
+fn a_poisoned_call_lock_fails_closed() {
+    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = sandbox.call_lock.lock().expect("acquire the call lock");
+        panic!("poison the call lock");
+    }));
+    assert!(panicked.is_err());
+
+    assert_eq!(
+        sandbox.hook("toolBefore", &call("shell"), DEFAULT_DEADLINE_MS),
+        Err(EngineError::Poisoned)
+    );
+    assert_eq!(
+        sandbox.tool("guard_status", &json!({}), DEFAULT_DEADLINE_MS),
+        Err(EngineError::Poisoned)
+    );
+    assert_eq!(sandbox.manifest(), Err(EngineError::Poisoned));
+}

@@ -36,6 +36,12 @@ fn state_dir_from(
     Ok(PathBuf::from(home).join(".local/state/tack"))
 }
 
+/// Resolve the state folder from `TACK_STATE_DIR`, `XDG_STATE_HOME` or `HOME`.
+///
+/// # Errors
+///
+/// Returns a message when none of the environment variables supplies a usable
+/// home path.
 pub fn state_dir() -> Result<PathBuf, String> {
     let tack = std::env::var("TACK_STATE_DIR").ok();
     let xdg = std::env::var("XDG_STATE_HOME").ok();
@@ -44,11 +50,12 @@ pub fn state_dir() -> Result<PathBuf, String> {
     state_dir_from(tack.as_deref(), xdg.as_deref(), home.as_deref())
 }
 
+#[must_use]
 pub fn socket_in_state_dir(state_dir: &Path, socket: &Path) -> bool {
     socket == state_dir.join(SOCKET_NAME)
 }
 
-fn reply_error(id: u64, error: EngineError) -> Reply {
+fn reply_error(id: u64, error: &EngineError) -> Reply {
     let kind = match &error {
         EngineError::Limit(_) => ReplyError::Limit,
         EngineError::UnknownTool(_) => ReplyError::UnknownTool,
@@ -104,10 +111,10 @@ pub fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
                     match &outcome {
                         Outcome::Allow => eprintln!("tack-daemon: hook toolBefore allow"),
                         Outcome::Deny { reason } => {
-                            eprintln!("tack-daemon: hook toolBefore deny {reason}")
+                            eprintln!("tack-daemon: hook toolBefore deny {reason}");
                         }
                         Outcome::Rewrite { .. } => {
-                            eprintln!("tack-daemon: hook toolBefore rewrite")
+                            eprintln!("tack-daemon: hook toolBefore rewrite");
                         }
                     }
 
@@ -117,7 +124,7 @@ pub fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
                         outcome,
                     }
                 }
-                Err(error) => reply_error(id, error),
+                Err(error) => reply_error(id, &error),
             }
         }
         Request::Tool {
@@ -132,7 +139,7 @@ pub fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
                     content,
                 }
             }
-            Err(error) => reply_error(id, error),
+            Err(error) => reply_error(id, &error),
         },
     }
 }

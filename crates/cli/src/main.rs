@@ -30,15 +30,14 @@ fn parse_timeout(flag: &str, value: &str) -> Result<u64, CliError> {
 fn parse_build_args(rest: &[String]) -> Result<(&str, BuildOptions), CliError> {
     let mut out = None;
     let mut options = BuildOptions::default();
-    let mut index = 0;
+    let mut args = rest.iter();
 
-    while index < rest.len() {
-        let flag = rest[index].as_str();
-        let value = rest
-            .get(index + 1)
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
             .ok_or_else(|| CliError::Usage(format!("{flag} needs a value")))?
             .as_str();
-        match flag {
+        match flag.as_str() {
             "--out" => out = Some(value),
             "--call-timeout-ms" => {
                 options.call_timeout_ms = parse_timeout(flag, value)?;
@@ -48,7 +47,6 @@ fn parse_build_args(rest: &[String]) -> Result<(&str, BuildOptions), CliError> {
             }
             _ => return Err(CliError::Usage(format!("unknown build option {flag}"))),
         }
-        index += 2;
     }
 
     let out = out.ok_or_else(|| CliError::Usage("build needs --out <dist-dir>".into()))?;
@@ -88,5 +86,85 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    fn parsed(args: &[&str]) -> (String, BuildOptions) {
+        let args = owned(args);
+        let Ok((out, options)) = parse_build_args(&args) else {
+            panic!("arguments parse");
+        };
+        (out.to_owned(), options)
+    }
+
+    fn error_for(args: &[&str]) -> CliError {
+        let args = owned(args);
+        let Err(error) = parse_build_args(&args) else {
+            panic!("expected a usage error");
+        };
+        error
+    }
+
+    fn usage(error: CliError) -> String {
+        match error {
+            CliError::Usage(message) => message,
+            CliError::Build(_) => panic!("expected a usage error"),
+        }
+    }
+
+    #[test]
+    fn parse_build_args_reads_the_out_dir() {
+        let (out, options) = parsed(&["--out", "/dist"]);
+        assert_eq!(out, "/dist");
+
+        let defaults = BuildOptions::default();
+        assert_eq!(options.call_timeout_ms, defaults.call_timeout_ms);
+        assert_eq!(options.start_timeout_ms, defaults.start_timeout_ms);
+    }
+
+    #[test]
+    fn parse_build_args_reads_both_timeouts() {
+        let (out, options) = parsed(&[
+            "--out",
+            "/dist",
+            "--call-timeout-ms",
+            "250",
+            "--start-timeout-ms",
+            "750",
+        ]);
+        assert_eq!(out, "/dist");
+        assert_eq!(options.call_timeout_ms, 250);
+        assert_eq!(options.start_timeout_ms, 750);
+    }
+
+    #[test]
+    fn parse_build_args_reports_bad_arguments() {
+        assert_eq!(usage(error_for(&[])), "build needs --out <dist-dir>");
+        assert_eq!(usage(error_for(&["--out"])), "--out needs a value");
+        assert_eq!(
+            usage(error_for(&["--bogus", "x"])),
+            "unknown build option --bogus"
+        );
+        assert_eq!(
+            usage(error_for(&["--out", "/dist", "--call-timeout-ms", "nope"])),
+            "--call-timeout-ms needs a non-negative number"
+        );
+        assert_eq!(
+            usage(error_for(&[
+                "--out",
+                "/dist",
+                "--start-timeout-ms",
+                "60001"
+            ])),
+            "--start-timeout-ms must be at most 60000"
+        );
     }
 }

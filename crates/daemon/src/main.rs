@@ -69,7 +69,7 @@ async fn main() {
         }
     };
 
-    let server = match bind(&state, &args.socket).await {
+    let server = match bind(&state, &args.socket) {
         Ok(server) => server,
         Err(TransportError::LockBusy) => {
             eprintln!("tack-daemon: lock_busy");

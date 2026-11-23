@@ -1,0 +1,26 @@
+[graph]
+all-features = true
+# tack runs on the owner's Macs and on Linux hosts, and nowhere else.
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+# Only what the dependencies use. Add an entry with the dependency that needs
+# it, so an unused allowance never hides a licence nobody read.
+allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

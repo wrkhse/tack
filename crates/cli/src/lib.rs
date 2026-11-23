@@ -1,7 +1,7 @@
 //! Public API for the tack build pipeline.
 //!
 //! The CLI assembles a sandbox, validates a plugin's needs, and renders the
-//! OpenCode wrapper. No daemon, OpenCode process, or child process starts here.
+//! `OpenCode` wrapper. No daemon, `OpenCode` process, or child process starts here.
 
 use std::error::Error;
 use std::fmt;
@@ -17,7 +17,7 @@ pub const CALL_TIMEOUT_MS: u64 = 2000;
 /// Wall-clock budget for the first daemon start in the default build.
 pub const START_TIMEOUT_MS: u64 = 3000;
 /// Daemon binary baked into the wrapper and resolved from the
-/// TACK_DAEMON_BIN environment variable or PATH at run time, so the emitted
+/// `TACK_DAEMON_BIN` environment variable or PATH at run time, so the emitted
 /// script is host-independent.
 pub const DAEMON_BIN: &str = "tack-daemon";
 
@@ -34,10 +34,10 @@ pub enum BuildError {
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BuildError::NeedMissing(name) => write!(f, "need_missing:{name}"),
-            BuildError::Sandbox(error) => write!(f, "sandbox:{error}"),
-            BuildError::Render(error) => write!(f, "render:{error}"),
-            BuildError::Io(error) => write!(f, "io:{error}"),
+            Self::NeedMissing(name) => write!(f, "need_missing:{name}"),
+            Self::Sandbox(error) => write!(f, "sandbox:{error}"),
+            Self::Render(error) => write!(f, "render:{error}"),
+            Self::Io(error) => write!(f, "io:{error}"),
         }
     }
 }
@@ -45,10 +45,10 @@ impl fmt::Display for BuildError {
 impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            BuildError::NeedMissing(_) => None,
-            BuildError::Sandbox(error) => Some(error),
-            BuildError::Render(error) => Some(error),
-            BuildError::Io(error) => Some(error),
+            Self::NeedMissing(_) => None,
+            Self::Sandbox(error) => Some(error),
+            Self::Render(error) => Some(error),
+            Self::Io(error) => Some(error),
         }
     }
 }
@@ -70,11 +70,18 @@ impl Default for BuildOptions {
     }
 }
 
-/// Read one plugin, check its needs, and emit the OpenCode wrapper and manifest.
+/// Read one plugin, check its needs, and emit the `OpenCode` wrapper and manifest.
 ///
 /// The plugin folder is canonicalized so the emitted wrapper carries its
 /// absolute path. That is the only host-specific value in the output: the
 /// daemon stays a plain name, resolved by the wrapper at run time.
+///
+/// # Errors
+///
+/// Returns [`BuildError::Io`] when the plugin folder or output files cannot be
+/// read or written, [`BuildError::Sandbox`] when the plugin cannot be loaded or
+/// read, [`BuildError::NeedMissing`] for an unsupported need, and
+/// [`BuildError::Render`] when the wrapper cannot be rendered.
 pub fn build(
     plugin_dir: &Path,
     out: &Path,
@@ -119,4 +126,40 @@ pub fn build(
     std::fs::write(&descriptor, pretty).map_err(BuildError::Io)?;
 
     Ok((index, descriptor))
+}
+
+#[cfg(test)]
+mod tests {
+    use tack_runtime::sandbox::LimitCause;
+
+    use super::*;
+
+    #[test]
+    fn build_error_reports_the_underlying_source() {
+        let sandbox = EngineError::Limit(LimitCause::Deadline);
+        assert_eq!(
+            BuildError::Sandbox(sandbox.clone())
+                .source()
+                .map(ToString::to_string),
+            Some(sandbox.to_string())
+        );
+
+        let render = WrapperError::Json("bad json".into());
+        assert_eq!(
+            BuildError::Render(render.clone())
+                .source()
+                .map(ToString::to_string),
+            Some(render.to_string())
+        );
+
+        let io = std::io::Error::other("disk");
+        assert_eq!(
+            BuildError::Io(std::io::Error::other("disk"))
+                .source()
+                .map(ToString::to_string),
+            Some(io.to_string())
+        );
+
+        assert!(BuildError::NeedMissing("daemon".into()).source().is_none());
+    }
 }

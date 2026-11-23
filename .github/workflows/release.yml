@@ -73,6 +73,21 @@ jobs:
           tar -czf "$out/tack-$TAG-$TARGET.tar.gz" \
             -C "target/$TARGET/release" \
             tack tack-daemon
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+      - name: Smoke test packaged binaries
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          node test/smoke/run.mjs \
+            "dist/$TARGET/tack-$TAG-$TARGET.tar.gz" \
+            "${TAG#v}" \
+            "$GITHUB_WORKSPACE/fixtures/safe-push"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tack-${{ github.ref_name }}-${{ matrix.target }}

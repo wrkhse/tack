@@ -27,7 +27,7 @@ pub enum ReplyError {
     ProtocolVersion,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Hook {
@@ -45,20 +45,22 @@ pub enum Request {
 }
 
 impl Request {
-    pub fn id(&self) -> u64 {
+    #[must_use]
+    pub const fn id(&self) -> u64 {
         match self {
             Self::Hook { id, .. } | Self::Tool { id, .. } => *id,
         }
     }
 
-    pub fn version(&self) -> u32 {
+    #[must_use]
+    pub const fn version(&self) -> u32 {
         match self {
             Self::Hook { version, .. } | Self::Tool { version, .. } => *version,
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCall {
     pub tool: String,
@@ -68,7 +70,7 @@ pub struct ToolCall {
     pub session_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outcome {
     Allow,
@@ -76,13 +78,13 @@ pub enum Outcome {
     Rewrite { input: Value },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Content {
     pub kind: String,
     pub text: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reply {
     Hook {
@@ -103,14 +105,14 @@ pub enum Reply {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub input: Value,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PluginManifest {
     pub name: String,
     #[serde(default)]
@@ -135,31 +137,32 @@ pub enum DenyReason {
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 10] = [
-        DenyReason::SocketMissing,
-        DenyReason::Timeout,
-        DenyReason::SocketClosed,
-        DenyReason::MalformedReply,
-        DenyReason::ProtocolVersion,
-        DenyReason::Limit,
-        DenyReason::Script,
-        DenyReason::UnknownTool,
-        DenyReason::DaemonError,
-        DenyReason::Aborted,
+    pub const ALL: [Self; 10] = [
+        Self::SocketMissing,
+        Self::Timeout,
+        Self::SocketClosed,
+        Self::MalformedReply,
+        Self::ProtocolVersion,
+        Self::Limit,
+        Self::Script,
+        Self::UnknownTool,
+        Self::DaemonError,
+        Self::Aborted,
     ];
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
-            DenyReason::SocketMissing => "socket_missing",
-            DenyReason::Timeout => "timeout",
-            DenyReason::SocketClosed => "socket_closed",
-            DenyReason::MalformedReply => "malformed_reply",
-            DenyReason::ProtocolVersion => "protocol_version",
-            DenyReason::Limit => "limit",
-            DenyReason::Script => "script",
-            DenyReason::UnknownTool => "unknown_tool",
-            DenyReason::DaemonError => "daemon_error",
-            DenyReason::Aborted => "aborted",
+            Self::SocketMissing => "socket_missing",
+            Self::Timeout => "timeout",
+            Self::SocketClosed => "socket_closed",
+            Self::MalformedReply => "malformed_reply",
+            Self::ProtocolVersion => "protocol_version",
+            Self::Limit => "limit",
+            Self::Script => "script",
+            Self::UnknownTool => "unknown_tool",
+            Self::DaemonError => "daemon_error",
+            Self::Aborted => "aborted",
         }
     }
 }
@@ -175,10 +178,10 @@ pub enum WireError {
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
-            WireError::TooLarge => "frame exceeds the size cap",
-            WireError::Malformed => "frame is not valid JSON",
-            WireError::Closed => "peer closed the frame mid-line",
-            WireError::Io => "frame I/O failed",
+            Self::TooLarge => "frame exceeds the size cap",
+            Self::Malformed => "frame is not valid JSON",
+            Self::Closed => "peer closed the frame mid-line",
+            Self::Io => "frame I/O failed",
         };
         f.write_str(message)
     }
@@ -187,6 +190,11 @@ impl fmt::Display for WireError {
 impl std::error::Error for WireError {}
 
 /// Serialize one value as a newline-terminated frame.
+///
+/// # Errors
+///
+/// Returns [`WireError::Malformed`] when `value` cannot be serialized, or
+/// [`WireError::TooLarge`] when the encoded frame exceeds [`MAX_FRAME_BYTES`].
 pub fn encode_line<T: Serialize>(value: &T) -> Result<Vec<u8>, WireError> {
     let mut bytes = serde_json::to_vec(value).map_err(|_| WireError::Malformed)?;
     bytes.push(b'\n');
@@ -200,10 +208,17 @@ pub fn encode_line<T: Serialize>(value: &T) -> Result<Vec<u8>, WireError> {
 ///
 /// EOF before any byte is a clean close; EOF part-way through a line is a
 /// protocol error because the peer abandoned a frame.
+///
+/// # Errors
+///
+/// Returns [`WireError::TooLarge`] when the frame exceeds [`MAX_FRAME_BYTES`],
+/// [`WireError::Closed`] when the peer ends a frame mid-line, and
+/// [`WireError::Io`] when reading from `reader` fails.
 pub fn read_line<R: BufRead>(reader: &mut R) -> Result<Option<Vec<u8>>, WireError> {
     let mut bytes = Vec::new();
+    let cap = u64::try_from(MAX_FRAME_BYTES + 1).map_err(|_| WireError::TooLarge)?;
     let read = reader
-        .take((MAX_FRAME_BYTES + 1) as u64)
+        .take(cap)
         .read_until(b'\n', &mut bytes)
         .map_err(|_| WireError::Io)?;
 
@@ -353,6 +368,18 @@ mod tests {
                 "message": "malformed"
             })
         );
+    }
+
+    #[test]
+    fn wire_errors_display_their_messages() {
+        for (error, expected) in [
+            (WireError::TooLarge, "frame exceeds the size cap"),
+            (WireError::Malformed, "frame is not valid JSON"),
+            (WireError::Closed, "peer closed the frame mid-line"),
+            (WireError::Io, "frame I/O failed"),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]

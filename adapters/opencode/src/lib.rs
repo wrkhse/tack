@@ -1,4 +1,4 @@
-//! Generation of the OpenCode JavaScript wrapper that forwards hooks and tool
+//! Generation of the `OpenCode` JavaScript wrapper that forwards hooks and tool
 //! runs to the daemon as NDJSON and fails closed.
 
 use std::error::Error;
@@ -40,10 +40,10 @@ pub enum WrapperError {
 impl fmt::Display for WrapperError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WrapperError::MissingToken(token) => write!(f, "missing_token:{token}"),
-            WrapperError::UnreplacedToken(token) => write!(f, "unreplaced_token:{token}"),
-            WrapperError::UnsafeValue(name) => write!(f, "unsafe_value:{name}"),
-            WrapperError::Json(message) => write!(f, "json:{message}"),
+            Self::MissingToken(token) => write!(f, "missing_token:{token}"),
+            Self::UnreplacedToken(token) => write!(f, "unreplaced_token:{token}"),
+            Self::UnsafeValue(name) => write!(f, "unsafe_value:{name}"),
+            Self::Json(message) => write!(f, "json:{message}"),
         }
     }
 }
@@ -59,6 +59,13 @@ fn validate(name: &'static str, value: &str) -> Result<(), WrapperError> {
 
 /// Fill the seven template slots with JSON literals and refuse any template that
 /// is not fully and safely substituted.
+///
+/// # Errors
+///
+/// Returns [`WrapperError::UnsafeValue`] for a value containing a token marker
+/// or newline, [`WrapperError::Json`] when serialization fails, and
+/// [`WrapperError::MissingToken`] or [`WrapperError::UnreplacedToken`] when the
+/// template slots do not match.
 pub fn render(config: &WrapperConfig) -> Result<String, WrapperError> {
     validate("daemon_bin", config.daemon_bin)?;
     validate("plugin_dir", config.plugin_dir)?;
@@ -165,6 +172,27 @@ mod tests {
             assert!(!output.contains(token), "token {token} survives");
         }
         assert!(!output.contains("__TACK_"));
+    }
+
+    #[test]
+    fn errors_display_their_machine_readable_messages() {
+        for (error, expected) in [
+            (
+                WrapperError::MissingToken("MANIFEST"),
+                "missing_token:MANIFEST",
+            ),
+            (
+                WrapperError::UnreplacedToken("CALL_TIMEOUT"),
+                "unreplaced_token:CALL_TIMEOUT",
+            ),
+            (
+                WrapperError::UnsafeValue("daemon_bin"),
+                "unsafe_value:daemon_bin",
+            ),
+            (WrapperError::Json("bad json".into()), "json:bad json"),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]

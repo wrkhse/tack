@@ -16,7 +16,14 @@ impl Deadline {
     }
 
     pub(super) fn begin(&self, ms: u64) {
-        *self.started.lock().expect("deadline clock poisoned") = Instant::now();
+        let Ok(mut started) = self.started.lock() else {
+            // A poisoned clock cannot time a call. Arm an already-expired
+            // budget so the interrupt denies with the named deadline limit.
+            self.budget_us.store(0, Ordering::Relaxed);
+            return;
+        };
+
+        *started = Instant::now();
         self.budget_us
             .store(ms.saturating_mul(1000), Ordering::Relaxed);
     }
@@ -30,11 +37,28 @@ impl Deadline {
         if budget == u64::MAX {
             return false;
         }
-        let elapsed = self
-            .started
-            .lock()
-            .expect("deadline clock poisoned")
-            .elapsed();
-        elapsed.as_micros() >= u128::from(budget)
+        let Ok(started) = self.started.lock() else {
+            // Fail closed: a poisoned clock becomes a named deadline deny.
+            return true;
+        };
+
+        started.elapsed().as_micros() >= u128::from(budget)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn begin_arms_a_budget_and_disarm_clears_it() {
+        let deadline = Deadline::new();
+        assert!(!deadline.expired(), "a fresh clock has no budget");
+
+        deadline.begin(0);
+        assert!(deadline.expired(), "a zero budget is immediately expired");
+
+        deadline.disarm();
+        assert!(!deadline.expired(), "disarming clears the budget");
     }
 }

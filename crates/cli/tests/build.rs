@@ -1,5 +1,7 @@
-//! In-process proofs of the build pipeline. No daemon, OpenCode or child
+//! In-process proofs of the build pipeline. No daemon, `OpenCode` or child
 //! process runs; only the library APIs and a temporary folder are used.
+
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,7 +74,7 @@ fn reasons() -> Vec<&'static str> {
         .collect()
 }
 
-fn config<'a>(
+const fn config<'a>(
     manifest: &'a PluginManifest,
     plugin_dir: &'a str,
     call_timeout_ms: u64,
