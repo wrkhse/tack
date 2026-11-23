@@ -140,8 +140,7 @@ jobs:
             --font-family 'DejaVu Sans Mono' \
             --out frames/01-ready
 
-          cmd="opencode run --standalone --format json -m fake/scripted"
-          cmd="$cmd 'push my branch'"
+          cmd="opencode run --standalone -m fake/scripted 'push my branch'"
           termctrl send rec "text:$cmd" enter
           termctrl wait rec "push blocked" --timeout 30000
           termctrl mark rec denied
@@ -153,10 +152,11 @@ jobs:
           termctrl save rec --format png --pixel-ratio 1 --padding 0 \
             --font-family 'DejaVu Sans Mono' \
             --out frames/03-tool
+          termctrl wait rec "SESSION_DONE" --timeout 30000
 
-          proof="git log origin/main --oneline; echo PROOF_NO_PUSH"
+          proof="git log --oneline origin/main; echo NO_PUSH_REACHED_ORIGIN"
           termctrl send rec "text:$proof" enter
-          termctrl wait rec "PROOF_NO_PUSH" --timeout 30000
+          termctrl wait rec "NO_PUSH_REACHED_ORIGIN" --timeout 30000
           termctrl mark rec proof
           termctrl save rec --format png --pixel-ratio 1 --padding 0 \
             --font-family 'DejaVu Sans Mono' \
@@ -167,23 +167,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          : > frames/concat.txt
-          for frame in \
-            frames/01-ready.png \
-            frames/02-denied.png \
-            frames/03-tool.png \
-            frames/04-proof.png
-          do
-            echo "file '$PWD/$frame'" >> frames/concat.txt
-            echo "duration 1.5" >> frames/concat.txt
-          done
-          echo "file '$PWD/frames/04-proof.png'" >> frames/concat.txt
+          termctrl video run.termctrl \
+            --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --edit test/e2e/video-edit.json --footer --out run.mp4
 
-          filter="fps=10,scale=800:-1:flags=lanczos,split[s0][s1];"
+          filter="fps=10,scale=1000:-1:flags=lanczos,split[s0][s1];"
           filter="${filter}[s0]palettegen=max_colors=32:stats_mode=diff[p];"
           filter="${filter}[s1][p]paletteuse=dither=none"
-          ffmpeg -y -f concat -safe 0 -i frames/concat.txt \
-            -vf "$filter" -loop 0 demo.gif
+          ffmpeg -y -i run.mp4 -vf "$filter" -loop 0 demo.gif
 
       - name: Check the verdict and the GIF
         run: |

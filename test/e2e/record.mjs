@@ -28,7 +28,8 @@ const verdictPath = path.join(repoRoot, "verdict.txt");
 
 const tackCli = process.env.TACK_CLI || "tack";
 
-const PANE_W = 76;
+const LEFT_W = 72;
+const RIGHT_W = 48;
 const MAX_LINES = 200;
 const WATCH_MS = 250;
 const SESSION_MS = 30_000;
@@ -225,9 +226,9 @@ function judgement(daemonText, recorderText) {
   };
 }
 
-function pad(text) {
+function pad(text, width) {
   const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
-  return clean.length >= PANE_W ? clean.slice(0, PANE_W) : clean.padEnd(PANE_W);
+  return clean.length >= width ? clean.slice(0, width) : clean.padEnd(width);
 }
 
 function printHeader(force = false) {
@@ -249,8 +250,7 @@ function printHeader(force = false) {
 
 function printTitles() {
   process.stdout.write(
-    pad("OpenCode session") + "| daemon.log\n" +
-    "-".repeat(PANE_W) + "+" + "-".repeat(PANE_W) + "\n",
+    pad("OpenCode session", LEFT_W) + "| daemon.log\n",
   );
 }
 
@@ -260,14 +260,15 @@ function emitRow() {
     ? rightLines[rightCursor++]
     : "";
   if (!left && !right) return;
-  process.stdout.write(pad(left) + "| " + right.slice(0, PANE_W) + "\n");
-  printHeader();
+  process.stdout.write(
+    pad(left, LEFT_W) + "| " + right.slice(0, RIGHT_W) + "\n",
+  );
 }
 
 function pushWrapped(buffer, text) {
   const clean = String(text).replace(/\r/g, "").replace(/\t/g, "  ");
-  for (let i = 0; i < clean.length; i += PANE_W) {
-    buffer.push(clean.slice(i, i + PANE_W));
+  for (let i = 0; i < clean.length; i += LEFT_W) {
+    buffer.push(clean.slice(i, i + LEFT_W));
     if (buffer.length > MAX_LINES) buffer.shift();
   }
 }
@@ -324,6 +325,10 @@ function runCommand(line) {
   addLines(child.stdout, collectLeft);
   addLines(child.stderr, collectLeft);
 
+  if (/opencode run/.test(line)) {
+    child.once("close", () => process.stdout.write("SESSION_DONE\n"));
+  }
+
   if (/git log|recorder/.test(line)) {
     clearTimeout(holdTimer);
     holdTimer = setTimeout(finish, HOLD_AFTER_PROOF_MS);
@@ -338,7 +343,7 @@ function onInput(chunk) {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
-    process.stdout.write("> " + line.slice(0, PANE_W) + "\n");
+    process.stdout.write("> " + line.slice(0, LEFT_W) + "\n");
     runCommand(line);
   }
 }
