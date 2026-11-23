@@ -1,5 +1,6 @@
-// Records the slice 1 flow in two panes: OpenCode session and daemon.log.
-// CI / disposable container only: throwaway HOME, local fake provider, no key.
+// Prepares a scratch session for the VHS tape: real git repo, throwaway HOME,
+// fake model, rc-built wrapper, two tmux panes, and a bounded verdict watcher.
+// The tape types the real commands; this script writes no session digest.
 
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -23,47 +24,18 @@ const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const fakeModel = path.join(here, "fake-model.mjs");
 const gitShim = path.join(here, "git-shim");
 const pluginSource = path.join(repoRoot, "fixtures", "safe-push");
+const verdictPath = path.join(repoRoot, "verdict.txt");
 
 const openCodeBin = process.env.OPENCODE_BIN || "opencode";
 const tackCli = process.env.TACK_CLI || "tack";
-const daemonBin = process.env.TACK_DAEMON_BIN || "tack-daemon";
 
-// Twenty rows fit inside the VHS viewport with room to spare, so the
-// caption and the pane headers are never pushed off by auto-wrap.
-const ROWS = 20;
-const COLS = 120;
-const PANE_W = 56;
-const LEFT_COL = 1;
-const SEP_COL = 59;
-const RIGHT_COL = 61;
-const VIEW_ROWS = ROWS - 3;
-const REDRAW_MS = 200;
-const MAX_FRAMES = 160;
-const HOLD_MS = 25_000;
-const MAX_BUFFER = 120;
-const MAX_CODE_LINES = 8;
-
+const SESSION = "tack-rec";
 const BUILD_TIMEOUT_MS = 4_000;
 const MODEL_TIMEOUT_MS = 4_000;
-const RUN_TIMEOUT_MS = 9_000;
-const WALL_TIMEOUT_MS = 12_000;
-
-const KEY_DAEMON = [
-  "tack-daemon: hook toolBefore deny push blocked",
-  "tack-daemon: hook toolBefore allow",
-  "tack-daemon: tool guard_status ok",
-];
-const KEY_SET = new Set(KEY_DAEMON);
-const seenDaemon = new Set();
+const WATCH_MS = 250;
+const HOLD_MS = 22_000;
 
 const children = new Set();
-const codeBuffer = [];
-const daemonBuffer = [];
-let markerPush = false;
-let markerGuard = false;
-let recorderLine = "[3] recorder pending";
-let frames = 0;
-let redrawTimer;
 
 function track(child) {
   children.add(child);
@@ -75,159 +47,6 @@ function killChildren() {
   for (const child of children) {
     if (child.exitCode === null) child.kill("SIGKILL");
   }
-}
-
-function clip(text, width) {
-  const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
-  return clean.length > width ? clean.slice(0, width) : clean.padEnd(width);
-}
-
-function keepLast(buffer, text, limit) {
-  if (!text || buffer.includes(text)) return;
-  buffer.push(text);
-  if (buffer.length > limit) buffer.shift();
-}
-
-function at(row, col, text) {
-  return "\x1b[" + row + ";" + col + "H" + text;
-}
-
-function firstString(value, keys) {
-  if (!value) return "";
-  for (const key of keys) {
-    const found = value[key];
-    if (typeof found === "string" && found.length > 0) return found;
-  }
-  return "";
-}
-
-function firstObject(value, keys) {
-  if (!value) return null;
-  for (const key of keys) {
-    const found = value[key];
-    if (found && typeof found === "object" && !Array.isArray(found)) return found;
-  }
-  return null;
-}
-
-function briefText(value) {
-  return String(value).replace(/\s+/g, " ").trim();
-}
-
-function textOf(value) {
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object") {
-    return firstString(value, ["message", "text", "error", "name", "detail"]);
-  }
-  return "";
-}
-
-function describeCode(line) {
-  let event;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (event === null || typeof event !== "object" || Array.isArray(event)) {
-    return null;
-  }
-
-  const type = String(event.type ?? "");
-  const part = firstObject(event, ["part"]) ?? event;
-  const state = firstObject(part, ["state"]);
-  const tool = firstString(part, ["tool", "name", "toolName"]) ||
-    firstString(state, ["tool", "name"]);
-  const input = firstObject(part, ["input"]) ?? firstObject(state, ["input"]);
-  const command = firstString(input, ["command"]);
-  const error = textOf(state && state.error) ||
-    textOf(part.error) || textOf(event.error);
-  const text = briefText(
-    firstString(part, ["text", "output", "message"]) ||
-    firstString(state, ["text", "output", "message"]) ||
-    firstString(event, ["text", "output", "message"]),
-  );
-
-  if (error) return "opencode: blocked - " + briefText(error);
-  if (tool) {
-    const args = command || (input ? JSON.stringify(input) : "{}");
-    return "opencode: tool " + tool + " - " + args;
-  }
-  if (command) return "opencode: command - " + briefText(command);
-  if (type.includes("text") || type.includes("result")) {
-    return text ? "opencode: result - " + text : null;
-  }
-  return text ? "opencode: result - " + text : null;
-}
-
-function render() {
-  if (frames >= MAX_FRAMES) return;
-  frames += 1;
-
-  const first = markerPush ? "[1] git push blocked" : "[1] push pending";
-  const second = markerGuard ? "[2] guard_status ran" : "[2] guard pending";
-  const caption = first + "    " + second + "    " + recorderLine;
-  const rule = "-".repeat(PANE_W);
-  const left = codeBuffer.slice(-VIEW_ROWS);
-  const right = KEY_DAEMON.map((key) => (seenDaemon.has(key) ? key : ""));
-  const extras = daemonBuffer.filter((line) => !KEY_SET.has(line));
-  right.push(...extras.slice(-(VIEW_ROWS - KEY_DAEMON.length)));
-  while (right.length < VIEW_ROWS) right.push("");
-
-  const out = ["\x1b[H\x1b[2J"];
-  out.push(at(1, 1, caption.slice(0, COLS)));
-  out.push(at(2, LEFT_COL, clip("OpenCode session", PANE_W)));
-  out.push(at(2, SEP_COL, "|"));
-  out.push(at(2, RIGHT_COL, clip("daemon.log", PANE_W)));
-  out.push(at(3, LEFT_COL, rule));
-  out.push(at(3, SEP_COL, "|"));
-  out.push(at(3, RIGHT_COL, rule));
-
-  for (let i = 0; i < VIEW_ROWS; i += 1) {
-    const row = 4 + i;
-    out.push(at(row, LEFT_COL, clip(left[i] ?? "", PANE_W)));
-    out.push(at(row, SEP_COL, "|"));
-    out.push(at(row, RIGHT_COL, clip(right[i], PANE_W)));
-  }
-
-  process.stdout.write(out.join(""));
-}
-
-function startRedraw() {
-  process.stdout.write("\x1b[?25l");
-  render();
-  redrawTimer = setInterval(render, REDRAW_MS);
-}
-
-function handleCode(line) {
-  keepLast(codeBuffer, describeCode(line), MAX_CODE_LINES);
-}
-
-function handleDaemon(line) {
-  if (line.trim().length === 0) return;
-  pushLine(daemonBuffer, line);
-  if (KEY_SET.has(line)) seenDaemon.add(line);
-  if (line.includes("hook toolBefore deny push blocked")) markerPush = true;
-  if (line.includes("tool guard_status ok")) markerGuard = true;
-}
-
-function pushLine(buffer, line) {
-  buffer.push(line);
-  if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
-}
-
-function addLines(stream, handle) {
-  let buffer = "";
-  stream.setEncoding("utf8");
-  stream.on("data", (text) => {
-    buffer += text;
-    const lines = buffer.split("\n");
-    buffer = lines.pop();
-    for (const line of lines) handle(line);
-  });
-  return () => {
-    if (buffer.length > 0) handle(buffer);
-  };
 }
 
 function readOptional(file) {
@@ -260,6 +79,11 @@ function initRepo(dir) {
     const detail = result.stderr?.toString().trim() ?? "unknown error";
     throw new Error("git init failed: " + detail);
   }
+  spawnSync(git, [
+    "-c", "user.email=demo@tack",
+    "-c", "user.name=demo",
+    "commit", "--allow-empty", "-q", "-m", "initial",
+  ], { cwd: dir });
 }
 
 function writeConfig(configHome, pluginDir, baseUrl) {
@@ -360,83 +184,53 @@ function startModel() {
   });
 }
 
-function runOpenCode(env, projectDir) {
-  return new Promise((resolve, reject) => {
-    const child = track(spawn(
-      openCodeBin,
-      ["run", "--standalone", "--format", "json", "-m", "fake/scripted", "push it"],
-      { cwd: projectDir, env, stdio: ["ignore", "pipe", "pipe"] },
-    ));
-    let timedOut = false;
-    const flushOut = addLines(child.stdout, handleCode);
-    const flushErr = addLines(child.stderr, handleCode);
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, RUN_TIMEOUT_MS);
-
-    child.once("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timer);
-      flushOut();
-      flushErr();
-      resolve({ code, timedOut });
-    });
-  });
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
-function tailDaemon(logPath) {
-  let offset = 0;
-  let partial = "";
-  const timer = setInterval(() => {
-    let text;
-    try {
-      text = readFileSync(logPath, "utf8");
-    } catch {
-      return;
-    }
-    if (text.length <= offset) return;
-    const fresh = text.slice(offset);
-    offset = text.length;
-    partial += fresh;
-    const lines = partial.split("\n");
-    partial = lines.pop();
-    for (const line of lines) handleDaemon(line);
-  }, 100);
-  return () => clearInterval(timer);
+function paneShell(env, dir) {
+  const exported = Object.entries(env)
+    .map(([key, value]) => "export " + key + "=" + shellQuote(value))
+    .join("; ");
+  return "cd " + shellQuote(dir) + "; " + exported +
+    "; exec bash --noprofile --norc -i";
 }
 
-async function stopDaemon(stateDir) {
-  let pid;
-  try {
-    pid = Number(readFileSync(path.join(stateDir, "tack.lock"), "utf8").trim());
-  } catch {
-    return;
-  }
-  if (!Number.isSafeInteger(pid) || pid <= 0) return;
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0);
-    } catch {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    return;
-  }
+function tmux(args, env) {
+  spawnSync("tmux", args, { stdio: "ignore", env });
+}
+
+function launchTmux(env, dir, daemonLog) {
+  const runEnv = { ...process.env, ...env };
+  tmux(["new-session", "-d", "-s", SESSION, paneShell(env, dir)], runEnv);
+  tmux(["split-window", "-h", "-t", SESSION + ":0",
+    "exec tail -f " + shellQuote(daemonLog)], runEnv);
+  tmux(["set-option", "-g", "pane-border-status", "top"], runEnv);
+  tmux(["set-option", "-g", "pane-border-format", "#{pane_title}"], runEnv);
+  tmux(["select-pane", "-t", SESSION + ":0.0", "-T",
+    "OpenCode session"], runEnv);
+  tmux(["select-pane", "-t", SESSION + ":0.1", "-T", "daemon.log"], runEnv);
+  tmux(["select-pane", "-t", SESSION + ":0.0"], runEnv);
+
+  return track(spawn("tmux", ["attach-session", "-t", SESSION], {
+    stdio: "inherit",
+    env: runEnv,
+  }));
+}
+
+function judgement(daemonText, recorderText) {
+  const denied = daemonText.includes("hook toolBefore deny");
+  const guarded = daemonText.includes("tool guard_status ok");
+  const noPush = !recorderText.split("\n")
+    .some((line) => line.startsWith("push"));
+  return {
+    lines: [
+      "push_denied=" + denied,
+      "guard_status_ran=" + guarded,
+      "no_push_recorded=" + noPush,
+    ],
+    ok: denied && guarded && noPush,
+  };
 }
 
 async function main() {
@@ -454,7 +248,7 @@ async function main() {
   const binDir = path.join(base, "bin");
   const projectDir = path.join(base, "project");
   const dist = path.join(base, "dist");
-  const recorder = path.join(base, "recorder.log");
+  const recorder = path.join(projectDir, "recorder.log");
   const daemonLog = path.join(stateDir, "daemon.log");
 
   for (const dir of [
@@ -464,14 +258,10 @@ async function main() {
     mkdirSync(dir, { recursive: true });
   }
 
-  let model;
-  let stopTail = () => {};
-  let wallTimer;
-  startRedraw();
+  let attached;
+  let watchTimer;
 
   try {
-    wallTimer = setTimeout(() => killChildren(), WALL_TIMEOUT_MS);
-
     initRepo(projectDir);
     const shim = path.join(binDir, "git");
     copyFileSync(gitShim, shim);
@@ -480,8 +270,14 @@ async function main() {
     await buildPlugin(dist);
     const pluginDir = path.join(dist, "opencode");
 
-    model = await startModel();
-    writeConfig(configHome, pluginDir, "http://127.0.0.1:" + model.port + "/v1");
+    const model = await startModel();
+    writeConfig(
+      configHome,
+      pluginDir,
+      "http://127.0.0.1:" + model.port + "/v1",
+    );
+    writeFileSync(daemonLog, "");
+    writeFileSync(recorder, "");
 
     const env = {
       PATH: binDir + path.delimiter + (process.env.PATH ?? ""),
@@ -492,7 +288,7 @@ async function main() {
       XDG_STATE_HOME: stateDir,
       XDG_CACHE_HOME: cacheHome,
       TACK_STATE_DIR: stateDir,
-      TACK_DAEMON_BIN: daemonBin,
+      TACK_DAEMON_BIN: process.env.TACK_DAEMON_BIN || "tack-daemon",
       TACK_RECORDER: recorder,
       TACK_REAL_GIT: findExecutable("git") ?? "",
       OPENCODE_DB: path.join(base, "opencode.sqlite"),
@@ -501,64 +297,26 @@ async function main() {
       OPENCODE_DISABLE_FILEWATCHER: "1",
     };
 
-    stopTail = tailDaemon(daemonLog);
-    const run = await runOpenCode(env, projectDir);
-    stopTail();
-    stopTail = () => {};
+    attached = launchTmux(env, projectDir, daemonLog);
+    watchTimer = setInterval(() => {
+      const result = judgement(
+        readOptional(daemonLog),
+        readOptional(recorder),
+      );
+      writeFileSync(verdictPath, result.lines.join("\n") + "\n");
+    }, WATCH_MS);
 
-    if (run.timedOut) {
-      keepLast(codeBuffer, "opencode: hit " + RUN_TIMEOUT_MS + "ms bound",
-        MAX_CODE_LINES);
-    }
-
-    const recorded = readOptional(recorder);
-    const pushed = recorded.split("\n").some((line) => line.startsWith("push"));
-    recorderLine = pushed ? "[3] PUSH EXECUTED" : "[3] no git push";
-    keepLast(
-      codeBuffer,
-      "recorder: " + (pushed ? "push was executed" : "no git push executed"),
-      MAX_CODE_LINES,
-    );
-    render();
-  } catch (error) {
-    recorderLine = "[3] error: " + error.message;
-    render();
+    await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
   } finally {
-    clearTimeout(wallTimer);
-    stopTail();
+    clearInterval(watchTimer);
+    const result = judgement(readOptional(daemonLog), readOptional(recorder));
+    writeFileSync(verdictPath, result.lines.join("\n") + "\n");
+    process.exitCode = result.ok ? 0 : 1;
+
+    if (attached && attached.exitCode === null) attached.kill("SIGKILL");
+    spawnSync("tmux", ["kill-session", "-t", SESSION], { stdio: "ignore" });
     killChildren();
-    await stopDaemon(stateDir);
-
-    // The verdict reads the real artefacts, never OpenCode's own output.
-    const daemonText = readOptional(daemonLog);
-    const denied = daemonText.includes("hook toolBefore deny");
-    const guarded = daemonText.includes("tool guard_status ok");
-    const noPush = !readOptional(recorder)
-      .split("\n")
-      .some((line) => line.startsWith("push"));
-    const verdict = [
-      "push_denied=" + denied,
-      "guard_status_ran=" + guarded,
-      "no_push_recorded=" + noPush,
-    ];
-    writeFileSync(path.join(repoRoot, "verdict.txt"), verdict.join("\n") + "\n");
-    process.exitCode = denied && guarded && noPush ? 0 : 1;
-
-    if (denied) markerPush = true;
-    if (guarded) markerGuard = true;
-    for (const key of KEY_DAEMON) {
-      if (daemonText.includes(key)) seenDaemon.add(key);
-    }
-    render();
-
     if (created) rmSync(base, { recursive: true, force: true });
-
-    // Hold past the tape so bash never draws a prompt over the caption.
-    const holdUntil = Date.now() + HOLD_MS;
-    while (Date.now() < holdUntil) {
-      await new Promise((resolve) => setTimeout(resolve, REDRAW_MS));
-    }
-    clearInterval(redrawTimer);
   }
 }
 

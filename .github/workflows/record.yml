@@ -96,7 +96,7 @@ jobs:
 
           docker build -t tack-vhs-git - <<EOF
           FROM $VHS_IMAGE
-          RUN apt-get update && apt-get -y install --no-install-recommends git
+          RUN apt-get update && apt-get -y install --no-install-recommends git tmux
           EOF
 
       - name: Record the session
