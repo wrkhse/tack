@@ -7,10 +7,10 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use tack_adapter_opencode::{WrapperConfig, WrapperError};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION};
 use tack_protocol::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
 use tack_runtime::{EngineError, Sandbox};
-use tack_wrapper::{WrapperConfig, WrapperError};
 
 /// Wall-clock budget for one wrapper call in the default build.
 pub const CALL_TIMEOUT_MS: u64 = 2000;
@@ -105,7 +105,7 @@ pub fn build(
         call_timeout_ms: options.call_timeout_ms,
         start_timeout_ms: options.start_timeout_ms,
     };
-    let script = tack_wrapper::render(&config).map_err(BuildError::Render)?;
+    let script = tack_adapter_opencode::render(&config).map_err(BuildError::Render)?;
 
     let dest = out.join("opencode");
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;

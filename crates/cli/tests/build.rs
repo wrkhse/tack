@@ -5,11 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tack_adapter_opencode::{WrapperConfig, WrapperError};
 use tack_cli::{BuildOptions, DAEMON_BIN, build};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest};
-use tack_wrapper::{WrapperConfig, WrapperError};
 
-const GOLDEN: &str = include_str!("golden/opencode.js");
+const GOLDEN: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../adapters/opencode/golden/opencode.js"
+));
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -49,7 +52,7 @@ impl Drop for Scratch {
 }
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/safe-push")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/safe-push")
 }
 
 fn manifest() -> PluginManifest {
@@ -103,7 +106,7 @@ fn render_matches_the_checked_in_golden() {
     let reasons = reasons();
     let config = config(&manifest, "/plugins/tack", 2000, 3000, &reasons);
 
-    let rendered = tack_wrapper::render(&config).expect("render");
+    let rendered = tack_adapter_opencode::render(&config).expect("render");
 
     assert_eq!(rendered, GOLDEN);
 }
@@ -165,7 +168,7 @@ fn an_unsafe_token_value_is_refused() {
     let mut config = config(&manifest, "/plugins/tack", 2000, 3000, &reasons);
     config.daemon_bin = "tack-daemon\nspawn other";
 
-    let error = tack_wrapper::render(&config).expect_err("unsafe value is refused");
+    let error = tack_adapter_opencode::render(&config).expect_err("unsafe value is refused");
 
     assert_eq!(error, WrapperError::UnsafeValue("daemon_bin"));
 }

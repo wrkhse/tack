@@ -23,7 +23,7 @@ pinned OpenCode 2.3.0 tarball installed with its SHA-256 checksum verified:
 
     cargo build --workspace --bins --locked
     cargo run --locked -p tack-cli -- build fixtures/safe-push --out dist
-    node test/wrapper.test.mjs
+    node adapters/opencode/wrapper.test.mjs
     node test/e2e/run.mjs
 
 Set TACK_E2E_DIR to keep the throwaway tree and its logs for inspection;

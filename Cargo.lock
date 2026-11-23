@@ -322,19 +322,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "tack-cli"
+name = "tack-adapter-opencode"
 version = "0.1.0-rc.2"
 dependencies = [
  "serde_json",
  "tack_protocol",
+]
+
+[[package]]
+name = "tack-cli"
+version = "0.1.0-rc.2"
+dependencies = [
+ "serde_json",
+ "tack-adapter-opencode",
+ "tack_protocol",
  "tack_runtime",
- "tack_wrapper",
 ]
 
 [[package]]
 name = "tack_daemon"
 version = "0.1.0-rc.2"
 dependencies = [
+ "libc",
+ "serde_json",
  "tack_protocol",
  "tack_runtime",
  "tokio",
@@ -352,24 +362,14 @@ dependencies = [
 name = "tack_runtime"
 version = "0.1.0-rc.2"
 dependencies = [
- "libc",
  "mlua",
  "serde_json",
  "tack_protocol",
- "tokio",
 ]
 
 [[package]]
 name = "tack_sdk"
 version = "0.1.0-rc.2"
-
-[[package]]
-name = "tack_wrapper"
-version = "0.1.0-rc.2"
-dependencies = [
- "serde_json",
- "tack_protocol",
-]
 
 [[package]]
 name = "tokio"
