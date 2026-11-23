@@ -69,6 +69,7 @@ jobs:
           termctrl save --help >> termctrl-font-diagnostics.txt 2>&1
           echo "--- video help ---" >> termctrl-font-diagnostics.txt
           termctrl video --help >> termctrl-font-diagnostics.txt 2>&1
+          cat termctrl-font-diagnostics.txt
 
       - name: Font probe
         run: |
@@ -76,6 +77,7 @@ jobs:
 
           printf 'FONT_PROBE_VISIBLE\n' | \
             termctrl save --pipe --format png --cols 100 --rows 10 \
+              --pixel-ratio 1 --padding 0 \
               --font-family 'DejaVu Sans Mono' --out fontprobe -- cat
 
       - name: Install the rc binaries
@@ -134,7 +136,8 @@ jobs:
             node test/e2e/record.mjs
           termctrl wait rec "OpenCode session" --timeout 30000
           termctrl mark rec ready
-          termctrl save rec --format png --font-family 'DejaVu Sans Mono' \
+          termctrl save rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
             --out frames/01-ready
 
           cmd="opencode run --standalone --format json -m fake/scripted"
@@ -142,18 +145,21 @@ jobs:
           termctrl send rec "text:$cmd" enter
           termctrl wait rec "push blocked" --timeout 30000
           termctrl mark rec denied
-          termctrl save rec --format png --font-family 'DejaVu Sans Mono' \
+          termctrl save rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
             --out frames/02-denied
           termctrl wait rec "guard_status" --timeout 30000
           termctrl mark rec tool
-          termctrl save rec --format png --font-family 'DejaVu Sans Mono' \
+          termctrl save rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
             --out frames/03-tool
 
           proof="git log origin/main --oneline; echo PROOF_NO_PUSH"
           termctrl send rec "text:$proof" enter
           termctrl wait rec "PROOF_NO_PUSH" --timeout 30000
           termctrl mark rec proof
-          termctrl save rec --format png --font-family 'DejaVu Sans Mono' \
+          termctrl save rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
             --out frames/04-proof
           termctrl stop rec
 
