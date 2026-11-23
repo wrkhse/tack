@@ -47,6 +47,17 @@ const REASONS = new Set(DENY_REASONS);
 let sequence = 0;
 let starting;
 
+// Identity of the socket's filesystem object. dev cannot distinguish an
+// inode-reusing rebind; the real connect is the proof of reachability.
+function socketIdentity() {
+  try {
+    const info = fs.statSync(SOCKET);
+    return info.dev + ":" + info.ino + ":" + info.mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
 function nextId() {
   sequence = (sequence + 1) % Number.MAX_SAFE_INTEGER;
   return sequence;
@@ -73,38 +84,30 @@ function startDaemon() {
       let poll;
       let child;
 
-      const finish = (ok) => {
+      const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         clearInterval(poll);
         // A failed or dead start must not poison later calls.
         starting = undefined;
-        resolve(ok);
+        resolve();
       };
 
-      // A stale socket file can survive a dead daemon. Record its identity so
-      // readiness means a fresh bind, not just a path that already exists.
-      let stale;
-      try {
-        const info = fs.statSync(SOCKET);
-        stale = info.ino + ":" + info.mtimeMs;
-      } catch {
-        stale = undefined;
-      }
+      // A stale socket file can survive a dead daemon. dev:ino:mtimeMs sees
+      // a rebind only when the inode or mtime changes; dev cannot distinguish
+      // an inode-reusing rebind. Readiness is only a hint: a real connect is
+      // the authority on reachability.
+      const stale = socketIdentity();
 
       const ready = () => {
         if (!fs.existsSync(SOCKET)) return false;
-        if (stale === undefined) return true;
-        try {
-          const info = fs.statSync(SOCKET);
-          return info.ino + ":" + info.mtimeMs !== stale;
-        } catch {
-          return false;
-        }
+        const current = socketIdentity();
+        return current !== undefined &&
+          (stale === undefined || current !== stale);
       };
 
-      timer = setTimeout(() => finish(ready()), START_TIMEOUT_MS);
+      timer = setTimeout(() => finish(), START_TIMEOUT_MS);
 
       try {
         // The daemon unlinks a stale socket only after it holds the lock, so
@@ -115,24 +118,24 @@ function startDaemon() {
           detached: true,
           stdio: ["ignore", log, log],
         });
-        child.on("error", () => finish(ready()));
-        child.on("exit", () => finish(ready()));
+        child.on("error", () => finish());
+        child.on("exit", () => finish());
         child.unref();
         fs.closeSync(log);
       } catch {
-        finish(false);
+        finish();
         return;
       }
 
       poll = setInterval(() => {
-        if (ready()) finish(true);
+        if (ready()) finish();
       }, POLL_MS);
     });
   }
   return starting;
 }
 
-function forward(request) {
+function forward(request, signal) {
   return new Promise((resolve) => {
     let settled = false;
     let active;
@@ -149,11 +152,14 @@ function forward(request) {
       if (settled) return;
       settled = true;
       stopTimer();
+      if (signal) signal.removeEventListener("abort", onAbort);
       if (active && !active.destroyed) active.destroy();
       resolve(result);
     };
 
     const deny = (name) => finish({ ok: false, reason: denyName(name) });
+
+    const onAbort = () => deny("aborted");
 
     const connect = () => {
       stopTimer();
@@ -213,16 +219,32 @@ function forward(request) {
           waitingForStart = true;
           abandoned = true;
           stopTimer();
-          startDaemon().then((ok) => {
-            if (settled) return;
-            if (ok) connect();
-            else deny("socket_missing");
-          });
+          startDaemon()
+            .then(() => {
+              if (settled) return;
+              // Readiness can lag a competing daemon's bind. A real connect
+              // is the only proof of reachability; waitingForStart bounds
+              // this to one retry, and this connect wrote no request.
+              try {
+                connect();
+              } catch {
+                deny("daemon_error");
+              }
+            })
+            .catch(() => deny("daemon_error"));
           return;
         }
         deny(code === "ENOENT" ? "socket_missing" : "socket_closed");
       });
     };
+
+    if (signal) {
+      if (signal.aborted) {
+        deny("aborted");
+        return;
+      }
+      signal.addEventListener("abort", onAbort);
+    }
 
     connect();
   });
@@ -269,25 +291,33 @@ async function before(event) {
   }
 }
 
-function setup(ctx) {
-  const registrations = [ctx.tool.hook("execute.before", before)];
+async function disposeAll(registrations) {
+  for (const registration of registrations) {
+    if (registration && typeof registration.dispose === "function") {
+      await registration.dispose();
+    }
+  }
+}
+
+async function setup(ctx) {
+  const pending = [ctx.tool.hook("execute.before", before)];
 
   for (const definition of MANIFEST.tools) {
-    registrations.push(
+    pending.push(
       ctx.tool.transform((editor) =>
         editor.add({
           name: definition.name,
           description: definition.description,
           input: definition.input,
           options: { codemode: false },
-          async execute(args) {
+          async execute(args, context) {
             const result = await forward({
               id: nextId(),
               kind: "tool",
               name: definition.name,
               input: args,
               version: PROTOCOL_VERSION,
-            });
+            }, context && context.signal);
             if (!result.ok) throw new Error("tack: " + result.reason);
             if (result.reply.kind !== "tool") {
               throw new Error("tack: " + denyName("malformed_reply"));
@@ -304,13 +334,19 @@ function setup(ctx) {
     );
   }
 
-  return async () => {
-    for (const registration of registrations) {
-      if (registration && typeof registration.dispose === "function") {
-        await registration.dispose();
-      }
-    }
-  };
+  const settled = await Promise.allSettled(pending);
+  const failed = settled.find((item) => item.status === "rejected");
+
+  if (failed) {
+    const resolved = settled
+      .filter((item) => item.status === "fulfilled")
+      .map((item) => item.value);
+    await disposeAll(resolved);
+    throw failed.reason;
+  }
+
+  const registrations = settled.map((item) => item.value);
+  return async () => disposeAll(registrations);
 }
 
 module.exports = { id: "tack." + MANIFEST.name, setup };

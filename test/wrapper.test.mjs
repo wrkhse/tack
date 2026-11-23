@@ -180,7 +180,7 @@ async function loadPlugin(env, modulePath = wrapperPath) {
   );
 
   const fake = fakeContext();
-  const cleanup = plugin.setup(fake.ctx);
+  const cleanup = await plugin.setup(fake.ctx);
   assert.equal(typeof cleanup, "function", "setup must return a cleanup function");
   assert.equal(fake.hooks.size, 1, "one execute.before hook must be registered");
   assert.equal(fake.transforms.size, 1, "one tool transform must be registered");
@@ -554,6 +554,155 @@ async function rewriteMutates() {
   assert.equal(event.input.command, "git push --dry-run");
 }
 
+// OpenCode registers hooks and tools asynchronously. A tool call cannot be
+// delivered until setup() resolves, so setup() must wait for every
+// registration; cleanup must dispose the resolved objects, not their promises.
+async function setupAwaitsAsyncRegistrations() {
+  const dir = tempDir();
+
+  try {
+    applyEnv(baseEnv(dir));
+    for (const key of Object.keys(require.cache)) delete require.cache[key];
+    const plugin = require(wrapperPath);
+
+    let resolveHook;
+    const hookPromise = new Promise((resolve) => {
+      resolveHook = resolve;
+    });
+    let beforeRegistered = false;
+    let beforeCallback;
+    let toolDefinition;
+    let hookDisposed = false;
+    let transformDisposed = false;
+
+    const hookRegistration = {
+      async dispose() {
+        hookDisposed = true;
+      },
+    };
+    const transformRegistration = {
+      async dispose() {
+        transformDisposed = true;
+      },
+    };
+
+    let settled = false;
+    const ctx = {
+      tool: {
+        hook(name, callback) {
+          assert.equal(name, "execute.before");
+          beforeCallback = callback;
+          // The registration becomes active only when this promise resolves.
+          return hookPromise.then((registration) => {
+            beforeRegistered = true;
+            return registration;
+          });
+        },
+        transform(callback) {
+          assert.equal(typeof callback, "function");
+          callback({
+            add(definition) {
+              toolDefinition = definition;
+            },
+          });
+          return Promise.resolve(transformRegistration);
+        },
+      },
+    };
+
+    const cleanupPromise = plugin.setup(ctx);
+    cleanupPromise.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(settled, false, "setup resolved before the registrations");
+    assert.equal(beforeRegistered, false, "the hook activated too early");
+
+    // OpenCode cannot deliver a tool call until setup() resolves. A call
+    // attempted now cannot reach a daemon unguarded: it fails closed, and
+    // no execute.before hook is active yet.
+    assert.ok(toolDefinition, "the tool must be defined");
+    let earlyError;
+    try {
+      await toolDefinition.execute({ command: "echo hello" });
+    } catch (thrown) {
+      earlyError = thrown;
+    }
+    assert.ok(earlyError instanceof Error, "an early tool call must fail closed");
+    assert.equal(
+      earlyError.message,
+      "tack: socket_missing",
+      "an early tool call cannot reach a daemon",
+    );
+    assert.equal(beforeRegistered, false, "no call ran before the hook was active");
+
+    resolveHook(hookRegistration);
+    const cleanup = await cleanupPromise;
+
+    // setup() resolves only after the late hook registration, so no call can
+    // be delivered before execute.before is active.
+    assert.equal(beforeRegistered, true, "hook must be active before setup resolves");
+    assert.equal(typeof beforeCallback, "function");
+
+    await cleanup();
+    assert.equal(hookDisposed, true, "cleanup disposes the resolved hook");
+    assert.equal(transformDisposed, true, "cleanup disposes the resolved transform");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// An AbortController must cancel the in-flight daemon request and settle the
+// tool call with the named "aborted" reason instead of waiting for the timeout.
+async function toolExecuteHonorsAbortSignal() {
+  const dir = tempDir();
+  let server;
+
+  try {
+    const env = baseEnv(dir);
+    const loaded = await loadPlugin(env);
+    const tool = loaded.added[0];
+
+    // Accept the connection but never reply: only the abort settles this call.
+    server = await listen(env.TACK_SOCKET, () => {});
+
+    const controller = new AbortController();
+    const pending = tool.execute({ verbose: true }, {
+      signal: controller.signal,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+
+    let error;
+    try {
+      await pending;
+    } catch (thrown) {
+      error = thrown;
+    }
+    assert.ok(error instanceof Error, "an aborted execute must reject");
+    assert.equal(error.message, "tack: aborted", "abort must deny by name");
+
+    // A signal already aborted at call time denies before any connect.
+    const pre = new AbortController();
+    pre.abort();
+    let preError;
+    try {
+      await tool.execute({ verbose: true }, { signal: pre.signal });
+    } catch (thrown) {
+      preError = thrown;
+    }
+    assert.ok(preError instanceof Error, "a pre-aborted execute must reject");
+    assert.equal(preError.message, "tack: aborted");
+  } finally {
+    if (server) await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function toolForwarding() {
   const dir = tempDir();
   const marker = path.join(dir, "daemons.log");
@@ -655,11 +804,11 @@ async function slowStartFailsWithSocketMissing() {
   }
 }
 
-async function coldBefore(env, marker, dir) {
+async function coldBefore(env, marker, dir, modulePath = wrapperPath) {
   const stub = writeScript(dir, "stub-daemon.js", STUB_DAEMON);
   const full = { ...env, TACK_DAEMON_BIN: stub, TACK_STUB_MARKER: marker };
   delete full.TACK_NO_START;
-  return loadBefore(full);
+  return loadBefore(full, modulePath);
 }
 
 async function restartAfterDaemonDeath() {
@@ -724,6 +873,69 @@ function instrumentedWrapper(dir) {
   return target;
 }
 
+// A daemon that exits without binding: a start that cannot claim a fresh
+// socket, so forward must prove reachability with a real connect.
+const EXITING_DAEMON = [
+  "#!/usr/bin/env node",
+  "process.exit(0);",
+  "",
+].join("\n");
+
+// An instrumented copy whose socket stat and connect calls the test can
+// drive. The shipped wrapper is untouched.
+function raceWrapper(dir, name) {
+  const source = readFileSync(wrapperPath, "utf8")
+    .replace(
+      'const net = require("node:net");',
+      'const net = globalThis.__tackNet || require("node:net");',
+    )
+    .replace(
+      'const fs = require("node:fs");',
+      'const fs = globalThis.__tackFs || require("node:fs");',
+    );
+  const target = path.join(dir, name);
+  writeFileSync(target, source);
+  return target;
+}
+
+// Every stat of the socket reports one identity, so an unlink/rebind with
+// the same dev, inode and mtime is indistinguishable from the stale file.
+function fixedIdentityFs() {
+  const real = require("node:fs");
+  return {
+    ...real,
+    statSync(p) {
+      const info = real.statSync(p);
+      if (p === process.env.TACK_SOCKET) {
+        return { dev: 7, ino: 11, mtimeMs: 5 };
+      }
+      return info;
+    },
+  };
+}
+
+// The first connect gets ENOENT even though a daemon is listening: a
+// competing daemon bound the socket after that connect began.
+function forcedEnoentNet() {
+  const real = require("node:net");
+  let forced = false;
+  return {
+    ...real,
+    connect(...args) {
+      if (forced) return real.connect(...args);
+      forced = true;
+      const sock = new real.Socket();
+      setImmediate(() => {
+        const error = new Error("connect ENOENT");
+        error.code = "ENOENT";
+        sock.emit("error", error);
+        sock.destroy();
+      });
+      return sock;
+    },
+  };
+}
+
 async function secondColdStartKeepsLiveDaemon() {
   const dir = tempDir();
   const marker = path.join(dir, "daemons.log");
@@ -745,9 +957,9 @@ async function secondColdStartKeepsLiveDaemon() {
     for (const key of Object.keys(require.cache)) delete require.cache[key];
     const second = require(instrumented);
     // The second daemon loses the lock, so its socket never replaces the
-    // live one and the start cannot claim a fresh bind.
-    const ready = await second.__startDaemon();
-    assert.equal(ready, false, "an unchanged socket is not a fresh bind");
+    // live one. startDaemon settles without a readiness value; the connects
+    // below prove the first daemon is still reachable.
+    await second.__startDaemon();
 
     const lines = readFileSync(marker, "utf8").trim().split("\n");
     assert.equal(lines.length, 2, "the second daemon also tried to start");
@@ -758,6 +970,247 @@ async function secondColdStartKeepsLiveDaemon() {
     const beforeFresh = await loadBefore(env);
     await beforeFresh(ALLOW_CALL);
   } finally {
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A competing daemon binds between the first ENOENT and the stat check.
+// The start cannot see a fresh bind, but one real connect must reach the
+// live daemon instead of denying socket_missing.
+async function competingBindBeforeStatUsesLiveSocket() {
+  const dir = tempDir();
+  let server;
+
+  try {
+    const exiting = writeScript(dir, "exiting-daemon.js", EXITING_DAEMON);
+    const env = baseEnv(dir, { TACK_DAEMON_BIN: exiting });
+    delete env.TACK_NO_START;
+    delete globalThis.__tackFs;
+
+    globalThis.__tackNet = forcedEnoentNet();
+    const target = raceWrapper(dir, "competing-bind.js");
+    const before = await loadBefore(env, target);
+
+    server = await listen(env.TACK_SOCKET, (conn) => {
+      let buffer = "";
+      conn.setEncoding("utf8");
+      conn.on("error", () => {});
+      conn.on("data", (chunk) => {
+        buffer += chunk;
+        if (buffer.indexOf("\n") < 0) return;
+        conn.write(reply("hook", { outcome: { kind: "allow" } }) + "\n");
+      });
+    });
+
+    let error;
+    try {
+      await before(ALLOW_CALL);
+    } catch (thrown) {
+      error = thrown;
+    }
+    assert.equal(
+      error, undefined, "the live socket must be used, not a named deny",
+    );
+  } finally {
+    delete globalThis.__tackNet;
+    if (server) await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A stale socket is replaced by a fresh listener with the same dev, inode
+// and mtime. The start cannot see an identity change, but the one connect
+// after it resolves succeeds. With no daemon at all the call fails closed.
+async function rebindWithMatchingIdentity() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+  const socket = path.join(dir, "tack.sock");
+
+  try {
+    const stale = writeScript(dir, "stale.js", STALE_SOCKET);
+    execFileSync(process.execPath, [stale, socket], { stdio: "ignore" });
+    assert.ok(existsSync(socket), "stale socket was not created");
+
+    globalThis.__tackFs = fixedIdentityFs();
+    const target = raceWrapper(dir, "matching-identity.js");
+    const env = baseEnv(dir, { TACK_STUB_DELAY_MS: "20" });
+    const before = await coldBefore(env, marker, dir, target);
+
+    await before(ALLOW_CALL);
+
+    assert.ok(existsSync(marker), "a refused socket did not trigger a start");
+  } finally {
+    delete globalThis.__tackFs;
+    await stopDaemons(marker);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The matching-identity case with no daemon: a stale socket file whose
+// identity never changes, and a daemon that exits without binding. Readiness
+// cannot see a fresh bind, so the one real connect finds no listener and the
+// ECONNREFUSED fails closed as the pinned "socket_closed" name.
+async function rebindWithNoDaemonFailsClosed() {
+  const dir = tempDir();
+  const socket = path.join(dir, "tack.sock");
+
+  try {
+    const stale = writeScript(dir, "stale.js", STALE_SOCKET);
+    execFileSync(process.execPath, [stale, socket], { stdio: "ignore" });
+    assert.ok(existsSync(socket), "stale socket was not created");
+
+    globalThis.__tackFs = fixedIdentityFs();
+    const exiting = writeScript(dir, "exiting-daemon.js", EXITING_DAEMON);
+    const env = baseEnv(dir, { TACK_DAEMON_BIN: exiting });
+    delete env.TACK_NO_START;
+    const target = raceWrapper(dir, "matching-identity-closed.js");
+    const before = await loadBefore(env, target);
+
+    await expectDeny(before, "socket_closed");
+    assert.ok(existsSync(socket), "no daemon replaced the stale socket");
+  } finally {
+    delete globalThis.__tackFs;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A leftover socket file that refuses connections is the named
+// "socket_closed" reason: the path exists but nothing accepts connections.
+// ENOENT (no path at all) keeps the distinct "socket_missing" name pinned by
+// the "socket_missing fails closed" check. The two names are not interchangeable.
+async function staleSocketFileDeniesSocketClosed() {
+  const dir = tempDir();
+  const socket = path.join(dir, "tack.sock");
+
+  try {
+    const stale = writeScript(dir, "stale.js", STALE_SOCKET);
+    execFileSync(process.execPath, [stale, socket], { stdio: "ignore" });
+    assert.ok(existsSync(socket), "stale socket was not created");
+
+    // TACK_NO_START=1 keeps ECONNREFUSED from triggering a daemon start.
+    const before = await loadBefore(baseEnv(dir));
+    await expectDeny(before, "socket_closed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A wrapper with two tools: the rollback proof needs one transform to fail
+// while the other resolves.
+function twoToolWrapper(dir) {
+  const source = readFileSync(wrapperPath, "utf8");
+  const target = path.join(dir, "two-tools.js");
+  const manifest =
+    '{"name":"safe-push","needs":[],"tools":[' +
+    '{"name":"guard_status","description":"status","input":{}},' +
+    '{"name":"other_tool","description":"other","input":{}}' +
+    "]}";
+  writeFileSync(
+    target,
+    source.replace(/^const MANIFEST = .*;$/m, "const MANIFEST = " + manifest + ";"),
+  );
+  return target;
+}
+
+// A failed registration must not leak the ones that did resolve: setup()
+// disposes every fulfilled registration and rethrows the first rejection.
+async function setupRollsBackOnFailedRegistration() {
+  const dir = tempDir();
+
+  try {
+    applyEnv(baseEnv(dir));
+    for (const key of Object.keys(require.cache)) delete require.cache[key];
+    const plugin = require(twoToolWrapper(dir));
+
+    const disposed = [];
+    const registration = (tag) => ({
+      async dispose() {
+        disposed.push(tag);
+      },
+    });
+    let transformCalls = 0;
+
+    const ctx = {
+      tool: {
+        hook(name, callback) {
+          assert.equal(name, "execute.before");
+          assert.equal(typeof callback, "function");
+          return Promise.resolve(registration("hook"));
+        },
+        transform(callback) {
+          assert.equal(typeof callback, "function");
+          transformCalls += 1;
+          if (transformCalls === 1) {
+            return Promise.reject(new Error("tack: registration failed"));
+          }
+          return Promise.resolve(registration("transform"));
+        },
+      },
+    };
+
+    let error;
+    try {
+      await plugin.setup(ctx);
+    } catch (thrown) {
+      error = thrown;
+    }
+
+    assert.ok(error instanceof Error, "setup must reject on a failed registration");
+    assert.equal(
+      error.message,
+      "tack: registration failed",
+      "first rejection is rethrown",
+    );
+    assert.equal(transformCalls, 2, "both transforms were attempted");
+    assert.deepEqual(
+      disposed,
+      ["hook", "transform"],
+      "only fulfilled registrations are disposed",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The first connect gets ENOENT so a daemon starts; the retry after start
+// resolves throws synchronously. The continuation must deny by name instead
+// of leaving the call dangling.
+function throwingRetryNet() {
+  const real = require("node:net");
+  let calls = 0;
+  return {
+    ...real,
+    connect(...args) {
+      calls += 1;
+      if (calls === 1) {
+        const sock = new real.Socket();
+        setImmediate(() => {
+          const error = new Error("connect ENOENT");
+          error.code = "ENOENT";
+          sock.emit("error", error);
+          sock.destroy();
+        });
+        return sock;
+      }
+      throw new Error("connect exploded");
+    },
+  };
+}
+
+async function startContinuationThrowDeniesDaemonError() {
+  const dir = tempDir();
+  const marker = path.join(dir, "daemons.log");
+
+  try {
+    delete globalThis.__tackFs;
+    globalThis.__tackNet = throwingRetryNet();
+    const target = raceWrapper(dir, "throw-continuation.js");
+    const before = await coldBefore(baseEnv(dir), marker, dir, target);
+
+    await expectDeny(before, "daemon_error");
+  } finally {
+    delete globalThis.__tackNet;
     await stopDaemons(marker);
     rmSync(dir, { recursive: true, force: true });
   }
@@ -824,6 +1277,38 @@ await check(
 await check(
   "a second cold start leaves the live daemon reachable",
   secondColdStartKeepsLiveDaemon,
+);
+await check(
+  "a bind before the stat check uses the live socket, no deny",
+  competingBindBeforeStatUsesLiveSocket,
+);
+await check(
+  "a rebind with matching identity retries the connect and succeeds",
+  rebindWithMatchingIdentity,
+);
+await check(
+  "a rebind with matching identity fails closed when no daemon appears",
+  rebindWithNoDaemonFailsClosed,
+);
+await check(
+  "a stale socket file with no daemon denies socket_closed",
+  staleSocketFileDeniesSocketClosed,
+);
+await check(
+  "setup awaits async registrations and disposes them",
+  setupAwaitsAsyncRegistrations,
+);
+await check(
+  "setup disposes fulfilled registrations when one fails",
+  setupRollsBackOnFailedRegistration,
+);
+await check(
+  "a throw in the start continuation denies daemon_error",
+  startContinuationThrowDeniesDaemonError,
+);
+await check(
+  "tool execute honors an abort signal",
+  toolExecuteHonorsAbortSignal,
 );
 
 if (buildDir) rmSync(buildDir, { recursive: true, force: true });
