@@ -4,3 +4,11 @@ test_workspace = true
 
 # nextest stops at the first failing test, which is what a mutant run wants.
 test_tool = 'nextest'
+
+exclude_re = [
+  # Process entry point: replacing it with () is unobservable in-process.
+  'crates/daemon/src/main\.rs.*replace main with \(\)',
+  # Luau normalizes whole float keys to integers, so the Number arm only sees
+  # non-integral keys, which the fallback rejects with the same message.
+  'delete match arm LuaValue::Number\(index\) in lua_table_to_json',
+]

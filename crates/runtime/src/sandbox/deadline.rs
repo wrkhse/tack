@@ -45,3 +45,20 @@ impl Deadline {
         started.elapsed().as_micros() >= u128::from(budget)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn begin_arms_a_budget_and_disarm_clears_it() {
+        let deadline = Deadline::new();
+        assert!(!deadline.expired(), "a fresh clock has no budget");
+
+        deadline.begin(0);
+        assert!(deadline.expired(), "a zero budget is immediately expired");
+
+        deadline.disarm();
+        assert!(!deadline.expired(), "disarming clears the budget");
+    }
+}

@@ -251,3 +251,90 @@ fn module_env(lua: &Lua, require: Function) -> LuaResult<Table> {
     env.set_metatable(Some(metatable))?;
     Ok(env)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    struct Source {
+        path: PathBuf,
+    }
+
+    impl Source {
+        fn new(bytes: usize) -> Self {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("tack-require-source-{id}-{bytes}.luau"));
+            std::fs::write(&path, "x".repeat(bytes)).expect("write source");
+            Self { path }
+        }
+    }
+
+    impl Drop for Source {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn require_causes_display_their_messages() {
+        for (cause, expected) in [
+            (
+                RequireCause::Absolute("/etc/passwd".into()),
+                "tack: require rejects absolute path: /etc/passwd".to_owned(),
+            ),
+            (
+                RequireCause::Parent("../x".into()),
+                "tack: require rejects parent path: ../x".to_owned(),
+            ),
+            (
+                RequireCause::Escape("./linked".into()),
+                "tack: require escapes plugin folder: ./linked".to_owned(),
+            ),
+            (
+                RequireCause::Cycle("./a".into()),
+                "tack: require cycle detected: ./a".to_owned(),
+            ),
+            (
+                RequireCause::Missing("./nope".into()),
+                "tack: require module not found: ./nope".to_owned(),
+            ),
+            (
+                RequireCause::TooLarge("./big".into()),
+                "tack: require module too large: ./big".to_owned(),
+            ),
+            (
+                RequireCause::Unreadable {
+                    spec: "./x".into(),
+                    detail: "boom".into(),
+                },
+                "tack: require cannot read ./x: boom".to_owned(),
+            ),
+            (
+                RequireCause::Poisoned,
+                "tack: require state lock poisoned".to_owned(),
+            ),
+        ] {
+            assert_eq!(cause.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn read_source_accepts_the_cap_and_rejects_one_byte_over() {
+        let cap = usize::try_from(MAX_MODULE_BYTES).expect("cap fits in usize");
+
+        let at_cap = Source::new(cap);
+        let source = read_source(&at_cap.path, "./at-cap").expect("the cap is allowed");
+        assert_eq!(source.len(), cap);
+
+        let over = Source::new(cap.saturating_add(1));
+        assert_eq!(
+            read_source(&over.path, "./over").expect_err("one byte over is refused"),
+            RequireCause::TooLarge("./over".into())
+        );
+    }
+}

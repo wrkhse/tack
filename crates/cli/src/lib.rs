@@ -127,3 +127,39 @@ pub fn build(
 
     Ok((index, descriptor))
 }
+
+#[cfg(test)]
+mod tests {
+    use tack_runtime::sandbox::LimitCause;
+
+    use super::*;
+
+    #[test]
+    fn build_error_reports_the_underlying_source() {
+        let sandbox = EngineError::Limit(LimitCause::Deadline);
+        assert_eq!(
+            BuildError::Sandbox(sandbox.clone())
+                .source()
+                .map(ToString::to_string),
+            Some(sandbox.to_string())
+        );
+
+        let render = WrapperError::Json("bad json".into());
+        assert_eq!(
+            BuildError::Render(render.clone())
+                .source()
+                .map(ToString::to_string),
+            Some(render.to_string())
+        );
+
+        let io = std::io::Error::other("disk");
+        assert_eq!(
+            BuildError::Io(std::io::Error::other("disk"))
+                .source()
+                .map(ToString::to_string),
+            Some(io.to_string())
+        );
+
+        assert!(BuildError::NeedMissing("daemon".into()).source().is_none());
+    }
+}

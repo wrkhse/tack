@@ -206,3 +206,122 @@ fn lua_table_to_json(table: &Table, depth: usize) -> Result<Value, EngineError> 
         array.into_iter().map(|(_, value)| value).collect(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unsupported() -> EngineError {
+        EngineError::InvalidResult("tack: unsupported table key".into())
+    }
+
+    #[test]
+    fn lua_index_converts_the_position_exactly() {
+        assert_eq!(lua_index(0), Ok(0));
+        assert_eq!(lua_index(1), Ok(1));
+        assert_eq!(lua_index(2), Ok(2));
+
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            lua_index(usize::MAX),
+            Err(EngineError::InvalidResult(
+                "tack: table index out of range".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn float_position_accepts_only_whole_in_range_keys() {
+        let ceiling = f64::from(u32::try_from(MAX_ENTRIES).unwrap());
+        let over = f64::from(u32::try_from(MAX_ENTRIES).unwrap().saturating_add(1));
+
+        assert_eq!(float_position(1.0), Ok(1));
+        assert_eq!(float_position(2.0), Ok(2));
+        assert_eq!(float_position(ceiling), Ok(MAX_ENTRIES));
+
+        for bad in [
+            0.0,
+            -1.0,
+            over,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(float_position(bad), Err(unsupported()), "key {bad}");
+        }
+    }
+
+    #[test]
+    fn array_position_accepts_only_positive_in_range_keys() {
+        assert_eq!(array_position(1i64), Ok(1));
+        assert_eq!(array_position(2i64), Ok(2));
+        assert_eq!(
+            array_position(i64::try_from(MAX_ENTRIES).unwrap()),
+            Ok(MAX_ENTRIES)
+        );
+
+        for bad in [0i64, -1, 1025] {
+            assert_eq!(array_position(bad), Err(unsupported()), "key {bad}");
+        }
+    }
+
+    #[test]
+    fn lua_table_to_json_converts_each_key_kind() {
+        let lua = Lua::new();
+
+        let strings = lua.create_table().unwrap();
+        strings.set("answer", 42).unwrap();
+        assert_eq!(
+            lua_table_to_json(&strings, 0).unwrap(),
+            serde_json::json!({ "answer": 42 })
+        );
+
+        let integers = lua.create_table().unwrap();
+        integers.set(1i64, "a").unwrap();
+        integers.set(2i64, "b").unwrap();
+        assert_eq!(
+            lua_table_to_json(&integers, 0).unwrap(),
+            serde_json::json!(["a", "b"])
+        );
+
+        let floats = lua.create_table().unwrap();
+        floats.set(1.5f64, "a").unwrap();
+        assert_eq!(lua_table_to_json(&floats, 0), Err(unsupported()));
+    }
+
+    #[test]
+    fn lua_table_to_json_allows_exactly_the_entry_cap() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        for index in 0..MAX_ENTRIES {
+            let value = i64::try_from(index).unwrap();
+            table.set(format!("k{index}"), value).unwrap();
+        }
+
+        let value = lua_table_to_json(&table, 0).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), MAX_ENTRIES);
+        assert_eq!(object.get("k0"), Some(&serde_json::json!(0)));
+
+        table.set("extra", 1).unwrap();
+        assert_eq!(
+            lua_table_to_json(&table, 0),
+            Err(EngineError::Limit(LimitCause::TooManyEntries {
+                limit: MAX_ENTRIES
+            }))
+        );
+    }
+
+    #[test]
+    fn lua_table_to_json_refuses_a_sparse_array() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set(1i64, "a").unwrap();
+        table.set(3i64, "c").unwrap();
+        assert_eq!(
+            lua_table_to_json(&table, 0),
+            Err(EngineError::InvalidResult("tack: sparse Lua array".into()))
+        );
+    }
+}

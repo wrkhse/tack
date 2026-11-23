@@ -371,6 +371,18 @@ mod tests {
     }
 
     #[test]
+    fn wire_errors_display_their_messages() {
+        for (error, expected) in [
+            (WireError::TooLarge, "frame exceeds the size cap"),
+            (WireError::Malformed, "frame is not valid JSON"),
+            (WireError::Closed, "peer closed the frame mid-line"),
+            (WireError::Io, "frame I/O failed"),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
     fn encode_rejects_an_oversize_frame() {
         let huge = serde_json::json!({ "blob": "x".repeat(MAX_FRAME_BYTES) });
         assert_eq!(encode_line(&huge), Err(WireError::TooLarge));

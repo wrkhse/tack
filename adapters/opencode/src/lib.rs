@@ -175,6 +175,27 @@ mod tests {
     }
 
     #[test]
+    fn errors_display_their_machine_readable_messages() {
+        for (error, expected) in [
+            (
+                WrapperError::MissingToken("MANIFEST"),
+                "missing_token:MANIFEST",
+            ),
+            (
+                WrapperError::UnreplacedToken("CALL_TIMEOUT"),
+                "unreplaced_token:CALL_TIMEOUT",
+            ),
+            (
+                WrapperError::UnsafeValue("daemon_bin"),
+                "unsafe_value:daemon_bin",
+            ),
+            (WrapperError::Json("bad json".into()), "json:bad json"),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
     fn render_refuses_newlines_and_token_like_values() {
         let manifest = manifest();
         let reasons = ["socket_missing"];

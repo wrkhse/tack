@@ -82,3 +82,69 @@ impl From<mlua::Error> for EngineError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limit_causes_display_their_messages() {
+        for (cause, expected) in [
+            (
+                LimitCause::Deadline,
+                "tack: script deadline exceeded".to_owned(),
+            ),
+            (LimitCause::Memory, "tack: memory limit exceeded".to_owned()),
+            (
+                LimitCause::TooManyEntries { limit: MAX_ENTRIES },
+                format!("tack: too many table entries: {MAX_ENTRIES}"),
+            ),
+            (
+                LimitCause::TooDeep { limit: MAX_DEPTH },
+                format!("tack: nesting deeper than {MAX_DEPTH}"),
+            ),
+        ] {
+            assert_eq!(cause.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn load_causes_display_their_messages() {
+        assert_eq!(
+            LoadCause::Require(RequireCause::Missing("./x".into())).to_string(),
+            "tack: require module not found: ./x"
+        );
+        assert_eq!(
+            LoadCause::Message("tack: plugin folder unavailable".into()).to_string(),
+            "tack: plugin folder unavailable"
+        );
+    }
+
+    #[test]
+    fn engine_errors_display_their_messages() {
+        for (error, expected) in [
+            (
+                EngineError::Load(LoadCause::Message("load fail".into())),
+                "load fail".to_owned(),
+            ),
+            (
+                EngineError::Script("script fail".into()),
+                "script fail".to_owned(),
+            ),
+            (
+                EngineError::Limit(LimitCause::Deadline),
+                "tack: script deadline exceeded".to_owned(),
+            ),
+            (
+                EngineError::UnknownTool("nope".into()),
+                "tack: unknown tool: nope".to_owned(),
+            ),
+            (
+                EngineError::InvalidResult("bad result".into()),
+                "bad result".to_owned(),
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+}
