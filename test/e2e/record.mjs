@@ -52,6 +52,8 @@ let inputBuffer = "";
 let leftCursor = 0;
 let rightCursor = 0;
 let headerState = "";
+let markerDenied = false;
+let markerGuarded = false;
 let watchTimer;
 let holdTimer;
 let finished = false;
@@ -234,8 +236,10 @@ function pad(text, width) {
 function printHeader(force = false) {
   const daemonText = readOptional(daemonLog);
   const recorderText = readOptional(recorder);
-  const denied = daemonText.includes("hook toolBefore deny");
-  const guarded = daemonText.includes("tool guard_status ok");
+  const denied = markerDenied ||
+    daemonText.includes("hook toolBefore deny");
+  const guarded = markerGuarded ||
+    daemonText.includes("tool guard_status ok");
   const noPush = !recorderText.split("\n")
     .some((line) => line.startsWith("push"));
   const state = denied + ":" + guarded + ":" + noPush;
@@ -294,6 +298,9 @@ function collectLeft(text) {
 
 function collectRight(text) {
   pushWrapped(rightLines, text);
+  if (text.includes("hook toolBefore deny")) markerDenied = true;
+  if (text.includes("tool guard_status ok")) markerGuarded = true;
+  if (markerDenied || markerGuarded) printHeader();
   emitRow();
 }
 

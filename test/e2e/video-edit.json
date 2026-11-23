@@ -4,20 +4,20 @@
       "from": "ready",
       "to": "denied",
       "caption": "1. git push is denied",
-      "speed": 1.5
+      "speed": 0.5
     },
     {
       "from": "denied",
       "to": "tool",
       "caption": "2. guard_status runs",
-      "speed": 1.5
+      "speed": 0.5
     },
     {
       "from": "tool",
       "to": "proof",
       "caption": "3. nothing reached origin",
-      "speed": 1,
-      "hold_ms": 1200
+      "speed": 0.75,
+      "hold_ms": 2000
     }
   ]
 }
