@@ -1,4 +1,4 @@
-// Prepares a scratch session and renders it in two NORMAL-SCREEN panes.
+// Prepares a scratch session and renders it as plain sequential text.
 // Terminal Control records and drives this process directly; commands typed
 // into stdin are executed with the prepared environment and streamed raw.
 
@@ -28,14 +28,7 @@ const verdictPath = path.join(repoRoot, "verdict.txt");
 
 const tackCli = process.env.TACK_CLI || "tack";
 
-const COLS = 160;
-const ROWS = 38;
 const PANE_W = 76;
-const LEFT_COL = 1;
-const SEP_COL = 78;
-const RIGHT_COL = 80;
-const VIEW_ROWS = ROWS - 4;
-const REDRAW_MS = 200;
 const MAX_LINES = 200;
 const WATCH_MS = 250;
 const SESSION_MS = 30_000;
@@ -54,9 +47,9 @@ let daemonLog;
 let recorder;
 let baseDir;
 let createdBase;
-let lastCommand = "";
 let inputBuffer = "";
-let redrawTimer;
+let printedRows = 0;
+let headerState = "";
 let watchTimer;
 let holdTimer;
 let finished = false;
@@ -231,6 +224,44 @@ function judgement(daemonText, recorderText) {
   };
 }
 
+function pad(text) {
+  const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
+  return clean.length >= PANE_W ? clean.slice(0, PANE_W) : clean.padEnd(PANE_W);
+}
+
+function printHeader(force = false) {
+  const daemonText = readOptional(daemonLog);
+  const recorderText = readOptional(recorder);
+  const denied = daemonText.includes("hook toolBefore deny");
+  const guarded = daemonText.includes("tool guard_status ok");
+  const noPush = !recorderText.split("\n")
+    .some((line) => line.startsWith("push"));
+  const state = denied + ":" + guarded + ":" + noPush;
+  if (!force && state === headerState) return;
+  headerState = state;
+
+  const first = denied ? "[1] git push blocked" : "[1] push pending";
+  const second = guarded ? "[2] guard_status ran" : "[2] guard pending";
+  const third = noPush ? "[3] no git push" : "[3] PUSH EXECUTED";
+  process.stdout.write(first + "    " + second + "    " + third + "\n");
+}
+
+function printTitles() {
+  process.stdout.write(
+    pad("OpenCode session") + "| daemon.log\n" +
+    "-".repeat(PANE_W) + "+" + "-".repeat(PANE_W) + "\n",
+  );
+}
+
+function emitRow() {
+  const index = printedRows;
+  const left = leftLines[index] ?? "";
+  const right = rightLines[index] ?? "";
+  process.stdout.write(pad(left) + "| " + right.slice(0, PANE_W) + "\n");
+  printedRows += 1;
+  printHeader();
+}
+
 function pushWrapped(buffer, text) {
   const clean = String(text).replace(/\r/g, "").replace(/\t/g, "  ");
   for (let i = 0; i < clean.length; i += PANE_W) {
@@ -253,55 +284,19 @@ function addLines(stream, handle) {
   };
 }
 
-function clip(text) {
-  const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
-  return clean.length > PANE_W ? clean.slice(0, PANE_W) : clean.padEnd(PANE_W);
+function collectLeft(text) {
+  pushWrapped(leftLines, text);
+  emitRow();
 }
 
-function at(row, col, text) {
-  return "\x1b[" + row + ";" + col + "H" + text;
-}
-
-function render() {
-  const daemonText = readOptional(daemonLog);
-  const recorderText = readOptional(recorder);
-  const denied = daemonText.includes("hook toolBefore deny");
-  const guarded = daemonText.includes("tool guard_status ok");
-  const noPush = !recorderText.split("\n")
-    .some((line) => line.startsWith("push"));
-
-  const first = denied ? "[1] git push blocked" : "[1] push pending";
-  const second = guarded ? "[2] guard_status ran" : "[2] guard pending";
-  const third = noPush ? "[3] no git push" : "[3] PUSH EXECUTED";
-  const rule = "-".repeat(PANE_W);
-  const left = leftLines.slice(-VIEW_ROWS);
-  const right = rightLines.slice(-VIEW_ROWS);
-  const out = ["\x1b[H\x1b[2J"];
-
-  out.push(at(1, 1, (first + "    " + second + "    " + third)
-    .slice(0, COLS)));
-  out.push(at(2, LEFT_COL, clip("OpenCode session")));
-  out.push(at(2, SEP_COL, "|"));
-  out.push(at(2, RIGHT_COL, clip("daemon.log")));
-  out.push(at(3, LEFT_COL, ("> " + lastCommand).slice(0, PANE_W)));
-  out.push(at(4, LEFT_COL, rule));
-  out.push(at(4, SEP_COL, "|"));
-  out.push(at(4, RIGHT_COL, rule));
-
-  for (let i = 0; i < VIEW_ROWS; i += 1) {
-    const row = 5 + i;
-    out.push(at(row, LEFT_COL, clip(left[i] ?? "")));
-    out.push(at(row, SEP_COL, "|"));
-    out.push(at(row, RIGHT_COL, clip(right[i] ?? "")));
-  }
-
-  process.stdout.write(out.join(""));
+function collectRight(text) {
+  pushWrapped(rightLines, text);
+  emitRow();
 }
 
 function finish() {
   if (finished) return;
   finished = true;
-  clearInterval(redrawTimer);
   clearInterval(watchTimer);
   clearTimeout(holdTimer);
 
@@ -320,9 +315,8 @@ function runCommand(line) {
     env: sessionEnv,
     stdio: ["ignore", "pipe", "pipe"],
   }));
-  const collect = (text) => pushWrapped(leftLines, text);
-  addLines(child.stdout, collect);
-  addLines(child.stderr, collect);
+  addLines(child.stdout, collectLeft);
+  addLines(child.stderr, collectLeft);
 
   if (/git log|recorder/.test(line)) {
     clearTimeout(holdTimer);
@@ -338,7 +332,7 @@ function onInput(chunk) {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
-    lastCommand = line;
+    process.stdout.write("> " + line.slice(0, PANE_W) + "\n");
     runCommand(line);
   }
 }
@@ -407,16 +401,17 @@ async function main() {
     const tail = track(spawn("tail", ["-f", daemonLog], {
       stdio: ["ignore", "pipe", "pipe"],
     }));
-    addLines(tail.stdout, (line) => pushWrapped(rightLines, line));
+    addLines(tail.stdout, collectRight);
 
-    render();
-    redrawTimer = setInterval(render, REDRAW_MS);
+    printHeader(true);
+    printTitles();
     watchTimer = setInterval(() => {
       const result = judgement(
         readOptional(daemonLog),
         readOptional(recorder),
       );
       writeFileSync(verdictPath, result.lines.join("\n") + "\n");
+      printHeader();
     }, WATCH_MS);
     holdTimer = setTimeout(finish, SESSION_MS);
 
