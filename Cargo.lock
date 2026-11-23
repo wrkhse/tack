@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "tack-cli"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "serde_json",
  "tack_protocol",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "tack_daemon"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "tack_protocol",
  "tack_runtime",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "tack_protocol"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "tack_runtime"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "libc",
  "mlua",
@@ -361,11 +361,11 @@ dependencies = [
 
 [[package]]
 name = "tack_sdk"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 
 [[package]]
 name = "tack_wrapper"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "serde_json",
  "tack_protocol",
