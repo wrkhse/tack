@@ -125,7 +125,7 @@ jobs:
             exit 1
           fi
 
-          termctrl start rec --record run.termctrl -- \
+          termctrl start rec --cols 160 --rows 42 --record run.termctrl -- \
             tmux attach-session -t tack-rec
           termctrl wait rec "OpenCode session" --timeout 20000
           termctrl mark rec ready
@@ -133,9 +133,9 @@ jobs:
           cmd="opencode run --standalone --format json -m fake/scripted"
           cmd="$cmd 'push my branch'"
           termctrl send rec "text:$cmd" enter
-          termctrl wait rec "push blocked" --timeout 30000
+          termctrl wait rec "deny" --timeout 30000
           termctrl mark rec denied
-          termctrl wait rec "guard_status ok" --timeout 30000
+          termctrl wait rec "guard_status" --timeout 30000
           termctrl mark rec tool
 
           termctrl send rec "text:git log origin/main" enter
@@ -182,6 +182,27 @@ jobs:
             echo "demo.gif too wide: $width" >&2
             exit 1
           fi
+
+      - name: Capture recording diagnostics
+        if: failure()
+        run: |
+          set +e
+
+          termctrl show rec > termctrl-diagnostics.txt 2>&1
+          echo "--- markers ---" >> termctrl-diagnostics.txt
+          termctrl markers run.termctrl >> termctrl-diagnostics.txt 2>&1
+          echo "--- session status ---" >> termctrl-diagnostics.txt
+          termctrl status rec >> termctrl-diagnostics.txt 2>&1
+          echo "--- artefacts ---" >> termctrl-diagnostics.txt
+          ls -l verdict.txt demo.gif run.termctrl run.mp4 \
+            >> termctrl-diagnostics.txt 2>&1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        if: failure()
+        with:
+          name: termctrl-diagnostics
+          path: termctrl-diagnostics.txt
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
         with:

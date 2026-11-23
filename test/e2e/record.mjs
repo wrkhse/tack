@@ -209,6 +209,7 @@ function launchTmux(env, dir, daemonLog) {
   tmux(["new-session", "-d", "-s", SESSION, paneShell(env, dir)], runEnv);
   tmux(["split-window", "-h", "-t", SESSION + ":0",
     "exec tail -f " + shellQuote(daemonLog)], runEnv);
+  tmux(["set-option", "-g", "status", "off"], runEnv);
   tmux(["set-option", "-g", "pane-border-status", "top"], runEnv);
   tmux(["set-option", "-g", "pane-border-format", "#{pane_title}"], runEnv);
   tmux(["select-pane", "-t", SESSION + ":0.0", "-T",
