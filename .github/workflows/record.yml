@@ -131,7 +131,12 @@ jobs:
           fi
 
           width="$(
-            ffprobe -v error -select_streams v \
+            docker run --rm \
+              --entrypoint ffprobe \
+              --volume "$PWD:/vhs" \
+              -w /vhs \
+              tack-vhs-git \
+              -v error -select_streams v \
               -show_entries stream=width -of csv=p=0 demo.gif
           )"
           if [ "$width" -gt 1200 ]; then
