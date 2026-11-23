@@ -1,15 +1,16 @@
 [package]
-name = "tack_daemon"
+name = "tack-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "tack-daemon"
+name = "tack"
 path = "src/main.rs"
 
 [dependencies]
-tokio.workspace = true
+serde_json.workspace = true
 tack_protocol = { path = "../protocol" }
 tack_runtime = { path = "../runtime" }
+tack-adapter-opencode = { path = "../../adapters/opencode" }

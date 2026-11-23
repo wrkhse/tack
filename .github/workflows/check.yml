@@ -57,6 +57,6 @@ jobs:
           opencode --version
       - run: cargo build --workspace --bins --locked
       - run: cargo run --locked -p tack-cli -- build fixtures/safe-push --out dist
-      - run: node test/wrapper.test.mjs
+      - run: node adapters/opencode/wrapper.test.mjs
       - run: node test/e2e/run.mjs
 

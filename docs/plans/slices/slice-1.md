@@ -1,6 +1,6 @@
 # Slice 1: one plugin, OpenCode, unsandboxed daemon
 
-**Status:** Implemented (pending release candidate).
+**Status:** In progress (rc.2 not tagged yet).
 
 You can write one Luau plugin with a `toolBefore` hook and one tool, build it
 for OpenCode, and have the hook deny a tool call in a real OpenCode session.
@@ -36,12 +36,12 @@ flowchart LR
 
 ## What it builds
 
-- **Build** — `cli/src/lib.rs` is the public API of the build pipeline. It
-  checks a plugin's needs, renders the wrapper from `wrapper/opencode.js`,
-  and writes the wrapper and a tool manifest into `dist/opencode`.
-  `cli/src/main.rs` parses the command line and calls it. Verification: a
-  fixture plugin builds; a missing need fails with a named error; the output
-  holds no rule logic.
+- **Build** — `crates/cli/src/lib.rs` is the public API of the build pipeline.
+  It checks a plugin's needs, renders the wrapper from
+  `adapters/opencode/opencode.js`, and writes the wrapper and a tool manifest
+  into `dist/opencode`. `crates/cli/src/main.rs` parses the command line and
+  calls it. Verification: a fixture plugin builds; a missing need fails with a
+  named error; the output holds no rule logic.
 
   **Structure.** `build` canonicalizes the plugin folder, checks every need,
   and returns the wrapper and manifest paths it wrote:
@@ -82,9 +82,9 @@ impl fmt::Display for BuildError {}
 impl Error for BuildError {}
 ```
 
-- **Wrapper** — `wrapper/opencode.js` sends each hook as NDJSON over the socket
-  and fails closed. The first call starts the daemon when the socket is
-  missing, waits up to its timeout, then fails closed. Verification: missing
+- **Wrapper** — `adapters/opencode/opencode.js` sends each hook as NDJSON over
+  the socket and fails closed. The first call starts the daemon when the socket
+  is missing, waits up to its timeout, then fails closed. Verification: missing
   socket, timeout, closed socket and malformed reply each deny with a named
   reason; a cold first call starts the daemon and succeeds.
 
@@ -216,11 +216,11 @@ pub fn encode_line<T: Serialize>(value: &T) -> Result<Vec<u8>, WireError>;
 pub fn read_line<R: BufRead>(reader: &mut R) -> Result<Option<Vec<u8>>, WireError>;
 ```
 
-- **Transport** — `runtime/src/transport.rs` frames NDJSON over the Unix socket
-  in the user's state folder with owner-only permissions. A lock file guards
-  concurrent starts; a caller that loses the race waits up to its timeout and
-  then fails closed. Verification: two starts race and one loses with a named
-  error.
+- **Transport** — `crates/daemon/src/transport.rs` frames NDJSON over the Unix
+  socket in the user's state folder with owner-only permissions. A lock file
+  guards concurrent starts; a caller that loses the race waits up to its
+  timeout and then fails closed. Verification: two starts race and one loses
+  with a named error.
 
   **Structure.** `bind` verifies the state folder, takes the start lock and
   binds an owner-only socket; `Server::serve` runs a bounded accept loop:
@@ -264,9 +264,10 @@ pub enum TransportError {
 }
 ```
 
-- **Daemon and SDK** — `daemon/src/main.rs` and `sdk/` run the plugin's Luau in
-  an `mlua` sandbox at 16 MiB and 100 ms per call. Verification: a hook denies
-  the call; a runaway loop and a memory hog are denied by the limits.
+- **Daemon and SDK** — `crates/daemon/src/lib.rs` and `crates/sdk/` run the
+  plugin's Luau in an `mlua` sandbox at 16 MiB and 100 ms per call.
+  Verification: a hook denies the call; a runaway loop and a memory hog are
+  denied by the limits.
 
   **Structure.** `Sandbox::new` loads the plugin under a memory ceiling and a
   deadline; `hook`, `tool` and `manifest` arm that deadline for each call:
@@ -371,8 +372,8 @@ fn version_error(id: u64, version: u32) -> Reply;
   `toolBefore`. `state_dir_from` prefers `TACK_STATE_DIR`, then
   `XDG_STATE_HOME/tack`, then `HOME/.local/state/tack`.
 
-  **SDK.** `sdk/tack.d.luau` declares the table a plugin returns and the
-  helpers Rust passes to each hook and tool call:
+  **SDK.** `crates/sdk/tack.d.luau` declares the table a plugin returns and
+  the helpers Rust passes to each hook and tool call:
 
 ```lua
 export type Plugin = {
@@ -420,7 +421,7 @@ return {
 }
 ```
 
-  `sdk/tack.d.luau` declares that shape under `--!strict`:
+  `crates/sdk/tack.d.luau` declares that shape under `--!strict`:
 
 ```lua
 export type Content = { kind: string, text: string }
@@ -440,43 +441,6 @@ so no API key is needed, in CI or a container with a throwaway `HOME`:
 
 A passing build or a unit test alone is not the proof.
 
-The scripted provider is decided: a minimal local OpenAI-compatible SSE
-stand-in ported from `conformance/model/stand-in.ts` at base commit
-`663045b8e9a931a188d011484a425144cd2a1885`, with a git-shim recorder,
-CI-only.
-
-## Delivery
-
-Slice 1 ships in three pull requests:
-
-- [#35](https://github.com/wrkhse/tack/pull/35) removes the pre-production
-  TypeScript and scaffolds the Rust workspace.
-- [#36](https://github.com/wrkhse/tack/pull/36) adds the wire protocol, the
-  mlua sandbox, the owner-only socket transport, and the per-user daemon.
-- [#37](https://github.com/wrkhse/tack/pull/37) adds the `tack build` CLI, the
-  generated fail-closed OpenCode wrapper, wrapper tests, and the end-to-end
-  CI fixture.
-
-Required checks pass on `main` at commit `acb9396`: CI run
-[45060213755](https://github.com/wrkhse/tack/actions/runs/45060213755) passed
-both `rust` and `e2e`.
-
-CI run [45059820332](https://github.com/wrkhse/tack/actions/runs/45059820332)
-on #37 records five end-to-end assertions: `git push` was not executed, the
-daemon denied the push, the daemon ran `guard_status`, the deny reason reached
-the session, and the tool result reached the session.
-
-The reliability follow-up [#38](https://github.com/wrkhse/tack/issues/38) is
-open. No release candidate has been cut.
-
-## Provenance
-
-Base commit: `663045b8e9a931a188d011484a425144cd2a1885`.
-
-The e2e part ports ideas from the deleted `conformance/model/stand-in.ts` and
-`conformance/harness/recorder.ts` into the CI fixture. Recording of tack-tool
-calls from the old suite was dropped in this slice.
-
 ## Left open
 
 - Whether the recorder trace is kept as a CI artifact is open.
@@ -486,5 +450,5 @@ calls from the old suite was dropped in this slice.
   Bounding the command text length and discouraging nested or unbounded
   patterns in plugin review is one mitigation.
 
-- `luau-analyze` over `sdk/tack.d.luau` is not yet wired into CI because the
-  tool is not installed in the pinned environment.
+- `luau-analyze` over `crates/sdk/tack.d.luau` is not yet wired into CI because
+  the tool is not installed in the pinned environment.

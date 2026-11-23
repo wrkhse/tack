@@ -1,0 +1,153 @@
+use mlua::{Lua, Table, Value as LuaValue};
+use serde_json::Value;
+use tack_protocol::wire::ToolDef;
+
+use super::errors::{EngineError, LimitCause, MAX_DEPTH, MAX_ENTRIES};
+
+pub(super) fn read_tool(table: &Table, key: &str) -> Result<ToolDef, EngineError> {
+    let name = table
+        .get::<Option<String>>("name")?
+        .unwrap_or_else(|| key.to_owned());
+    let description = table
+        .get::<Option<String>>("description")?
+        .unwrap_or_default();
+    let input = match table.get::<Option<LuaValue>>("input")? {
+        Some(value) => lua_to_json(value, 0)?,
+        None => serde_json::json!({}),
+    };
+    Ok(ToolDef {
+        name,
+        description,
+        input,
+    })
+}
+
+pub(super) fn lua_key(value: LuaValue) -> Result<String, EngineError> {
+    match value {
+        LuaValue::String(value) => Ok(value.to_str()?.to_string()),
+        LuaValue::Integer(value) => Ok(value.to_string()),
+        LuaValue::Number(value) => Ok(value.to_string()),
+        _ => Err(EngineError::InvalidResult(
+            "tack: tool key must be a string".into(),
+        )),
+    }
+}
+
+pub(super) fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaValue, EngineError> {
+    if depth > MAX_DEPTH {
+        return Err(EngineError::Limit(LimitCause::TooDeep { limit: MAX_DEPTH }));
+    }
+    match value {
+        Value::Null => Ok(LuaValue::Nil),
+        Value::Bool(value) => Ok(LuaValue::Boolean(*value)),
+        Value::Number(value) => match value.as_i64() {
+            Some(number) => Ok(LuaValue::Integer(number)),
+            None => value
+                .as_f64()
+                .map(LuaValue::Number)
+                .ok_or_else(|| EngineError::InvalidResult("tack: invalid JSON number".into())),
+        },
+        Value::String(value) => Ok(LuaValue::String(lua.create_string(value.as_bytes())?)),
+        Value::Array(values) => {
+            if values.len() > MAX_ENTRIES {
+                return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                    limit: MAX_ENTRIES,
+                }));
+            }
+            let table = lua.create_table()?;
+            for (index, item) in values.iter().enumerate() {
+                table.set((index + 1) as i64, json_to_lua(lua, item, depth + 1)?)?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+        Value::Object(values) => {
+            if values.len() > MAX_ENTRIES {
+                return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                    limit: MAX_ENTRIES,
+                }));
+            }
+            let table = lua.create_table()?;
+            for (key, item) in values {
+                table.set(key.as_str(), json_to_lua(lua, item, depth + 1)?)?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+    }
+}
+
+fn lua_to_json(value: LuaValue, depth: usize) -> Result<Value, EngineError> {
+    if depth > MAX_DEPTH {
+        return Err(EngineError::Limit(LimitCause::TooDeep { limit: MAX_DEPTH }));
+    }
+    match value {
+        LuaValue::Nil => Ok(Value::Null),
+        LuaValue::Boolean(value) => Ok(Value::Bool(value)),
+        LuaValue::Integer(value) => Ok(Value::Number(value.into())),
+        LuaValue::Number(value) => serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or_else(|| EngineError::InvalidResult("tack: non-finite Lua number".into())),
+        LuaValue::String(value) => Ok(Value::String(value.to_str()?.to_string())),
+        LuaValue::Table(table) => lua_table_to_json(&table, depth),
+        _ => Err(EngineError::InvalidResult(
+            "tack: unsupported Lua value".into(),
+        )),
+    }
+}
+
+fn lua_table_to_json(table: &Table, depth: usize) -> Result<Value, EngineError> {
+    let mut object = serde_json::Map::new();
+    let mut array = Vec::new();
+    let mut array_mode: Option<bool> = None;
+
+    for pair in table.pairs::<LuaValue, LuaValue>() {
+        if object.len() + array.len() >= MAX_ENTRIES {
+            return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                limit: MAX_ENTRIES,
+            }));
+        }
+        let (key, value) = pair?;
+        match key {
+            LuaValue::String(key) => {
+                if array_mode == Some(true) {
+                    return Err(EngineError::InvalidResult("tack: mixed table keys".into()));
+                }
+                array_mode = Some(false);
+                object.insert(key.to_str()?.to_string(), lua_to_json(value, depth + 1)?);
+            }
+            LuaValue::Integer(index) => {
+                if array_mode == Some(false) {
+                    return Err(EngineError::InvalidResult("tack: mixed table keys".into()));
+                }
+                array_mode = Some(true);
+                array.push((index, lua_to_json(value, depth + 1)?));
+            }
+            LuaValue::Number(index)
+                if index.fract() == 0.0 && (1.0..=MAX_ENTRIES as f64).contains(&index) =>
+            {
+                if array_mode == Some(false) {
+                    return Err(EngineError::InvalidResult("tack: mixed table keys".into()));
+                }
+                array_mode = Some(true);
+                array.push((index as i64, lua_to_json(value, depth + 1)?));
+            }
+            _ => {
+                return Err(EngineError::InvalidResult(
+                    "tack: unsupported table key".into(),
+                ));
+            }
+        }
+    }
+
+    if array_mode != Some(true) {
+        return Ok(Value::Object(object));
+    }
+    array.sort_by_key(|(index, _)| *index);
+    for (position, (index, _)) in array.iter().enumerate() {
+        if *index != (position + 1) as i64 {
+            return Err(EngineError::InvalidResult("tack: sparse Lua array".into()));
+        }
+    }
+    Ok(Value::Array(
+        array.into_iter().map(|(_, value)| value).collect(),
+    ))
+}

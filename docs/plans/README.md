@@ -1,7 +1,7 @@
 # tack plans
 
 - [Slice 1: one plugin, OpenCode, unsandboxed daemon](slices/slice-1.md) —
-  **Implemented (pending release candidate)**.
+  **In progress (rc.2 not tagged yet)**.
 
 [Architecture plan: tack#1](https://github.com/wrkhse/tack/issues/1).
 

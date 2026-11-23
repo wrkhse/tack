@@ -1,45 +1,21 @@
-//! Entry point for the per-user tack daemon.
+//! The per-user daemon that evaluates hooks and runs tools inside an mlua
+//! sandbox with memory and deadline limits.
+
+pub mod transport;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use tack_protocol::wire::{
-    DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES, Outcome, PROTOCOL_VERSION, Reply, ReplyError,
-    Request,
+    DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
 };
-use tack_runtime::transport::TransportError;
 use tack_runtime::{EngineError, Sandbox};
 
-const EXIT_USAGE: i32 = 2;
-const EXIT_LOCK_BUSY: i32 = 3;
-const EXIT_ENGINE: i32 = 4;
+pub const EXIT_USAGE: i32 = 2;
+pub const EXIT_LOCK_BUSY: i32 = 3;
+pub const EXIT_ENGINE: i32 = 4;
 
-const SOCKET_NAME: &str = "tack.sock";
-const ERR_SOCKET_MISMATCH: &str = "socket_not_in_state_dir";
-
-struct Args {
-    socket: PathBuf,
-    plugin: PathBuf,
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut socket = None;
-    let mut plugin = None;
-    let mut args = std::env::args().skip(1);
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--socket" => socket = Some(args.next().ok_or("--socket needs a path")?.into()),
-            "--plugin" => plugin = Some(args.next().ok_or("--plugin needs a dir")?.into()),
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-
-    Ok(Args {
-        socket: socket.ok_or("missing --socket <path>")?,
-        plugin: plugin.ok_or("missing --plugin <dir>")?,
-    })
-}
+pub const SOCKET_NAME: &str = "tack.sock";
+pub const ERR_SOCKET_MISMATCH: &str = "socket_not_in_state_dir";
 
 fn state_dir_from(
     tack_state_dir: Option<&str>,
@@ -60,7 +36,7 @@ fn state_dir_from(
     Ok(PathBuf::from(home).join(".local/state/tack"))
 }
 
-fn state_dir() -> Result<PathBuf, String> {
+pub fn state_dir() -> Result<PathBuf, String> {
     let tack = std::env::var("TACK_STATE_DIR").ok();
     let xdg = std::env::var("XDG_STATE_HOME").ok();
     let home = std::env::var("HOME").ok();
@@ -68,7 +44,7 @@ fn state_dir() -> Result<PathBuf, String> {
     state_dir_from(tack.as_deref(), xdg.as_deref(), home.as_deref())
 }
 
-fn socket_in_state_dir(state_dir: &Path, socket: &Path) -> bool {
+pub fn socket_in_state_dir(state_dir: &Path, socket: &Path) -> bool {
     socket == state_dir.join(SOCKET_NAME)
 }
 
@@ -102,7 +78,7 @@ fn version_error(id: u64, version: u32) -> Reply {
     }
 }
 
-fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
+pub fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
     let id = request.id();
     let version = request.version();
 
@@ -158,61 +134,6 @@ fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
             }
             Err(error) => reply_error(id, error),
         },
-    }
-}
-
-#[tokio::main]
-async fn main() {
-    let args = match parse_args() {
-        Ok(args) => args,
-        Err(message) => {
-            eprintln!("tack-daemon: {message}");
-            std::process::exit(EXIT_USAGE);
-        }
-    };
-
-    let state = match state_dir() {
-        Ok(state) => state,
-        Err(message) => {
-            eprintln!("tack-daemon: {message}");
-            std::process::exit(EXIT_USAGE);
-        }
-    };
-    if !socket_in_state_dir(&state, &args.socket) {
-        eprintln!(
-            "tack-daemon: {ERR_SOCKET_MISMATCH}: expected {} got {}",
-            state.join(SOCKET_NAME).display(),
-            args.socket.display()
-        );
-        std::process::exit(EXIT_USAGE);
-    }
-
-    let sandbox = match Sandbox::new(&args.plugin, DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS) {
-        Ok(sandbox) => Arc::new(sandbox),
-        Err(error) => {
-            eprintln!("tack-daemon: sandbox: {error}");
-            std::process::exit(EXIT_ENGINE);
-        }
-    };
-
-    let server = match tack_runtime::transport::bind(&state, &args.socket).await {
-        Ok(server) => server,
-        Err(TransportError::LockBusy) => {
-            eprintln!("tack-daemon: lock_busy");
-            std::process::exit(EXIT_LOCK_BUSY);
-        }
-        Err(error) => {
-            eprintln!("tack-daemon: bind: {error}");
-            std::process::exit(EXIT_ENGINE);
-        }
-    };
-
-    if let Err(error) = server
-        .serve(move |request| dispatch(&sandbox, request))
-        .await
-    {
-        eprintln!("tack-daemon: serve: {error}");
-        std::process::exit(EXIT_ENGINE);
     }
 }
 

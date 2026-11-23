@@ -1,13 +1,13 @@
 [package]
-name = "tack_runtime"
+name = "tack-adapter-opencode"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "tack_adapter_opencode"
+
 [dependencies]
-libc = "0.2"
-mlua = { workspace = true, features = ["send"] }
 serde_json.workspace = true
-tack_protocol = { path = "../protocol" }
-tokio.workspace = true
+tack_protocol = { path = "../../crates/protocol" }
