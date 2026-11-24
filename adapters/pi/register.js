@@ -55,6 +55,7 @@ function forward(request) {
   return new Promise((resolve) => {
     let child;
     let settled = false;
+    let pipeError = false;
     const chunks = [];
     let size = 0;
     const timer = setTimeout(() => stop(refuse("timeout")), BUDGET_MS);
@@ -92,13 +93,18 @@ function forward(request) {
       failed();
     }
 
+    // A pipe can fail before stdout delivers the reply.
+    function notePipeError() {
+      pipeError = true;
+    }
+
     try {
       child = spawn(HOOK_BIN, ["--plugin", PLUGIN_DIR], {
         stdio: ["pipe", "pipe", "ignore"],
       });
       child.on("error", spawnFailed);
-      child.stdout.on("error", failed);
-      child.stdin.on("error", failed);
+      child.stdout.on("error", notePipeError);
+      child.stdin.on("error", notePipeError);
       child.stdout.on("data", (chunk) => {
         if (settled) return;
 
@@ -113,9 +119,9 @@ function forward(request) {
       child.once("close", (code) => {
         if (settled) return;
 
-        const result = code === 0
-          ? readReply(request, chunks, size)
-          : refuse("daemon_error");
+        const result = code !== 0 || (pipeError && size === 0)
+          ? refuse("daemon_error")
+          : readReply(request, chunks, size);
         finish(result);
       });
       child.stdin.end(line);

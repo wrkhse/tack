@@ -263,6 +263,21 @@ for (const [label, respond, reason] of badReplies) {
   });
 }
 
+for (const code of ["EPIPE", "ERR_STREAM_DESTROYED"]) {
+  test("invalid stdout after stdin " + code + " is refused as malformed",
+    async () => {
+      const h = harness((_request, child) => {
+        child.stdin.emit("error", Object.assign(new Error("input failed"), { code }));
+        child.stdout.emit("data", Buffer.from("not JSON\n"));
+        child.emit("close", 0);
+      });
+
+      assert.deepEqual(await guard(h), block("malformed_reply"));
+      assert.deepEqual(h.writes, []);
+    },
+  );
+}
+
 test("an invalid guard_status reply is refused and never recorded", async () => {
   for (const body of [
     { kind: "hook", ...ALLOW },
@@ -345,14 +360,31 @@ test("a missing tack-hook blocks either request without recording",
   },
 );
 
-test("other process and pipe failures block with no promise catch on the handler",
-  async () => {
-    const enoent = Object.assign(new Error("input failed"), { code: "ENOENT" });
+test("pipe errors with no stdout wait for close and fail closed", async () => {
+  for (const [pipe, code] of [
+    ["stdin", "EPIPE"],
+    ["stdin", "ENOENT"],
+    ["stdout", "EIO"],
+  ]) {
+    let child;
+    const h = harness((_request, active) => {
+      child = active;
+      child[pipe].emit("error", Object.assign(new Error("pipe failed"), { code }));
+    });
+    const pending = guard(h);
 
+    assert.equal(h.timers[0].cleared, false);
+    child.emit("close", 0);
+
+    assert.deepEqual(await pending, block("daemon_error"));
+    assert.deepEqual(h.kills, []);
+    assert.deepEqual(h.writes, []);
+  }
+});
+
+test("other process and recorder failures block with no promise catch on the handler",
+  async () => {
     for (const [respond, options] of [
-      [(_request, child) => child.stdin.emit("error", new Error("EPIPE")), {}],
-      [(_request, child) => child.stdin.emit("error", enoent), {}],
-      [(_request, child) => child.stdout.emit("error", new Error("output")), {}],
       [(_request, child) => child.emit("close", null, "SIGSEGV"), {}],
       [() => {}, { spawnError: new Error("spawn failed") }],
       [answer(ALLOW), { recordError: new Error("recorder unavailable") }],
