@@ -108,4 +108,6 @@ Build the example plugin with
   Implemented (v0.1.0-rc.2).
 - [Slice 2: one plugin, Claude Code, native hook client](docs/plans/slices/slice-2.md) —
   Implemented (v0.1.0-rc.3).
+- [Slice 3: one plugin, Pi, native hook client](docs/plans/slices/slice-3.md) —
+  Implemented (v0.1.0-rc.4).
 - More harnesses and MCP support — Planned.
