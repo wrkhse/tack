@@ -281,7 +281,6 @@ function layout(base) {
     tree.home,
     tree.claudeConfig,
     tree.configHome,
-    tree.stateDir,
     tree.dataHome,
     tree.cacheHome,
     tree.tmpHome,
@@ -290,6 +289,11 @@ function layout(base) {
   ]) {
     mkdirSync(dir, { recursive: true });
   }
+
+  // tack-hook trusts the state dir only when the euid owns it with mode 0700
+  // or stricter. The chmod sets the mode whatever the umask took away or left.
+  mkdirSync(tree.stateDir, { recursive: true, mode: 0o700 });
+  chmodSync(tree.stateDir, 0o700);
 
   install(gitShim, path.join(tree.binDir, "git"));
   // The mod runs the plain name tack-hook, so the recorder takes that name
