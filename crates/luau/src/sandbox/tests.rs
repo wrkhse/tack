@@ -1,16 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
-use tack_protocol::DEFAULT_DEADLINE_MS;
-use tack_protocol::DEFAULT_MEMORY_BYTES;
 
-use crate::require::REQUIRE_CONFINED;
+use crate::require::{REQUIRE_CONFINED, RequireCause};
 
 use super::*;
 
 use super::errors::MAX_DEPTH;
+
+const DEFAULT_DEADLINE_MS: u64 = 100;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -119,17 +119,17 @@ tools = {
 }
 "#;
 
-fn fixture(memory_bytes: usize) -> (Scratch, Sandbox) {
+fn fixture(limits: Limits) -> (Scratch, Sandbox) {
     let scratch = Scratch::new();
     scratch.write("plugin.luau", PLUGIN);
     scratch.write("helper.luau", HELPER);
     let sandbox =
-        Sandbox::new(scratch.path(), memory_bytes, DEFAULT_DEADLINE_MS).expect("fixture loads");
+        Sandbox::new(scratch.path(), limits, Capabilities::default()).expect("fixture loads");
     (scratch, sandbox)
 }
 
-fn call(tool: &str) -> ToolCall {
-    ToolCall {
+fn call(tool: &str) -> Call {
+    Call {
         tool: tool.to_owned(),
         name: tool.to_owned(),
         input: json!({ "command": "git push origin main" }),
@@ -139,7 +139,7 @@ fn call(tool: &str) -> ToolCall {
 
 #[test]
 fn tool_before_denies_a_shell_git_push() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let outcome = sandbox
         .hook("toolBefore", &call("shell"), DEFAULT_DEADLINE_MS)
         .expect("hook returns");
@@ -153,7 +153,7 @@ fn tool_before_denies_a_shell_git_push() {
 
 #[test]
 fn an_absent_hook_allows() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let outcome = sandbox
         .hook("permissionAsked", &call("shell"), DEFAULT_DEADLINE_MS)
         .expect("hook returns");
@@ -162,7 +162,7 @@ fn an_absent_hook_allows() {
 
 #[test]
 fn a_hook_can_rewrite_a_command() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let outcome = sandbox
         .hook("toolBefore", &call("rewrite-me"), DEFAULT_DEADLINE_MS)
         .expect("hook returns");
@@ -176,7 +176,7 @@ fn a_hook_can_rewrite_a_command() {
 
 #[test]
 fn a_rewrite_keeps_the_other_input_fields() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let mut input = call("rewrite-me");
     input.input = json!({ "command": "git push origin main", "cwd": "/repo", "dry": false });
     let outcome = sandbox
@@ -192,7 +192,7 @@ fn a_rewrite_keeps_the_other_input_fields() {
 
 #[test]
 fn a_runaway_loop_is_limited_by_the_deadline() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let error = sandbox
         .hook("toolBefore", &call("loop"), 20)
         .expect_err("loop is interrupted");
@@ -201,16 +201,128 @@ fn a_runaway_loop_is_limited_by_the_deadline() {
 
 #[test]
 fn a_memory_hog_is_limited_by_the_ceiling() {
-    let (_scratch, sandbox) = fixture(1024 * 1024);
+    let (_scratch, sandbox) = fixture(Limits {
+        memory_bytes: 1024 * 1024,
+        call_deadline_ms: 1000,
+    });
     let error = sandbox
         .hook("toolBefore", &call("hog"), 1000)
         .expect_err("allocation is refused");
     assert_eq!(error, EngineError::Limit(LimitCause::Memory));
 }
 
+const TWO_HOSTS: &str = r#"
+return {
+    name = "two-hosts",
+    spin = function() while true do end end,
+    allocate = function(call, ctx)
+        return ctx.deny(tostring(#string.rep("x", call.input.bytes)))
+    end,
+    lookup = function(call, ctx)
+        if ctx.lookup == nil then return ctx.deny("unavailable") end
+        return ctx.deny(ctx.lookup(call.input).text)
+    end,
+}
+"#;
+
+#[test]
+fn a_second_host_with_different_limits_works() {
+    let scratch = Scratch::new();
+    scratch.write("plugin.luau", TWO_HOSTS);
+    let smaller = Limits {
+        memory_bytes: 1024 * 1024,
+        call_deadline_ms: 50,
+    };
+    let larger = Limits {
+        memory_bytes: 16 * 1024 * 1024,
+        call_deadline_ms: 1000,
+    };
+    let mut capabilities = Capabilities::default();
+    capabilities.insert("lookup", |input| match input["id"].as_str() {
+        Some("record") => Ok(json!({ "text": "only in the second host" })),
+        _ => Err("record not found".into()),
+    });
+
+    let first = Sandbox::new(scratch.path(), smaller, Capabilities::default()).expect("first host");
+    let second = Sandbox::new(scratch.path(), larger, capabilities).expect("second host");
+    let call_for = |input| Call {
+        tool: "test".into(),
+        name: "test".into(),
+        input,
+        session_id: None,
+    };
+
+    let allocation = call_for(json!({ "bytes": 2 * 1024 * 1024 }));
+    assert_eq!(
+        first.hook("allocate", &allocation, 5000),
+        Err(EngineError::Limit(LimitCause::Memory))
+    );
+    assert_eq!(
+        second.hook("allocate", &allocation, 5000),
+        Ok(Outcome::Deny {
+            reason: "2097152".into()
+        })
+    );
+    assert_eq!(
+        second.hook(
+            "allocate",
+            &call_for(json!({ "bytes": 32 * 1024 * 1024 })),
+            5000
+        ),
+        Err(EngineError::Limit(LimitCause::Memory))
+    );
+
+    let lookup = call_for(json!({ "id": "record" }));
+    assert_eq!(
+        first.hook("lookup", &lookup, 5000),
+        Ok(Outcome::Deny {
+            reason: "unavailable".into()
+        })
+    );
+    assert_eq!(
+        second.hook("lookup", &lookup, 5000),
+        Ok(Outcome::Deny {
+            reason: "only in the second host".into()
+        })
+    );
+    assert_eq!(
+        second.hook("lookup", &call_for(json!({ "id": "missing" })), 5000),
+        Err(EngineError::Capability {
+            name: "lookup".into(),
+            reason: "record not found".into()
+        })
+    );
+
+    let spin = call_for(Value::Null);
+    assert_deadline_between(
+        &first,
+        &spin,
+        smaller.call_deadline_ms,
+        larger.call_deadline_ms,
+    );
+    assert_deadline_between(&second, &spin, larger.call_deadline_ms, 4000);
+}
+
+fn assert_deadline_between(sandbox: &Sandbox, spin: &Call, lower_ms: u64, upper_ms: u64) {
+    let started = Instant::now();
+    assert_eq!(
+        sandbox.hook("spin", spin, 5000),
+        Err(EngineError::Limit(LimitCause::Deadline))
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(lower_ms),
+        "expired after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(upper_ms),
+        "expired after {elapsed:?}"
+    );
+}
+
 #[test]
 fn a_too_deep_input_is_limited_by_depth() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let mut input = json!(1);
     for _ in 0..=MAX_DEPTH + 1 {
         input = json!([input]);
@@ -226,7 +338,7 @@ fn a_too_deep_input_is_limited_by_depth() {
 
 #[test]
 fn a_too_wide_input_is_limited_by_entry_count() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let mut object = serde_json::Map::new();
     for index in 0..=MAX_ENTRIES {
         object.insert(format!("k{index}"), json!(index));
@@ -242,7 +354,7 @@ fn a_too_wide_input_is_limited_by_entry_count() {
 
 #[test]
 fn a_runaway_call_does_not_disarm_another_calls_deadline() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     std::thread::scope(|scope| {
         let looping = scope.spawn(|| sandbox.hook("toolBefore", &call("loop"), 20));
         let normal =
@@ -265,15 +377,21 @@ fn a_runaway_call_does_not_disarm_another_calls_deadline() {
 fn a_top_level_loop_is_limited_during_load() {
     let scratch = Scratch::new();
     scratch.write("plugin.luau", "while true do end");
-    let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, 20)
-        .err()
-        .expect("top-level loop is interrupted");
+    let error = Sandbox::new(
+        scratch.path(),
+        Limits {
+            call_deadline_ms: 20,
+            ..Limits::default()
+        },
+        Capabilities::default(),
+    )
+    .expect_err("top-level loop is interrupted");
     assert_eq!(error, EngineError::Limit(LimitCause::Deadline));
 }
 
 #[test]
 fn scoped_require_loads_a_sibling_module() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let outcome = sandbox
         .hook("toolBefore", &call("help"), DEFAULT_DEADLINE_MS)
         .expect("hook returns");
@@ -306,9 +424,8 @@ fn require_refuses_parent_and_absolute_paths() {
             "plugin.luau",
             &format!(r#"local x = require("{spec}") return {{ name = "x" }}"#),
         );
-        let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
-            .err()
-            .expect("require is refused");
+        let error = Sandbox::new(scratch.path(), Limits::default(), Capabilities::default())
+            .expect_err("require is refused");
         assert_eq!(error, EngineError::Load(LoadCause::Require(expected)));
     }
 }
@@ -324,9 +441,8 @@ fn require_refuses_a_cycle() {
         "a.luau",
         r#"local x = require("./plugin") return { name = "a" }"#,
     );
-    let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
-        .err()
-        .expect("cycle is refused");
+    let error = Sandbox::new(scratch.path(), Limits::default(), Capabilities::default())
+        .expect_err("cycle is refused");
     assert_eq!(
         error,
         EngineError::Load(LoadCause::Require(RequireCause::Cycle("./plugin".into())))
@@ -340,9 +456,8 @@ fn require_refuses_a_missing_module() {
         "plugin.luau",
         r#"local x = require("./nope") return { name = "x" }"#,
     );
-    let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
-        .err()
-        .expect("missing module is refused");
+    let error = Sandbox::new(scratch.path(), Limits::default(), Capabilities::default())
+        .expect_err("missing module is refused");
     assert_eq!(
         error,
         EngineError::Load(LoadCause::Require(RequireCause::Missing("./nope".into())))
@@ -363,9 +478,8 @@ fn require_refuses_a_symlink_that_escapes_the_folder() {
         "plugin.luau",
         r#"local x = require("./linked") return { name = "x" }"#,
     );
-    let error = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
-        .err()
-        .expect("escaping symlink is refused");
+    let error = Sandbox::new(scratch.path(), Limits::default(), Capabilities::default())
+        .expect_err("escaping symlink is refused");
     assert_eq!(
         error,
         EngineError::Load(LoadCause::Require(RequireCause::Escape("./linked".into())))
@@ -410,7 +524,7 @@ tools = {
         r#"local helper = require("./helper") return { value = helper.sub }"#,
     );
 
-    let sandbox = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+    let sandbox = Sandbox::new(scratch.path(), Limits::default(), Capabilities::default())
         .expect("fixture loads");
 
     // The child's "./helper" is sub/helper.luau, not the root helper:
@@ -480,7 +594,7 @@ return { later = later }
 "#,
     );
 
-    let sandbox = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+    let sandbox = Sandbox::new(scratch.path(), Limits::default(), Capabilities::default())
         .expect("fixture loads");
 
     // The deferred call runs after child.luau finished loading; its
@@ -508,7 +622,7 @@ return { later = later }
 
 #[test]
 fn a_tool_returns_text_content() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let content = sandbox
         .tool("guard_status", &json!({}), DEFAULT_DEADLINE_MS)
         .expect("tool returns");
@@ -523,7 +637,7 @@ fn a_tool_returns_text_content() {
 
 #[test]
 fn global_require_is_a_refuser_through_getfenv() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let lua = &sandbox.lua;
 
     let has_getfenv: bool = lua
@@ -548,7 +662,7 @@ fn global_require_is_a_refuser_through_getfenv() {
 
 #[test]
 fn raw_global_require_is_never_a_working_loader() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let lua = &sandbox.lua;
 
     let kind: String = lua
@@ -591,7 +705,7 @@ tools = {
 }
 "#,
     );
-    let sandbox = Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+    let sandbox = Sandbox::new(scratch.path(), Limits::default(), Capabilities::default())
         .expect("fixture loads");
 
     let content = sandbox
@@ -610,7 +724,7 @@ tools = {
 fn manifest_reads_the_fixture() {
     let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/safe-push");
     let sandbox =
-        Sandbox::new(&folder, DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS).expect("fixture loads");
+        Sandbox::new(&folder, Limits::default(), Capabilities::default()).expect("fixture loads");
     let manifest = sandbox.manifest().expect("manifest reads");
     assert_eq!(manifest.name, "safe-push");
     assert_eq!(manifest.tools.len(), 1);
@@ -623,7 +737,7 @@ fn manifest_refuses_a_duplicate_tool_name() {
     let scratch = Scratch::new();
     scratch.write("plugin.luau", DUPLICATE);
     let sandbox =
-        Sandbox::new(scratch.path(), DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS).expect("loads");
+        Sandbox::new(scratch.path(), Limits::default(), Capabilities::default()).expect("loads");
     let error = sandbox.manifest().expect_err("duplicate is refused");
     assert_eq!(
         error,
@@ -633,7 +747,7 @@ fn manifest_refuses_a_duplicate_tool_name() {
 
 #[test]
 fn a_poisoned_call_lock_fails_closed() {
-    let (_scratch, sandbox) = fixture(DEFAULT_MEMORY_BYTES);
+    let (_scratch, sandbox) = fixture(Limits::default());
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _guard = sandbox.call_lock.lock().expect("acquire the call lock");
         panic!("poison the call lock");

@@ -266,34 +266,42 @@ pub enum TransportError {
 }
 ```
 
-- **Daemon and SDK** — `crates/daemon/src/lib.rs` and `crates/sdk/` run the
-  plugin's Luau in an `mlua` sandbox at 16 MiB and 100 ms per call.
-  Verification: a hook denies the call; a runaway loop and a memory hog are
-  denied by the limits.
+- **Daemon and SDK** — `crates/daemon/src/lib.rs` translates wire calls and
+  replies at the daemon boundary. The `tack-luau` crate in `crates/luau/` runs
+  the plugin in an `mlua` sandbox at 16 MiB and 100 ms per call, with no host
+  capabilities supplied by the daemon. Verification: a hook denies the call;
+  a runaway loop and a memory hog are denied by the limits.
 
   **Structure.** `Sandbox::new` loads the plugin under a memory ceiling and a
-  deadline; `hook`, `tool` and `manifest` arm that deadline for each call:
+  deadline. The sandbox uses its own API types. Each hook or tool call uses the
+  smaller of its requested deadline and the sandbox limit:
 
 ```rust
+pub struct Limits {
+    pub memory_bytes: usize,
+    pub call_deadline_ms: u64,
+}
+
 pub struct Sandbox {
     lua: Lua,
     plugin: Table,
     deadline: Arc<Deadline>,
     call_lock: Mutex<()>,
-    default_deadline_ms: u64,
+    call_deadline_ms: u64,
+    capabilities: Capabilities,
 }
 
 impl Sandbox {
     pub fn new(
         folder: &Path,
-        memory_bytes: usize,
-        deadline_ms: u64,
-    ) -> Result<Sandbox, EngineError>;
+        limits: Limits,
+        capabilities: Capabilities,
+    ) -> Result<Self, EngineError>;
 
     pub fn hook(
         &self,
         hook: &str,
-        call: &ToolCall,
+        call: &Call,
         deadline_ms: u64,
     ) -> Result<Outcome, EngineError>;
 
@@ -304,7 +312,7 @@ impl Sandbox {
         deadline_ms: u64,
     ) -> Result<Vec<Content>, EngineError>;
 
-    pub fn manifest(&self) -> Result<PluginManifest, EngineError>;
+    pub fn manifest(&self) -> Result<Manifest, EngineError>;
 }
 ```
 
@@ -327,6 +335,7 @@ pub enum LoadCause {
 pub enum EngineError {
     Load(LoadCause),
     Script(String),
+    Capability { name, reason },
     Limit(LimitCause),
     UnknownTool(String),
     InvalidResult(String),
@@ -334,8 +343,8 @@ pub enum EngineError {
 }
 ```
 
-  Converting an `mlua::Error` downcasts its external cause; a memory error is a
-  limit and anything else is a script failure:
+  Converting an `mlua::Error` preserves typed external causes. A VM memory
+  error is a limit; remaining errors are script failures:
 
 ```rust
 impl From<mlua::Error> for EngineError {}
@@ -366,7 +375,7 @@ fn socket_in_state_dir(state_dir: &Path, socket: &Path) -> bool;
 
 fn dispatch(sandbox: &Sandbox, request: Request) -> Reply;
 
-fn reply_error(id: u64, error: EngineError) -> Reply;
+fn reply_error(id: u64, error: &EngineError) -> Reply;
 
 fn version_error(id: u64, version: u32) -> Reply;
 ```

@@ -1,6 +1,7 @@
 use mlua::{Table, Value as LuaValue};
 use serde_json::Value;
-use tack_protocol::wire::{Content, Outcome};
+
+use crate::api::{Content, Outcome};
 
 use super::errors::{EngineError, LimitCause, MAX_ENTRIES};
 

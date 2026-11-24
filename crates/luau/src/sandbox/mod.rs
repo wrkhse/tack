@@ -12,13 +12,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use mlua::{Function, Lua, Table, Value as LuaValue, VmState};
 use serde_json::Value;
 
-use tack_protocol::wire::{Content, Outcome, PluginManifest, ToolCall, ToolDef};
-
+use crate::api::{Call, Content, Manifest, Outcome, ToolDef};
 use crate::require;
 
-pub use crate::require::RequireCause;
-
 mod call;
+mod capabilities;
 mod deadline;
 mod errors;
 mod loading;
@@ -27,6 +25,7 @@ mod outcome;
 mod tests;
 mod values;
 
+pub use capabilities::Capabilities;
 pub use errors::{EngineError, LimitCause, LoadCause};
 
 use deadline::Deadline;
@@ -35,12 +34,33 @@ use loading::load_plugin;
 use outcome::{decode_content, decode_outcome};
 use values::{json_to_lua, lua_key, read_tool};
 
+/// The host's bounds for a single sandbox.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Maximum bytes tracked by the Luau allocator.
+    pub memory_bytes: usize,
+    /// Maximum milliseconds for startup, manifest reads, and each call.
+    pub call_deadline_ms: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            memory_bytes: 16 * 1024 * 1024,
+            call_deadline_ms: 100,
+        }
+    }
+}
+
+/// A single plugin VM with its own limits and capabilities.
+#[derive(Debug)]
 pub struct Sandbox {
     lua: Lua,
     plugin: Table,
     deadline: Arc<Deadline>,
     call_lock: Mutex<()>,
-    default_deadline_ms: u64,
+    call_deadline_ms: u64,
+    capabilities: Capabilities,
 }
 
 impl Sandbox {
@@ -49,16 +69,27 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns [`EngineError::Load`] when the folder or entry module cannot be
-    /// loaded, and [`EngineError::Limit`] when a top-level loop exhausts the
-    /// startup deadline or memory ceiling.
-    pub fn new(folder: &Path, memory_bytes: usize, deadline_ms: u64) -> Result<Self, EngineError> {
+    /// loaded, [`EngineError::Limit`] when startup exhausts a bound, and
+    /// [`EngineError::InvalidResult`] when a capability uses a reserved name.
+    pub fn new(
+        folder: &Path,
+        limits: Limits,
+        capabilities: Capabilities,
+    ) -> Result<Self, EngineError> {
+        capabilities.validate()?;
         let lua = Lua::new();
+
+        // The allocator treats zero as unlimited.
+        if limits.memory_bytes == 0 || limits.memory_bytes < lua.used_memory() {
+            return Err(EngineError::Limit(LimitCause::Memory));
+        }
+
+        lua.set_memory_limit(limits.memory_bytes)?;
         let state = require::RequireState::new(folder)
             .map_err(|message| EngineError::Load(LoadCause::Message(message)))?;
         let loader = require::install(&lua, state)?;
         require::confine_global_require(&lua)?;
         lua.sandbox(true)?;
-        lua.set_memory_limit(memory_bytes)?;
 
         let deadline = Arc::new(Deadline::new());
         let watchdog = Arc::clone(&deadline);
@@ -72,7 +103,7 @@ impl Sandbox {
 
         // A top-level loop must not hang startup either. The deadline is
         // armed around the entry chunk, then disarmed before the VM is shared.
-        deadline.begin(deadline_ms);
+        deadline.begin(limits.call_deadline_ms);
         let plugin = load_plugin(&loader);
         deadline.disarm();
 
@@ -81,7 +112,8 @@ impl Sandbox {
             plugin: plugin?,
             deadline,
             call_lock: Mutex::new(()),
-            default_deadline_ms: deadline_ms,
+            call_deadline_ms: limits.call_deadline_ms,
+            capabilities,
         })
     }
 
@@ -90,36 +122,31 @@ impl Sandbox {
         self.call_lock.lock().map_err(|_| EngineError::Poisoned)
     }
 
-    /// Run a named hook and decode its verdict.
+    /// Run a named hook and decode its verdict within the smaller of the two deadlines.
     ///
     /// # Errors
     ///
     /// Returns [`EngineError::Limit`] when the call exceeds its deadline or
     /// memory ceiling, [`EngineError::InvalidResult`] when the hook returns
-    /// a malformed result, and [`EngineError::Poisoned`] when a previous
-    /// call panicked while holding the call lock.
-    pub fn hook(
-        &self,
-        hook: &str,
-        call: &ToolCall,
-        deadline_ms: u64,
-    ) -> Result<Outcome, EngineError> {
+    /// a malformed result, [`EngineError::Capability`] when a callback error
+    /// reaches the host, and [`EngineError::Poisoned`] after a call panics.
+    pub fn hook(&self, hook: &str, call: &Call, deadline_ms: u64) -> Result<Outcome, EngineError> {
         let _guard = self.lock_call()?;
-        self.deadline.begin(deadline_ms);
+        self.deadline.begin(deadline_ms.min(self.call_deadline_ms));
         let outcome = self.run_hook(hook, call);
         self.deadline.disarm();
         outcome
     }
 
-    /// Run a named tool and decode its content.
+    /// Run a named tool and decode its content within the smaller of the two deadlines.
     ///
     /// # Errors
     ///
     /// Returns [`EngineError::UnknownTool`] when no such tool exists,
     /// [`EngineError::Limit`] when the call is bounded,
     /// [`EngineError::InvalidResult`] when the tool returns malformed content,
-    /// and [`EngineError::Poisoned`] when a previous call panicked while
-    /// holding the call lock.
+    /// [`EngineError::Capability`] when a callback error reaches the host,
+    /// and [`EngineError::Poisoned`] after a call panics.
     pub fn tool(
         &self,
         name: &str,
@@ -127,7 +154,7 @@ impl Sandbox {
         deadline_ms: u64,
     ) -> Result<Vec<Content>, EngineError> {
         let _guard = self.lock_call()?;
-        self.deadline.begin(deadline_ms);
+        self.deadline.begin(deadline_ms.min(self.call_deadline_ms));
         let content = self.run_tool(name, input);
         self.deadline.disarm();
         content
@@ -141,15 +168,15 @@ impl Sandbox {
     /// or repeats a tool name, [`EngineError::Limit`] when reading is bounded,
     /// and [`EngineError::Poisoned`] when a previous call panicked while
     /// holding the call lock.
-    pub fn manifest(&self) -> Result<PluginManifest, EngineError> {
+    pub fn manifest(&self) -> Result<Manifest, EngineError> {
         let _guard = self.lock_call()?;
-        self.deadline.begin(self.default_deadline_ms);
+        self.deadline.begin(self.call_deadline_ms);
         let manifest = self.read_manifest();
         self.deadline.disarm();
         manifest
     }
 
-    fn run_hook(&self, hook: &str, call: &ToolCall) -> Result<Outcome, EngineError> {
+    fn run_hook(&self, hook: &str, call: &Call) -> Result<Outcome, EngineError> {
         let Some(function) = self.plugin.get::<Option<Function>>(hook)? else {
             return Ok(Outcome::Allow);
         };
@@ -175,7 +202,7 @@ impl Sandbox {
 }
 
 impl Sandbox {
-    fn read_manifest(&self) -> Result<PluginManifest, EngineError> {
+    fn read_manifest(&self) -> Result<Manifest, EngineError> {
         let name = self
             .plugin
             .get::<Option<String>>("name")?
@@ -185,7 +212,7 @@ impl Sandbox {
                 "tack: plugin name is empty".into(),
             ));
         }
-        Ok(PluginManifest {
+        Ok(Manifest {
             name,
             needs: self.read_needs()?,
             tools: self.read_tools()?,

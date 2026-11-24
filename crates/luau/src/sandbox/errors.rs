@@ -50,6 +50,7 @@ impl fmt::Display for LoadCause {
 pub enum EngineError {
     Load(LoadCause),
     Script(String),
+    Capability { name: String, reason: String },
     Limit(LimitCause),
     UnknownTool(String),
     InvalidResult(String),
@@ -61,6 +62,7 @@ impl fmt::Display for EngineError {
         match self {
             Self::Load(cause) => cause.fmt(f),
             Self::Script(message) | Self::InvalidResult(message) => f.write_str(message),
+            Self::Capability { name, reason } => write!(f, "tack: capability {name}: {reason}"),
             Self::Limit(cause) => cause.fmt(f),
             Self::UnknownTool(name) => write!(f, "tack: unknown tool: {name}"),
             Self::Poisoned => f.write_str("tack: engine call lock poisoned"),
@@ -77,6 +79,9 @@ impl From<mlua::Error> for EngineError {
         }
         if let Some(cause) = error.downcast_ref::<RequireCause>() {
             return Self::Load(LoadCause::Require(cause.clone()));
+        }
+        if let Some(cause) = error.downcast_ref::<Self>() {
+            return cause.clone();
         }
         match &error {
             mlua::Error::MemoryError(_) => Self::Limit(LimitCause::Memory),

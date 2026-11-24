@@ -24,9 +24,11 @@ flowchart LR
 - `loading.rs`: `load_plugin`, which runs the loader chunk and requires
   that it returns a table.
 - `outcome.rs`: `decode_outcome`, `merge_command` and
-  `decode_content`, which turn hook and tool returns into protocol values.
+  `decode_content`, which turn hook and tool returns into engine API values.
 - `values.rs`: `read_tool`, `lua_key`, `json_to_lua`, `lua_to_json`
   and `lua_table_to_json`, the bounded JSON/Lua conversion boundary.
 - `call.rs`: `ctx` and `call_table`, the per-call tables handed to
   plugin functions.
+- `capabilities.rs`: host callbacks attached to the per-call context, with
+  bounded value conversion and named errors.
 - `tests.rs`: the sandbox test suite, compiled only under `cfg(test)`.

@@ -1,11 +1,12 @@
 use mlua::{Table, Value as LuaValue};
-use tack_protocol::wire::ToolCall;
+
+use crate::api::Call;
 
 use super::errors::EngineError;
 use super::values::json_to_lua;
 
 impl super::Sandbox {
-    pub(super) fn call_table(&self, call: &ToolCall) -> Result<Table, EngineError> {
+    pub(super) fn call_table(&self, call: &Call) -> Result<Table, EngineError> {
         let table = self.lua.create_table()?;
         table.set("tool", call.tool.as_str())?;
         table.set("name", call.name.as_str())?;
@@ -41,6 +42,9 @@ impl super::Sandbox {
             "allow",
             self.lua.create_function(|_, ()| Ok(LuaValue::Nil))?,
         )?;
+        self.capabilities
+            .populate(&self.lua, &ctx, &self.deadline)?;
+
         Ok(ctx)
     }
 }

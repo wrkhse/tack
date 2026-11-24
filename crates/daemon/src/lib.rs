@@ -5,10 +5,10 @@ pub mod transport;
 
 use std::path::{Path, PathBuf};
 
+use tack_luau::{EngineError, Sandbox, api};
 use tack_protocol::wire::{
-    DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
+    Content, DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request, ToolCall,
 };
-use tack_runtime::{EngineError, Sandbox};
 
 pub const EXIT_USAGE: i32 = 2;
 pub const EXIT_LOCK_BUSY: i32 = 3;
@@ -56,11 +56,14 @@ pub fn socket_in_state_dir(state_dir: &Path, socket: &Path) -> bool {
 }
 
 fn reply_error(id: u64, error: &EngineError) -> Reply {
-    let kind = match &error {
+    let kind = match error {
         EngineError::Limit(_) => ReplyError::Limit,
         EngineError::UnknownTool(_) => ReplyError::UnknownTool,
-        // Script, load and invalid-result failures are all script failures.
-        _ => ReplyError::Script,
+        EngineError::Load(_)
+        | EngineError::Script(_)
+        | EngineError::Capability { .. }
+        | EngineError::InvalidResult(_)
+        | EngineError::Poisoned => ReplyError::Script,
     };
     let message = error.to_string();
 
@@ -106,17 +109,38 @@ pub fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
                 };
             }
 
+            let ToolCall {
+                tool,
+                name,
+                input,
+                session_id,
+            } = call;
+            let call = api::Call {
+                tool,
+                name,
+                input,
+                session_id,
+            };
+
             match sandbox.hook("toolBefore", &call, DEFAULT_DEADLINE_MS) {
                 Ok(outcome) => {
-                    match &outcome {
-                        Outcome::Allow => eprintln!("tack-daemon: hook toolBefore allow"),
-                        Outcome::Deny { reason } => {
+                    let outcome = match outcome {
+                        api::Outcome::Allow => {
+                            eprintln!("tack-daemon: hook toolBefore allow");
+
+                            Outcome::Allow
+                        }
+                        api::Outcome::Deny { reason } => {
                             eprintln!("tack-daemon: hook toolBefore deny {reason}");
+
+                            Outcome::Deny { reason }
                         }
-                        Outcome::Rewrite { .. } => {
+                        api::Outcome::Rewrite { input } => {
                             eprintln!("tack-daemon: hook toolBefore rewrite");
+
+                            Outcome::Rewrite { input }
                         }
-                    }
+                    };
 
                     Reply::Hook {
                         id,
@@ -136,7 +160,10 @@ pub fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
                 Reply::Tool {
                     id,
                     version: PROTOCOL_VERSION,
-                    content,
+                    content: content
+                        .into_iter()
+                        .map(|api::Content { kind, text }| Content { kind, text })
+                        .collect(),
                 }
             }
             Err(error) => reply_error(id, &error),

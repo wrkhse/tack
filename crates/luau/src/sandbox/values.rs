@@ -1,6 +1,7 @@
 use mlua::{Lua, Table, Value as LuaValue};
 use serde_json::Value;
-use tack_protocol::wire::ToolDef;
+
+use crate::api::ToolDef;
 
 use super::errors::{EngineError, LimitCause, MAX_DEPTH, MAX_ENTRIES};
 
@@ -100,7 +101,7 @@ pub(super) fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaV
     }
 }
 
-fn lua_to_json(value: LuaValue, depth: usize) -> Result<Value, EngineError> {
+pub(super) fn lua_to_json(value: LuaValue, depth: usize) -> Result<Value, EngineError> {
     if depth > MAX_DEPTH {
         return Err(EngineError::Limit(LimitCause::TooDeep { limit: MAX_DEPTH }));
     }

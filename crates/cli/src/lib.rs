@@ -8,9 +8,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
-use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION};
+use tack_luau::{Capabilities, EngineError, Limits, Sandbox, api};
+use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest, ToolDef};
 use tack_protocol::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
-use tack_runtime::{EngineError, Sandbox};
 
 /// Wall-clock budget for one wrapper call in the default build.
 pub const CALL_TIMEOUT_MS: u64 = 2000;
@@ -88,16 +88,32 @@ pub fn build(
     options: BuildOptions,
 ) -> Result<(PathBuf, PathBuf), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
-    let sandbox = Sandbox::new(&plugin_dir, DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
-        .map_err(BuildError::Sandbox)?;
-    let manifest = sandbox.manifest().map_err(BuildError::Sandbox)?;
+    let limits = Limits {
+        memory_bytes: DEFAULT_MEMORY_BYTES,
+        call_deadline_ms: DEFAULT_DEADLINE_MS,
+    };
+    let sandbox =
+        Sandbox::new(&plugin_dir, limits, Capabilities::default()).map_err(BuildError::Sandbox)?;
+    let api::Manifest { name, needs, tools } = sandbox.manifest().map_err(BuildError::Sandbox)?;
 
-    for need in &manifest.needs {
+    for need in &needs {
         if !SUPPORTED.contains(&need.as_str()) {
             return Err(BuildError::NeedMissing(need.clone()));
         }
     }
 
+    let manifest = PluginManifest {
+        name,
+        needs,
+        tools: tools
+            .into_iter()
+            .map(|tool| ToolDef {
+                name: tool.name,
+                description: tool.description,
+                input: tool.input,
+            })
+            .collect(),
+    };
     let reasons: Vec<&str> = DenyReason::ALL
         .iter()
         .map(|reason| reason.as_str())
@@ -130,7 +146,7 @@ pub fn build(
 
 #[cfg(test)]
 mod tests {
-    use tack_runtime::sandbox::LimitCause;
+    use tack_luau::LimitCause;
 
     use super::*;
 

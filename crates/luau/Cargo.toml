@@ -1,15 +1,19 @@
 [package]
-name = "tack_runtime"
+name = "tack-luau"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+readme = "README.md"
+
+[lib]
+name = "tack_luau"
 
 [dependencies]
 mlua = { workspace = true, features = ["send"] }
+serde.workspace = true
 serde_json.workspace = true
-tack_protocol = { path = "../protocol" }
 
 [lints]
 workspace = true

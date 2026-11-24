@@ -9,7 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
 use tack_cli::{BuildOptions, DAEMON_BIN, build};
-use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest};
+use tack_luau::{Capabilities, Limits, Sandbox, api};
+use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest, ToolDef};
+use tack_protocol::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
 
 const GOLDEN: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -58,13 +60,25 @@ fn fixture() -> PathBuf {
 }
 
 fn manifest() -> PluginManifest {
-    let sandbox = tack_runtime::Sandbox::new(
-        &fixture(),
-        tack_protocol::DEFAULT_MEMORY_BYTES,
-        tack_protocol::DEFAULT_DEADLINE_MS,
-    )
-    .expect("fixture loads");
-    sandbox.manifest().expect("manifest reads")
+    let limits = Limits {
+        memory_bytes: DEFAULT_MEMORY_BYTES,
+        call_deadline_ms: DEFAULT_DEADLINE_MS,
+    };
+    let sandbox = Sandbox::new(&fixture(), limits, Capabilities::default()).expect("fixture loads");
+    let api::Manifest { name, needs, tools } = sandbox.manifest().expect("manifest reads");
+
+    PluginManifest {
+        name,
+        needs,
+        tools: tools
+            .into_iter()
+            .map(|tool| ToolDef {
+                name: tool.name,
+                description: tool.description,
+                input: tool.input,
+            })
+            .collect(),
+    }
 }
 
 fn reasons() -> Vec<&'static str> {

@@ -8,8 +8,8 @@ use tack_daemon::{
     ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, dispatch,
     socket_in_state_dir, state_dir,
 };
+use tack_luau::{Capabilities, Limits, Sandbox};
 use tack_protocol::wire::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
-use tack_runtime::Sandbox;
 
 struct Args {
     socket: PathBuf,
@@ -61,7 +61,11 @@ async fn main() {
         std::process::exit(EXIT_USAGE);
     }
 
-    let sandbox = match Sandbox::new(&args.plugin, DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS) {
+    let limits = Limits {
+        memory_bytes: DEFAULT_MEMORY_BYTES,
+        call_deadline_ms: DEFAULT_DEADLINE_MS,
+    };
+    let sandbox = match Sandbox::new(&args.plugin, limits, Capabilities::default()) {
         Ok(sandbox) => Arc::new(sandbox),
         Err(error) => {
             eprintln!("tack-daemon: sandbox: {error}");
