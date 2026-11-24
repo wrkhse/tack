@@ -11,6 +11,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -29,6 +30,7 @@ const extension = path.join(repoRoot, "dist", "pi", "extension.js");
 const gitShim = path.join(repoRoot, "test", "claude", "git-shim");
 
 const MODEL_START_MS = 10_000;
+const DAEMON_START_MS = 5_000;
 const RUN_TIMEOUT_MS = 40_000;
 const MAX_OUTPUT_CHARS = 4 * 1024 * 1024;
 const EXPECTED_RECORDER = [
@@ -38,8 +40,8 @@ const EXPECTED_RECORDER = [
 
 const cases = [
   { name: "normal", model: "normal", bash: "tack: push blocked" },
-  { name: "missing-hook", model: "bash", bash: "tack: daemon_error" },
-  { name: "daemon-crash", model: "bash", bash: "tack: daemon_error" },
+  { name: "missing-hook", model: "bash", bash: "tack: hook_missing" },
+  { name: "daemon-crash", model: "bash", bash: "tack: socket_closed" },
   { name: "timeout", model: "bash", bash: "tack: timeout" },
   { name: "invalid-reply", model: "bash", bash: "tack: malformed_reply" },
   { name: "invalid-guard-status", model: "invalid-tool" },
@@ -139,16 +141,7 @@ function initProject(tree, env) {
   git("branch", "--set-upstream-to=origin/main", "main");
 }
 
-const CRASH_SHIM = [
-  "exec node -e '",
-  'const { id } = JSON.parse(require("node:fs").readFileSync(0, "utf8"));',
-  'console.log(JSON.stringify({ kind: "error", id, version: 1,',
-  '  error: "daemon_error", message: "tack-hook: daemon crashed" }));',
-  "'",
-].join("\n");
-
 const hookShims = new Map([
-  ["daemon-crash", CRASH_SHIM],
   ["timeout", 'echo "$$" > "$TACK_TEST_SLEEP_PID"\nexec /bin/sleep 15'],
   ["invalid-reply", "printf '%s\\n' 'not JSON'"],
   ["invalid-guard-status", "printf '%s\\n' 'unexpected tack-hook invocation'"],
@@ -157,7 +150,7 @@ const hookShims = new Map([
 function installHook(tree, env, caseName) {
   const hook = path.join(tree.bin, "tack-hook");
 
-  if (caseName === "normal") {
+  if (caseName === "normal" || caseName === "daemon-crash") {
     accessSync(hookBin, constants.X_OK);
     symlinkSync(hookBin, hook);
     return;
@@ -228,14 +221,18 @@ function startChild(bin, args, options, onStdout) {
   let closed = false;
   let spawnError;
 
-  function stop() {
+  function sendSignal(signal) {
     if (closed || child.pid === undefined) return;
 
     try {
-      process.kill(options.detached ? -child.pid : child.pid, "SIGKILL");
+      process.kill(options.detached ? -child.pid : child.pid, signal);
     } catch (error) {
       if (error.code !== "ESRCH") throw error;
     }
+  }
+
+  function stop() {
+    sendSignal("SIGKILL");
   }
 
   for (const stream of ["stdout", "stderr"]) {
@@ -259,7 +256,7 @@ function startChild(bin, args, options, onStdout) {
     });
   });
 
-  return { stop, done };
+  return { pid: child.pid, sendSignal, stop, done };
 }
 
 async function modelPort(model, firstLine) {
@@ -328,6 +325,59 @@ async function runPi(pi, tree, env) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function waitFor(label, timeout, ready) {
+  const deadline = performance.now() + timeout;
+
+  while (performance.now() < deadline) {
+    if (ready()) return;
+
+    await delay(25);
+  }
+
+  throw new Error("timed out waiting for " + label);
+}
+
+function hookConnected(socket) {
+  // Linux reports the queued, unaccepted stream as SS_CONNECTING (02)
+  // with inode 0 and the listener's path. Only this case's hook connects.
+  const rows = readFileSync("/proc/net/unix", "utf8").split("\n");
+
+  return rows.some((row) => {
+    const entry = row.match(/^\S+\s+\S+\s+\S+\s+00000000\s+0001\s+02\s+0 (.*)$/);
+    return entry?.[1] === socket;
+  });
+}
+
+async function crashAfterConnect(daemon, socket) {
+  await waitFor("tack-hook connection", RUN_TIMEOUT_MS, () => hookConnected(socket));
+  daemon.stop();
+
+  const { signal } = await daemon.done;
+  if (signal !== "SIGKILL") throw new Error("tack-daemon did not exit via SIGKILL");
+}
+
+async function runCrash(pi, tree, env, daemon, socket) {
+  await waitFor("daemon socket", DAEMON_START_MS, () => {
+    const stat = statSync(socket, { throwIfNoEntry: false });
+    return stat?.isSocket() && (stat.mode & 0o777) === 0o600;
+  });
+
+  // Pause the real daemon before invoking Pi so it cannot reply before the kill.
+  daemon.sendSignal("SIGSTOP");
+  const status = "/proc/" + daemon.pid + "/status";
+  await waitFor("stopped daemon", DAEMON_START_MS,
+    () => /^State:\s+T\b/m.test(readOptional(status) ?? ""));
+
+  const [session, crash] = await Promise.allSettled([
+    runPi(pi, tree, env),
+    crashAfterConnect(daemon, socket),
+  ]);
+  if (crash.status === "rejected") throw crash.reason;
+  if (session.status === "rejected") throw session.reason;
+
+  return session.value;
 }
 
 function ownProcess(pidFile, command) {
@@ -406,7 +456,7 @@ function checkBash(events, expected, check) {
   const [end] = toolEvents(events, "tool_execution_end", "bash");
   const text = textOf(end?.event.result?.content);
   check("bash denied: " + expected.bash, end?.event.isError === true &&
-    (expected.model === "normal" ? text.includes(expected.bash) : text === expected.bash) &&
+    text === expected.bash &&
     isDeepStrictEqual(start?.event.args, { command: "git push origin main" }), text);
 
   if (expected.name === "timeout") {
@@ -426,8 +476,8 @@ function checkStatus(events, normal, check) {
     check("guard_status: daemon ok", end?.event.isError === false &&
       text === "guard_status: daemon ok" && isDeepStrictEqual(start?.event.args, {}), text);
   } else {
-    check("invalid guard_status returns an error", end?.event.isError === true &&
-      text !== "" && isDeepStrictEqual(start?.event.args, { unexpected: true }), text);
+    check("invalid guard_status: tack: malformed", end?.event.isError === true &&
+      text === "tack: malformed" && isDeepStrictEqual(start?.event.args, { unexpected: true }), text);
   }
 }
 
@@ -459,10 +509,12 @@ function checkCase(tree, run, expected, check) {
   }
 
   if (normal) {
-    const log = readOptional(path.join(tree.state, "daemon.log"));
-    for (const line of ["hook toolBefore deny push blocked", "tool guard_status ok"]) {
-      check("daemon logged " + line, log?.split("\n").includes("tack-daemon: " + line), log);
-    }
+    const lines = readOptional(path.join(tree.state, "daemon.log"))?.split("\n");
+    const terminated = lines?.pop() === "";
+    check("exact daemon log lines", terminated && isDeepStrictEqual(lines, [
+      "tack-daemon: hook toolBefore deny push blocked",
+      "tack-daemon: tool guard_status ok",
+    ]), lines);
   }
 }
 
@@ -483,6 +535,9 @@ function keepEvidence(tree, target) {
 async function runCase(pi, expected, root, target, check) {
   const tree = layout(mkdtempSync(path.join(root, "tack-pi-")));
   const env = piEnv(tree);
+  const socket = path.join(tree.state, "tack.sock");
+  const daemonArgs = ["--socket", socket, "--plugin", pluginDir];
+  let daemon;
   let model;
   let run;
 
@@ -497,7 +552,13 @@ async function runCase(pi, expected, root, target, check) {
       });
 
     writeConfig(tree.agent, await modelPort(model, promise));
-    run = await runPi(pi, tree, env);
+
+    if (expected.name === "daemon-crash") {
+      daemon = startChild(daemonBin, daemonArgs, { cwd: tree.project, env });
+      run = await runCrash(pi, tree, env, daemon, socket);
+    } else {
+      run = await runPi(pi, tree, env);
+    }
   } catch (error) {
     check("conformance session ran", false, String(error.stack ?? error));
   } finally {
@@ -511,9 +572,13 @@ async function runCase(pi, expected, root, target, check) {
       checkCase(tree, run, expected, check);
     } finally {
       try {
-        await stopOwned(path.join(tree.state, "tack.lock"),
-          [daemonBin, "--socket", path.join(tree.state, "tack.sock"),
-            "--plugin", pluginDir]);
+        if (daemon) {
+          daemon.stop();
+          const result = await daemon.done;
+          writeFileSync(path.join(tree.state, "daemon.log"), result.stdout + result.stderr);
+        }
+
+        await stopOwned(path.join(tree.state, "tack.lock"), [daemonBin, ...daemonArgs]);
         await stopOwned(tree.sleepPid, ["/bin/sleep", "15"]);
       } finally {
         try {

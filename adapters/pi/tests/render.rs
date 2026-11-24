@@ -91,6 +91,19 @@ fn render_refuses_unsafe_paths() {
     }
 }
 
+#[test]
+fn extension_errors_display_their_machine_readable_messages() {
+    for (error, expected) in [
+        (ExtensionError::UnsafePluginDir, "unsafe_value:plugin_dir"),
+        (
+            ExtensionError::MissingToken("__TACK_PLUGIN_DIR__"),
+            "missing_token:__TACK_PLUGIN_DIR__",
+        ),
+    ] {
+        assert_eq!(error.to_string(), expected);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn render_refuses_a_path_that_cannot_round_trip_through_utf8() {

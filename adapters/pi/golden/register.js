@@ -9,7 +9,7 @@ const PLUGIN_DIR = "/plugins/safe-push";
 const PROTOCOL_VERSION = 1;
 const BUDGET_MS = 8500;
 const MAX_FRAME_BYTES = 1048576;
-const DENY_REASONS = ["socket_missing","timeout","socket_closed","malformed_reply","protocol_version","limit","script","unknown_tool","daemon_error","aborted","unsupported_hook","socket_untrusted"];
+const DENY_REASONS = ["socket_missing","timeout","socket_closed","malformed_reply","protocol_version","limit","script","unknown_tool","daemon_error","aborted","unsupported_hook","socket_untrusted","hook_missing"];
 
 const STATUS = "guard_status: daemon ok";
 const REASONS = new Set(DENY_REASONS);
@@ -83,11 +83,20 @@ function forward(request) {
       stop(refuse("daemon_error"));
     }
 
+    function spawnFailed(error) {
+      if (error?.code === "ENOENT") {
+        finish(refuse("hook_missing"));
+        return;
+      }
+
+      failed();
+    }
+
     try {
       child = spawn(HOOK_BIN, ["--plugin", PLUGIN_DIR], {
         stdio: ["pipe", "pipe", "ignore"],
       });
-      child.on("error", failed);
+      child.on("error", spawnFailed);
       child.stdout.on("error", failed);
       child.stdin.on("error", failed);
       child.stdout.on("data", (chunk) => {
@@ -110,8 +119,9 @@ function forward(request) {
         finish(result);
       });
       child.stdin.end(line);
-    } catch {
-      failed();
+    } catch (error) {
+      if (child) failed();
+      else spawnFailed(error);
     }
   });
 }
@@ -182,7 +192,7 @@ export default function register(pi) {
     try {
       if (!params || typeof params !== "object" || Array.isArray(params) ||
           Object.keys(params).length !== 0) {
-        return toolError("daemon_error");
+        return toolError("malformed");
       }
 
       const id = nextId();
@@ -218,7 +228,7 @@ export default function register(pi) {
     name: "guard_status",
     label: "guard_status",
     description: "Reports whether the tack daemon is running",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
+    parameters: { type: "object", properties: {} },
     execute: guardStatus,
   });
   pi.on("session_start", () => {

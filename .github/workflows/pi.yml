@@ -35,12 +35,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          prefix="$RUNNER_TEMP/pi-npm"
-          npm install --global --prefix "$prefix" --no-audit --no-fund \
-            "@earendil-works/pi-coding-agent@$PI_VERSION"
+          npm ci --prefix test/pi --ignore-scripts
 
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          export PATH="$prefix/bin:$PATH"
+          bin="$GITHUB_WORKSPACE/test/pi/node_modules/.bin"
+          echo "$bin" >> "$GITHUB_PATH"
+          export PATH="$bin:$PATH"
 
           version="$(pi --version)"
           echo "$version"

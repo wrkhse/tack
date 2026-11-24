@@ -16,8 +16,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The machine-readable class carried by an error reply.
 ///
-/// The daemon sends the first seven. A native client such as `tack-hook`
-/// writes the transport kinds itself when it fails closed without a verdict.
+/// The daemon sends the first seven. The remaining kinds name client
+/// failures that occur without a verdict from the daemon.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyError {
@@ -35,6 +35,7 @@ pub enum ReplyError {
     DaemonError,
     Aborted,
     SocketUntrusted,
+    HookMissing,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -146,10 +147,11 @@ pub enum DenyReason {
     Aborted,
     UnsupportedHook,
     SocketUntrusted,
+    HookMissing,
 }
 
 impl DenyReason {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::SocketMissing,
         Self::Timeout,
         Self::SocketClosed,
@@ -162,6 +164,7 @@ impl DenyReason {
         Self::Aborted,
         Self::UnsupportedHook,
         Self::SocketUntrusted,
+        Self::HookMissing,
     ];
 
     #[must_use]
@@ -179,6 +182,7 @@ impl DenyReason {
             Self::Aborted => "aborted",
             Self::UnsupportedHook => "unsupported_hook",
             Self::SocketUntrusted => "socket_untrusted",
+            Self::HookMissing => "hook_missing",
         }
     }
 }
@@ -396,6 +400,7 @@ mod tests {
             (ReplyError::DaemonError, "daemon_error"),
             (ReplyError::Aborted, "aborted"),
             (ReplyError::SocketUntrusted, "socket_untrusted"),
+            (ReplyError::HookMissing, "hook_missing"),
         ] {
             assert_eq!(
                 serde_json::to_value(error).unwrap(),
@@ -508,6 +513,7 @@ mod tests {
             (DenyReason::Aborted, "aborted"),
             (DenyReason::UnsupportedHook, "unsupported_hook"),
             (DenyReason::SocketUntrusted, "socket_untrusted"),
+            (DenyReason::HookMissing, "hook_missing"),
         ] {
             assert_eq!(reason.as_str(), expected);
             assert_eq!(

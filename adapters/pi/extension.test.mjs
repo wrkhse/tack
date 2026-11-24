@@ -136,9 +136,7 @@ test("Pi registers one guarded Bash handler, tool and session load marker", () =
   assert.deepEqual(h.entries, [["tack-loaded", {}]]);
   assert.equal(h.tools.length, 1);
   assert.equal(h.tools[0].name, "guard_status");
-  assert.deepEqual(h.tools[0].parameters, {
-    type: "object", properties: {}, additionalProperties: false,
-  });
+  assert.deepEqual(h.tools[0].parameters, { type: "object", properties: {} });
   assert.deepEqual(h.starts, []);
 });
 
@@ -214,7 +212,7 @@ test("a successful allow also appends exactly one recorder line", async () => {
 const reasonNames = [
   "socket_missing", "timeout", "socket_closed", "malformed_reply",
   "protocol_version", "limit", "script", "unknown_tool", "daemon_error",
-  "aborted", "unsupported_hook", "socket_untrusted",
+  "aborted", "unsupported_hook", "socket_untrusted", "hook_missing",
 ];
 
 for (const error of [...reasonNames, "malformed", "too_large", "unrecognized"]) {
@@ -288,7 +286,7 @@ test("invalid tool parameters never reach tack-hook or the recorder", async () =
   const h = harness(answer(STATUS));
 
   for (const params of [undefined, null, 42, [], { extra: true }]) {
-    assert.deepEqual(await runTool(h, params), toolError("daemon_error"));
+    assert.deepEqual(await runTool(h, params), toolError("malformed"));
   }
 
   assert.deepEqual(h.starts, []);
@@ -330,16 +328,33 @@ test("throwing while killing a timed out child still returns the named error",
   },
 );
 
-test("process and pipe failures block with no promise catch on the handler",
+test("a missing tack-hook blocks either request without recording",
   async () => {
     const enoent = Object.assign(new Error("hook not found"), { code: "ENOENT" });
 
     for (const [respond, options] of [
       [(_request, child) => child.emit("error", enoent), {}],
+      [() => {}, { spawnError: enoent }],
+    ]) {
+      const h = harness(respond, options);
+
+      assert.deepEqual(await guard(h), block("hook_missing"));
+      assert.deepEqual(await runTool(h, {}), toolError("hook_missing"));
+      assert.deepEqual(h.writes, []);
+    }
+  },
+);
+
+test("other process and pipe failures block with no promise catch on the handler",
+  async () => {
+    const enoent = Object.assign(new Error("input failed"), { code: "ENOENT" });
+
+    for (const [respond, options] of [
       [(_request, child) => child.stdin.emit("error", new Error("EPIPE")), {}],
+      [(_request, child) => child.stdin.emit("error", enoent), {}],
       [(_request, child) => child.stdout.emit("error", new Error("output")), {}],
       [(_request, child) => child.emit("close", null, "SIGSEGV"), {}],
-      [() => {}, { spawnError: enoent }],
+      [() => {}, { spawnError: new Error("spawn failed") }],
       [answer(ALLOW), { recordError: new Error("recorder unavailable") }],
     ]) {
       const h = harness(respond, options);

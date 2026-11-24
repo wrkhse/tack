@@ -83,11 +83,20 @@ function forward(request) {
       stop(refuse("daemon_error"));
     }
 
+    function spawnFailed(error) {
+      if (error?.code === "ENOENT") {
+        finish(refuse("hook_missing"));
+        return;
+      }
+
+      failed();
+    }
+
     try {
       child = spawn(HOOK_BIN, ["--plugin", PLUGIN_DIR], {
         stdio: ["pipe", "pipe", "ignore"],
       });
-      child.on("error", failed);
+      child.on("error", spawnFailed);
       child.stdout.on("error", failed);
       child.stdin.on("error", failed);
       child.stdout.on("data", (chunk) => {
@@ -110,8 +119,9 @@ function forward(request) {
         finish(result);
       });
       child.stdin.end(line);
-    } catch {
-      failed();
+    } catch (error) {
+      if (child) failed();
+      else spawnFailed(error);
     }
   });
 }
@@ -182,7 +192,7 @@ export default function register(pi) {
     try {
       if (!params || typeof params !== "object" || Array.isArray(params) ||
           Object.keys(params).length !== 0) {
-        return toolError("daemon_error");
+        return toolError("malformed");
       }
 
       const id = nextId();
@@ -218,7 +228,7 @@ export default function register(pi) {
     name: "guard_status",
     label: "guard_status",
     description: "Reports whether the tack daemon is running",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
+    parameters: { type: "object", properties: {} },
     execute: guardStatus,
   });
   pi.on("session_start", () => {
