@@ -143,9 +143,14 @@ pub fn check(reply: &[u8], request: &Request) -> Result<(), Failure> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     use tack_protocol::wire::{self, Outcome};
+
+    /// Far above a correct read, so only a broken read reaches it.
+    const READ_LIMIT: Duration = Duration::from_secs(2);
 
     #[test]
     fn a_missing_socket_is_socket_missing_and_a_refusing_one_socket_closed() {
@@ -176,9 +181,14 @@ mod tests {
         let sent = line.clone();
         let writer = tokio::spawn(async move { daemon.write_all(&sent).await });
 
-        let reply = read_reply(&mut hook).await;
+        let reply = tokio::time::timeout(READ_LIMIT, read_reply(&mut hook)).await;
 
-        writer.await.unwrap().unwrap();
+        // A read that stops short leaves the writer blocked on a full
+        // socket, so it is stopped on every path instead of awaited.
+        writer.abort();
+        let _ = writer.await;
+
+        let reply = reply.expect("read_reply did not finish within the limit");
         assert_eq!(reply, Ok(line));
     }
 }
