@@ -72,6 +72,7 @@ let sawTool = false;
 let watchTimer;
 let holdTimer;
 let finished = false;
+let verdictFinal = false;
 
 function track(child) {
   children.add(child);
@@ -329,19 +330,12 @@ function judgement(t, sessionDeny, sessionTool) {
   };
 }
 
-function writeVerdict() {
-  const result = judgement(tree, sawDeny, sawTool);
-  writeFileSync(verdictPath, result.lines.join("\n") + "\n");
-  return result;
-}
-
 function pad(text, width) {
   const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
   return clean.length >= width ? clean.slice(0, width) : clean.padEnd(width);
 }
 
-function printHeader(force = false) {
-  const result = judgement(tree, sawDeny, sawTool);
+function printHeader(result, force) {
   const state = [
     result.denied, result.guarded, result.hookCalled, result.noPush,
   ].join(":");
@@ -355,6 +349,19 @@ function printHeader(force = false) {
     result.noPush ? "[4] no git push" : "[4] PUSH EXECUTED",
   ];
   process.stdout.write(parts.join("  ") + "\n");
+}
+
+// Judges once, then writes verdict-claude.txt and prints the header from
+// that one result, so the file never lags the captions on screen. Once
+// finish() has written the last verdict the tree is gone, so nothing is
+// judged again.
+function refresh(force = false) {
+  if (verdictFinal) return null;
+
+  const result = judgement(tree, sawDeny, sawTool);
+  writeFileSync(verdictPath, result.lines.join("\n") + "\n");
+  printHeader(result, force);
+  return result;
 }
 
 function printTitles() {
@@ -465,6 +472,8 @@ function frameLines(frame) {
 }
 
 function sessionLine(line) {
+  const latched = (!sawDeny && line.includes(DENY_REASON))
+    || (!sawTool && line.includes(TOOL_RESULT));
   if (line.includes(DENY_REASON)) sawDeny = true;
   if (line.includes(TOOL_RESULT)) sawTool = true;
 
@@ -482,7 +491,7 @@ function sessionLine(line) {
 
   const lines = frame ? frameLines(frame) : [text];
   for (const value of lines) collectLeft(value);
-  printHeader();
+  if (latched) refresh();
 }
 
 function addLines(stream, handle) {
@@ -518,6 +527,7 @@ function pollDaemon() {
   const lines = daemonRest.split("\n");
   daemonRest = lines.pop();
   for (const line of lines) if (line.trim()) collectRight(line);
+  refresh();
 }
 
 // No --bare: it turns plugin hooks off. stream-json puts every tool_result
@@ -552,7 +562,7 @@ function runClaude(pluginDir) {
   child.once("close", (code) => {
     clearTimeout(timer);
     collectLeft("claude exited " + code);
-    printHeader();
+    refresh();
     process.stdout.write("SESSION_DONE\n");
     holdTimer = setTimeout(finish, PROOF_WAIT_MS);
   });
@@ -628,9 +638,9 @@ async function finish() {
   pollDaemon();
   drain();
 
-  const result = writeVerdict();
+  const result = refresh(true);
+  verdictFinal = true;
   process.exitCode = result.ok ? 0 : 1;
-  printHeader(true);
 
   killChildren();
   if (tree && process.env.CI) await stopDaemon(tree.stateDir);
@@ -665,12 +675,11 @@ async function main() {
     const port = await startModel(tree.requestLog);
     sessionEnv = sessionEnvFor(tree, port, realGit);
 
-    printHeader(true);
+    refresh(true);
     printTitles();
     watchTimer = setInterval(() => {
       pollDaemon();
-      writeVerdict();
-      printHeader();
+      refresh();
     }, WATCH_MS);
 
     setTimeout(() => runClaude(pluginDir), START_DELAY_MS);

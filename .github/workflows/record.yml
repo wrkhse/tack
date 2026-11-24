@@ -174,6 +174,18 @@ jobs:
           termctrl save rec --format png --pixel-ratio 1 --padding 0 \
             --font-family 'DejaVu Sans Mono' \
             --out frames/04-proof
+
+          # Wait up to 5 s for verdict.txt to reflect the evidence before the
+          # stop. This only waits; the exact verdict check below still gates
+          # the job.
+          for _ in $(seq 1 20); do
+            if grep -qx 'push_denied=true' verdict.txt 2>/dev/null &&
+              grep -qx 'guard_status_ran=true' verdict.txt 2>/dev/null &&
+              grep -qx 'no_push_recorded=true' verdict.txt 2>/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
           termctrl stop rec
 
       - name: Render the GIF
@@ -449,6 +461,19 @@ jobs:
           termctrl save claude-rec --format png --pixel-ratio 1 --padding 0 \
             --font-family 'DejaVu Sans Mono' \
             --out frames/04-proof
+
+          # Wait up to 5 s for verdict-claude.txt to reflect the evidence
+          # before the stop. This only waits; the exact verdict check below
+          # still gates the job.
+          for _ in $(seq 1 20); do
+            if grep -qx 'push_denied=true' verdict-claude.txt 2>/dev/null &&
+              grep -qx 'guard_status_ran=true' verdict-claude.txt 2>/dev/null &&
+              grep -qx 'no_push_recorded=true' verdict-claude.txt 2>/dev/null &&
+              grep -qx 'hook_called=true' verdict-claude.txt 2>/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
           termctrl stop claude-rec
 
       - name: Render the GIF

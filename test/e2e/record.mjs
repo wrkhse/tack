@@ -52,11 +52,10 @@ let inputBuffer = "";
 let leftCursor = 0;
 let rightCursor = 0;
 let headerState = "";
-let markerDenied = false;
-let markerGuarded = false;
 let watchTimer;
 let holdTimer;
 let finished = false;
+let verdictFinal = false;
 let resolveDone;
 
 const done = new Promise((resolve) => {
@@ -219,6 +218,9 @@ function judgement(daemonText, recorderText) {
   const noPush = !recorderText.split("\n")
     .some((line) => line.startsWith("push"));
   return {
+    denied,
+    guarded,
+    noPush,
     lines: [
       "push_denied=" + denied,
       "guard_status_ran=" + guarded,
@@ -233,15 +235,7 @@ function pad(text, width) {
   return clean.length >= width ? clean.slice(0, width) : clean.padEnd(width);
 }
 
-function printHeader(force = false) {
-  const daemonText = readOptional(daemonLog);
-  const recorderText = readOptional(recorder);
-  const denied = markerDenied ||
-    daemonText.includes("hook toolBefore deny");
-  const guarded = markerGuarded ||
-    daemonText.includes("tool guard_status ok");
-  const noPush = !recorderText.split("\n")
-    .some((line) => line.startsWith("push"));
+function printHeader({ denied, guarded, noPush }, force) {
   const state = denied + ":" + guarded + ":" + noPush;
   if (!force && state === headerState) return;
   headerState = state;
@@ -250,6 +244,19 @@ function printHeader(force = false) {
   const second = guarded ? "[2] guard_status ran" : "[2] guard pending";
   const third = noPush ? "[3] no git push" : "[3] PUSH EXECUTED";
   process.stdout.write(first + "    " + second + "    " + third + "\n");
+}
+
+// The verdict file and the header come from one judgement, written together,
+// so the verdict on disk never lags the caption a recording shows. Once
+// finish() has written the last verdict the scratch tree is gone, so a late
+// daemon line must not judge the empty logs again.
+function refresh(force = false) {
+  if (verdictFinal) return null;
+
+  const result = judgement(readOptional(daemonLog), readOptional(recorder));
+  writeFileSync(verdictPath, result.lines.join("\n") + "\n");
+  printHeader(result, force);
+  return result;
 }
 
 function printTitles() {
@@ -298,9 +305,9 @@ function collectLeft(text) {
 
 function collectRight(text) {
   pushWrapped(rightLines, text);
-  if (text.includes("hook toolBefore deny")) markerDenied = true;
-  if (text.includes("tool guard_status ok")) markerGuarded = true;
-  if (markerDenied || markerGuarded) printHeader();
+  const evidence = text.includes("hook toolBefore deny") ||
+    text.includes("tool guard_status ok");
+  if (evidence) refresh();
   emitRow();
 }
 
@@ -314,8 +321,8 @@ function finish() {
     emitRow();
   }
 
-  const result = judgement(readOptional(daemonLog), readOptional(recorder));
-  writeFileSync(verdictPath, result.lines.join("\n") + "\n");
+  const result = refresh();
+  verdictFinal = true;
   process.exitCode = result.ok ? 0 : 1;
 
   killChildren();
@@ -421,16 +428,9 @@ async function main() {
     }));
     addLines(tail.stdout, collectRight);
 
-    printHeader(true);
+    refresh(true);
     printTitles();
-    watchTimer = setInterval(() => {
-      const result = judgement(
-        readOptional(daemonLog),
-        readOptional(recorder),
-      );
-      writeFileSync(verdictPath, result.lines.join("\n") + "\n");
-      printHeader();
-    }, WATCH_MS);
+    watchTimer = setInterval(() => refresh(), WATCH_MS);
     holdTimer = setTimeout(finish, SESSION_MS);
 
     process.stdin.setEncoding("utf8");
