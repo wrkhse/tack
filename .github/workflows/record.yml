@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to record, for example v0.1.0-rc.2"
+        description: "Release tag to record, for example v0.1.0-rc.3"
         required: true
         type: string
 

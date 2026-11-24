@@ -45,14 +45,14 @@ flowchart LR
 
 ### Release candidate (pre-release)
 
-The slice 1 build is published as a **pre-release** on the
+The current build is published as a **pre-release** on the
 [releases page](https://github.com/wrkhse/tack/releases). Each release carries
 one tarball per target and a single `SHA256SUMS` covering all three. Download
-the tarball for your target, verify it, unpack it, and put both binaries on
-your `PATH`:
+the tarball for your target, verify it, unpack it, and put its three binaries
+on your `PATH`:
 
 ```bash
-TAG=v0.1.0-rc.2
+TAG=v0.1.0-rc.3
 TARGET=x86_64-apple-darwin
 base="https://github.com/wrkhse/tack/releases/download/$TAG"
 
@@ -67,9 +67,18 @@ export PATH="$PWD:$PATH"
 ```
 
 Valid targets are `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-`x86_64-unknown-linux-gnu`. The tarball contains `tack` and `tack-daemon`.
-`SHA256SUMS` lists all three tarballs; the `grep` above checks the one you
-downloaded. This is a pre-release for trying slice 1, not a stable release.
+`x86_64-unknown-linux-gnu`. The tarball contains three binaries: `tack`,
+`tack-daemon` and `tack-hook`. `SHA256SUMS` lists all three tarballs; the
+`grep` above checks the one you downloaded.
+
+A Claude mod build sends each guarded Bash call and each tack tool run to
+`tack-hook`. This command builds one and prints the paths it emits:
+
+```bash
+tack build fixtures/safe-push --out dist --target claude
+```
+
+This is a pre-release for trying the current slice, not a stable release.
 
 ### From source
 

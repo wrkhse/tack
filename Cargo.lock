@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "tack-adapter-claude"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "serde_json",
  "tack_protocol",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "tack-adapter-opencode"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "serde_json",
  "tack_protocol",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "tack-cli"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "serde_json",
  "tack-adapter-claude",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "tack-hook"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "rustix",
  "serde_json",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "tack-luau"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "mlua",
  "serde",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "tack_daemon"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "rustix",
  "serde_json",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "tack_protocol"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "tack_sdk"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 
 [[package]]
 name = "tokio"
