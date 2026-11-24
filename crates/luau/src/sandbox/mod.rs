@@ -89,11 +89,6 @@ impl Sandbox {
     ) -> Result<Self, EngineError> {
         capabilities.validate()?;
         let lua = Lua::new();
-
-        if limits.memory_bytes < lua.used_memory() {
-            return Err(EngineError::Limit(LimitCause::Memory));
-        }
-
         lua.set_memory_limit(limits.memory_bytes)?;
         let state = require::RequireState::new(folder)
             .map_err(|message| EngineError::Load(LoadCause::Message(message)))?;

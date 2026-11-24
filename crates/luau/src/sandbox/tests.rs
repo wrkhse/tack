@@ -303,6 +303,25 @@ fn a_memory_hog_is_limited_by_the_ceiling() {
 }
 
 #[test]
+fn a_top_level_allocation_is_limited_by_the_ceiling_during_load() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"local hog = string.rep("x", 32 * 1024 * 1024)
+return { name = "startup-hog", size = #hog }"#,
+    );
+
+    let error = Sandbox::new(
+        scratch.path(),
+        Limits::new(DEFAULT_MEMORY_BYTES, 1000).expect("valid limits"),
+        Capabilities::default(),
+    )
+    .expect_err("top-level allocation is refused");
+
+    assert_eq!(error, EngineError::Limit(LimitCause::Memory));
+}
+
+#[test]
 fn limits_refuse_ceilings_below_the_vm_baseline() {
     for bytes in [0, DEFAULT_MEMORY_BYTES - 1] {
         assert_eq!(

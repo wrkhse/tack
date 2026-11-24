@@ -86,10 +86,18 @@ impl From<mlua::Error> for EngineError {
         if let Some(cause) = error.downcast_ref::<Self>() {
             return cause.clone();
         }
-        match &error {
-            mlua::Error::MemoryError(_) => Self::Limit(LimitCause::Memory),
-            _ => Self::Script(error.to_string()),
+        // A memory error raised inside a callback, such as the require loader
+        // running the entry chunk, arrives wrapped in a CallbackError.
+        let out_of_memory = error.chain().any(|link| {
+            matches!(
+                link.downcast_ref::<mlua::Error>(),
+                Some(mlua::Error::MemoryError(_))
+            )
+        });
+        if out_of_memory {
+            return Self::Limit(LimitCause::Memory);
         }
+        Self::Script(error.to_string())
     }
 }
 
