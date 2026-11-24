@@ -574,3 +574,274 @@ jobs:
           name: slice-2-recording
           path: demo-claude.gif
           if-no-files-found: error
+
+  record-pi:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TARGET: x86_64-unknown-linux-gnu
+      PI_VERSION: "1.6.0"
+    steps:
+      - name: Require a tag
+        run: |
+          set -euo pipefail
+
+          if [ -z "$TAG" ]; then
+            echo 'record: TAG is empty; dispatch with a tag or publish a release' >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+
+      - name: Install the recording prerequisites
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends ffmpeg
+          sudo apt-get install -y fonts-dejavu-core fontconfig
+          fc-cache -f
+
+          cd "$RUNNER_TEMP"
+          curl -fsSLO \
+            https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          sha='02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239'
+          echo "$sha  zig-x86_64-linux-0.15.2.tar.xz" | sha256sum -c -
+          tar -xf zig-x86_64-linux-0.15.2.tar.xz
+          zigdir="$RUNNER_TEMP/zig-x86_64-linux-0.15.2"
+          echo "$zigdir" >> "$GITHUB_PATH"
+          export PATH="$zigdir:$PATH"
+          zig version
+
+          cargo install --locked --version 1.2.1 terminal-control
+          termctrl --version
+
+          {
+            echo "--- fc-list ---"
+            fc-list | head -20
+            echo "--- save help ---"
+            termctrl save --help
+            echo "--- video help ---"
+            termctrl video --help
+          } > termctrl-font-diagnostics.txt 2>&1
+          cat termctrl-font-diagnostics.txt
+
+      - name: Font probe
+        run: |
+          set -euo pipefail
+
+          printf 'FONT_PROBE_VISIBLE\n' | \
+            termctrl save --pipe --format png --cols 100 --rows 10 \
+              --pixel-ratio 1 --padding 0 \
+              --font-family 'DejaVu Sans Mono' --out fontprobe -- cat
+
+      - name: Install the rc binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          cd "$RUNNER_TEMP"
+          mkdir -p tack-release tack-bin
+          cd tack-release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "tack-$TAG-$TARGET.tar.gz"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "SHA256SUMS"
+          grep -F "tack-$TAG-$TARGET.tar.gz" SHA256SUMS | sha256sum -c -
+          tar -xzf "tack-$TAG-$TARGET.tar.gz" -C "$RUNNER_TEMP/tack-bin"
+          tar -tzf "tack-$TAG-$TARGET.tar.gz" > "$RUNNER_TEMP/tack-files.txt"
+          grep -qx 'tack' "$RUNNER_TEMP/tack-files.txt"
+          grep -qx 'tack-daemon' "$RUNNER_TEMP/tack-files.txt"
+          grep -qx 'tack-hook' "$RUNNER_TEMP/tack-files.txt"
+
+          echo "$RUNNER_TEMP/tack-bin" >> "$GITHUB_PATH"
+          {
+            echo "TACK_CLI=$RUNNER_TEMP/tack-bin/tack"
+            echo "TACK_DAEMON_BIN=$RUNNER_TEMP/tack-bin/tack-daemon"
+            echo "TACK_HOOK_BIN=$RUNNER_TEMP/tack-bin/tack-hook"
+          } >> "$GITHUB_ENV"
+          export PATH="$RUNNER_TEMP/tack-bin:$PATH"
+          actual="$(tack --version)"
+          expected="tack ${TAG#v}"
+          echo "tack --version: $actual"
+          echo "expected:       $expected"
+          if [ "$actual" != "$expected" ]; then
+            echo "tack --version printed '$actual', expected '$expected'" >&2
+            exit 1
+          fi
+
+      - name: Install Pi
+        run: |
+          set -euo pipefail
+
+          npm ci --prefix test/pi --ignore-scripts
+          bin="$GITHUB_WORKSPACE/test/pi/node_modules/.bin"
+          echo "$bin" >> "$GITHUB_PATH"
+          export PATH="$bin:$PATH"
+
+          version="$(pi --version)"
+          echo "$version"
+          if [ "$version" != "$PI_VERSION" ]; then
+            echo "pi reports $version, expected $PI_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Record the session
+        run: |
+          set -euo pipefail
+
+          mkdir -p frames
+
+          termctrl start pi-rec --cols 160 --rows 42 \
+            --record run-pi.termctrl -- \
+            node test/e2e/record-pi.mjs
+          termctrl wait pi-rec "Pi session" --timeout 30000
+          termctrl mark pi-rec ready
+          termctrl save pi-rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --out frames/01-ready
+
+          termctrl wait pi-rec "tack: push blocked" --timeout 30000
+          termctrl mark pi-rec denied
+          termctrl save pi-rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --out frames/02-denied
+          termctrl wait pi-rec "guard_status: daemon ok" --timeout 30000
+          termctrl mark pi-rec tool
+          termctrl save pi-rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --out frames/03-tool
+          termctrl wait pi-rec "SESSION_DONE" --timeout 30000
+
+          proof="git log --oneline origin/main"
+          termctrl send pi-rec "text:$proof" enter
+          termctrl wait pi-rec "NO_PUSH_REACHED_ORIGIN" --timeout 30000
+          termctrl mark pi-rec proof
+          termctrl save pi-rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --out frames/04-proof
+
+          # Wait up to 5 s for verdict-pi.txt to reflect the evidence
+          # before the stop. This only waits; the exact verdict check below
+          # still gates the job.
+          for _ in $(seq 1 20); do
+            if grep -qx 'push_denied=true' verdict-pi.txt 2>/dev/null &&
+              grep -qx 'guard_status_ran=true' verdict-pi.txt 2>/dev/null &&
+              grep -qx 'no_push_recorded=true' verdict-pi.txt 2>/dev/null &&
+              grep -qx 'hook_called=true' verdict-pi.txt 2>/dev/null &&
+              grep -qx 'extension_loaded=true' verdict-pi.txt 2>/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          termctrl stop pi-rec
+
+      - name: Render the GIF
+        run: |
+          set -euo pipefail
+
+          termctrl video run-pi.termctrl \
+            --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --edit test/e2e/video-edit-pi.json --footer \
+            --out run-pi.mp4
+
+          filter="fps=10,scale=1000:-1:flags=lanczos,split[s0][s1];"
+          filter="${filter}[s0]palettegen=max_colors=32:stats_mode=diff[p];"
+          filter="${filter}[s1][p]paletteuse=dither=none"
+          ffmpeg -y -i run-pi.mp4 -vf "$filter" -loop 0 demo-pi.gif
+
+      - name: Check the verdict and the GIF
+        run: |
+          set -euo pipefail
+
+          test -s verdict-pi.txt
+          grep -qx 'push_denied=true' verdict-pi.txt
+          grep -qx 'guard_status_ran=true' verdict-pi.txt
+          grep -qx 'no_push_recorded=true' verdict-pi.txt
+          grep -qx 'hook_called=true' verdict-pi.txt
+          grep -qx 'extension_loaded=true' verdict-pi.txt
+
+          test -f demo-pi.gif
+          bytes="$(wc -c < demo-pi.gif)"
+          if [ "$bytes" -ge 3000000 ]; then
+            echo "demo-pi.gif too large: $bytes bytes" >&2
+            exit 1
+          fi
+
+          width="$(ffprobe -v error -select_streams v \
+            -show_entries stream=width -of csv=p=0 demo-pi.gif)"
+          if [ "$width" -gt 1200 ]; then
+            echo "demo-pi.gif too wide: $width" >&2
+            exit 1
+          fi
+
+      - name: Capture recording diagnostics (always)
+        if: always()
+        run: |
+          set +e
+
+          {
+            echo "--- at denied ---"
+            termctrl show --recording run-pi.termctrl --at-marker denied
+            echo "--- at tool ---"
+            termctrl show --recording run-pi.termctrl --at-marker tool
+            echo "--- at proof ---"
+            termctrl show --recording run-pi.termctrl --at-marker proof
+            echo "--- markers ---"
+            termctrl markers run-pi.termctrl
+            echo "--- verdict ---"
+            cat verdict-pi.txt
+          } > recording-diagnostics-pi.txt 2>&1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        if: always()
+        with:
+          name: slice-3-recording-debug
+          path: |
+            run-pi.termctrl
+            recording-diagnostics-pi.txt
+            termctrl-font-diagnostics.txt
+            fontprobe.png
+            verdict-pi.txt
+            demo-pi.gif
+            frames/*.png
+          if-no-files-found: warn
+
+      - name: Capture recording diagnostics
+        if: failure()
+        run: |
+          set +e
+
+          {
+            termctrl show pi-rec
+            echo "--- markers ---"
+            termctrl markers run-pi.termctrl
+            echo "--- session status ---"
+            termctrl status pi-rec
+            echo "--- artefacts ---"
+            ls -l verdict-pi.txt demo-pi.gif run-pi.termctrl frames
+          } > termctrl-diagnostics-pi.txt 2>&1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        if: failure()
+        with:
+          name: termctrl-diagnostics-pi
+          path: termctrl-diagnostics-pi.txt
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        with:
+          name: slice-3-recording
+          path: demo-pi.gif
+          if-no-files-found: error

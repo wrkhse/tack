@@ -1,8 +1,9 @@
 // Smoke test for one release tarball, run on that target's CI runner.
-// It unpacks into a throwaway HOME, checks the version, then drives the real
-// daemon with one NDJSON hook request twice: over its Unix socket directly,
-// and through the released tack-hook binary. Every wait has a deadline and
-// the daemon, the hook and the temp folder are always cleaned up.
+// It unpacks into a throwaway HOME, checks the version, builds the Pi
+// extension, then drives the real daemon with one NDJSON hook request twice:
+// over its Unix socket directly, and through the released tack-hook binary.
+// Every wait has a deadline and the daemon, the hook and the temp folder are
+// always cleaned up.
 
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
@@ -11,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const TOTAL_TIMEOUT_MS = 20_000;
+const PI_BUILD_TIMEOUT_MS = 5_000;
 const DAEMON_START_TIMEOUT_MS = 5_000;
 const REPLY_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 5_000;
@@ -83,6 +85,30 @@ function execVersion() {
   assert(result.status === 0, "tack --version failed: " + result.stderr.trim());
 
   return result.stdout;
+}
+
+function checkPiBuild() {
+  const out = path.join(home, "pi-dist");
+  const extension = path.join(out, "pi", "extension.js");
+
+  const result = spawnSync(
+    path.join(binDir, "tack"),
+    ["build", pluginDir, "--out", out, "--target", "pi"],
+    {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home },
+      timeout: PI_BUILD_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    },
+  );
+  assert(
+    result.status === 0,
+    "tack build --target pi failed: " + (result.error?.message ?? result.stderr.trim()),
+  );
+
+  const stat = statSync(extension, { throwIfNoEntry: false });
+  assert(stat?.isFile() && stat.size > 0, "missing or empty Pi extension: " + extension);
+  console.log("PASS tack build --target pi wrote " + extension);
 }
 
 function startDaemon() {
@@ -286,6 +312,7 @@ async function main() {
 
   unpack();
   checkVersion();
+  checkPiBuild();
   startDaemon();
   await waitForSocket();
 

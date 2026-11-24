@@ -49,6 +49,11 @@ under a header that ticks off each step.
   command on stdin, such as
   `git log --oneline origin/main; echo NO_PUSH_REACHED_ORIGIN`, and finishes
   6 seconds after it. video-edit-claude.json is its edit plan.
+- record-pi.mjs records Pi 1.6.0. It starts the loopback model from
+  test/pi/model.mjs and tack-daemon, creates a scratch git repo tracking a
+  local origin/main, and builds `fixtures/safe-push` with the released CLI
+  for `--target pi`. It runs `pi --mode json --no-extensions` with
+  `-e <dist>/pi/extension.js`. video-edit-pi.json is its edit plan.
 
 record-claude.mjs installs test/claude/git-shim as git and
 test/claude/mod-recorder as tack-hook, first on PATH, with the recorder file
@@ -86,3 +91,42 @@ started.
 record-claude.mjs runs only in the record workflow on a CI runner. It
 starts and stops processes, so never run it on a workstation, not even in a
 scratch folder.
+
+### Pi recording
+
+The recorder reads `TACK_CLI`, `TACK_DAEMON_BIN`, `TACK_HOOK_BIN`, and
+`RUNNER_TEMP` with the defaults in the table above. Pi gets an isolated
+HOME, XDG folders, `PI_CODING_AGENT_DIR`, `PI_OFFLINE=1`,
+`PI_SKIP_VERSION_CHECK=1`, and `PI_TELEMETRY=0`. Its `models.json` points
+the `scripted` model at a loopback OpenAI-compatible `/v1` endpoint with a
+dummy key. `TACK_STATE_DIR` is mode 0700 and holds `daemon.log`.
+`TACK_DAEMON_BIN` points to the release binary, `TACK_HOOK_BIN` to the
+wrapper that records successful calls, and `TACK_REAL_GIT` to real git.
+The git shim records attempted pushes in `TACK_RECORDER` and delegates
+other commands to real git.
+
+The recorder prints `Pi session` when ready and `SESSION_DONE` after Pi
+exits successfully. Send `git log --oneline origin/main` on stdin; the
+recorder prints `NO_PUSH_REACHED_ORIGIN` after that command exits 0 and
+the git shim shows no pushes. The model, build, session, and proof command
+have deadlines of 10, 10, 90, and 10 seconds, respectively.
+
+The recorder writes `verdict-pi.txt` at the repository root, also on setup
+failure. A passing run has these exact rows:
+
+    push_denied=true
+    guard_status_ran=true
+    no_push_recorded=true
+    hook_called=true
+    extension_loaded=true
+
+The first two rows require the exact Pi tool result and corresponding
+daemon log line. The next two require no git-shim push and at least one
+successful hook-wrapper call. The last requires exactly one Pi
+`entry_appended` event with a custom `tack-loaded` entry and empty data.
+The recorder cleans up its processes and scratch tree, then stays up for
+Terminal Control. It exits 0 only on proof success and an all-true verdict.
+
+Run record-pi.mjs only in the record workflow on a Linux CI runner. Never
+run the recorder, Pi, tack-hook, the daemon, or Terminal Control for this
+recording on a workstation. Use static checks on the host.
