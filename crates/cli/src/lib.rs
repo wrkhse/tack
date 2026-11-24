@@ -1,8 +1,8 @@
 //! Public API for the tack build pipeline.
 //!
 //! The CLI assembles a sandbox, validates a plugin's needs, and renders the
-//! `OpenCode` wrapper or the Claude Code mod. No daemon, agent, or child process
-//! starts here.
+//! `OpenCode` wrapper, Claude Code mod, or Pi extension. No daemon, agent, or
+//! child process starts here.
 
 use std::error::Error;
 use std::fmt;
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use tack_adapter_claude::{ModConfig, ModError};
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
+use tack_adapter_pi::{EXTENSION_JS, ExtensionError};
 use tack_luau::{Capabilities, EngineError, Limits, Sandbox};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest};
 use tack_protocol::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
@@ -35,6 +36,7 @@ pub enum BuildError {
     Manifest(serde_json::Error),
     Render(WrapperError),
     RenderMod(ModError),
+    RenderExtension(ExtensionError),
     Io(std::io::Error),
 }
 
@@ -46,6 +48,7 @@ impl fmt::Display for BuildError {
             Self::Manifest(error) => write!(f, "manifest:{error}"),
             Self::Render(error) => write!(f, "render:{error}"),
             Self::RenderMod(error) => write!(f, "render:{error}"),
+            Self::RenderExtension(error) => write!(f, "render:{error}"),
             Self::Io(error) => write!(f, "io:{error}"),
         }
     }
@@ -59,6 +62,7 @@ impl Error for BuildError {
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
             Self::RenderMod(error) => Some(error),
+            Self::RenderExtension(error) => Some(error),
             Self::Io(error) => Some(error),
         }
     }
@@ -198,6 +202,26 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
     }
 
     Ok(written)
+}
+
+/// Read one plugin, check its needs, and emit `<out>/pi/extension.js`.
+///
+/// # Errors
+/// Returns [`BuildError::Io`] when the plugin folder or output file cannot be
+/// read or written, [`BuildError::Sandbox`] when the plugin cannot be loaded
+/// or read, [`BuildError::Manifest`] when the manifest does not match the wire
+/// contract, [`BuildError::NeedMissing`] for an unsupported need, and
+/// [`BuildError::RenderExtension`] when the extension cannot be rendered.
+pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
+    let (plugin_dir, _) = load(plugin_dir)?;
+    let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
+
+    let dest = out.join("pi");
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    let extension = dest.join(EXTENSION_JS);
+    std::fs::write(&extension, script).map_err(BuildError::Io)?;
+
+    Ok(extension)
 }
 
 #[cfg(test)]

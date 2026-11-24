@@ -12,7 +12,7 @@ use tack_protocol::wire::{DenyReason, PluginManifest, ToolDef};
 
 const GOLDEN: &str = include_str!("../golden/register.js");
 
-const REASONS: [&str; 12] = [
+const REASONS: [&str; 13] = [
     "socket_missing",
     "timeout",
     "socket_closed",
@@ -25,6 +25,7 @@ const REASONS: [&str; 12] = [
     "aborted",
     "unsupported_hook",
     "socket_untrusted",
+    "hook_missing",
 ];
 
 fn manifest() -> PluginManifest {

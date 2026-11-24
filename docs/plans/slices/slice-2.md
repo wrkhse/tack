@@ -190,7 +190,7 @@ impl Failure {
 ```
 
 The daemon sends the first seven `ReplyError` classes; the hook writes the
-transport kinds itself. `DenyReason::ALL` lists the twelve reasons a client
+transport kinds itself. `DenyReason::ALL` lists the thirteen reasons a client
 may deny with:
 
 ```rust
@@ -209,6 +209,7 @@ pub enum ReplyError {
     DaemonError,
     Aborted,
     SocketUntrusted,
+    HookMissing,
 }
 ```
 

@@ -1,5 +1,15 @@
 [workspace]
-members = ["crates/protocol", "crates/luau", "crates/daemon", "crates/sdk", "adapters/opencode", "adapters/claude", "crates/cli", "crates/hook"]
+members = [
+    "crates/protocol",
+    "crates/luau",
+    "crates/daemon",
+    "crates/sdk",
+    "adapters/opencode",
+    "adapters/claude",
+    "adapters/pi",
+    "crates/cli",
+    "crates/hook",
+]
 resolver = "3"
 
 [workspace.package]

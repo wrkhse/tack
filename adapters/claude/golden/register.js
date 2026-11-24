@@ -4,7 +4,7 @@
 const TOOLS = [{"description":"Reports whether the tack daemon is running","inputSchema":{"type":"object"},"isDeferred":false,"name":"guard_status"}];
 const HOOK_BIN = "tack-hook";
 const PLUGIN_DIR = "/plugins/safe-push";
-const DENY_REASONS = ["socket_missing","timeout","socket_closed","malformed_reply","protocol_version","limit","script","unknown_tool","daemon_error","aborted","unsupported_hook","socket_untrusted"];
+const DENY_REASONS = ["socket_missing","timeout","socket_closed","malformed_reply","protocol_version","limit","script","unknown_tool","daemon_error","aborted","unsupported_hook","socket_untrusted","hook_missing"];
 const PROTOCOL_VERSION = 1;
 const BUDGET_MS = 9000;
 const TOOL_PREFIX = "mcp__tack__";

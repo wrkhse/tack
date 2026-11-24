@@ -367,12 +367,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tack-adapter-pi"
+version = "0.1.0-rc.3"
+dependencies = [
+ "serde_json",
+ "tack_protocol",
+]
+
+[[package]]
 name = "tack-cli"
 version = "0.1.0-rc.3"
 dependencies = [
  "serde_json",
  "tack-adapter-claude",
  "tack-adapter-opencode",
+ "tack-adapter-pi",
  "tack-luau",
  "tack_protocol",
 ]
