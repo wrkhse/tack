@@ -211,6 +211,39 @@ fn a_hook_can_replace_a_payload_with_scalar_or_null_host_context() {
 }
 
 #[test]
+fn a_non_object_host_context_is_only_exposed_as_ctx_host() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"
+        return {
+            name = "host",
+            inspect = function(payload, ctx)
+                return ctx.rewrite({ host = ctx.host, leaked = ctx[1] })
+            end,
+        }
+        "#,
+    );
+    let sandbox = Sandbox::new(scratch.path(), default_limits(), Capabilities::default())
+        .expect("fixture loads");
+
+    for context in [json!("text"), json!(7), json!(["first", "second"])] {
+        let invocation = Invocation {
+            hook: "inspect".into(),
+            payload: Value::Null,
+            context: context.clone(),
+        };
+
+        assert_eq!(
+            sandbox.hook(&invocation, DEFAULT_DEADLINE_MS),
+            Ok(Outcome::Rewrite {
+                payload: json!({ "host": context })
+            })
+        );
+    }
+}
+
+#[test]
 fn host_context_fields_cannot_override_helpers_or_capabilities() {
     let scratch = Scratch::new();
     scratch.write(

@@ -291,6 +291,29 @@ mod tests {
     }
 
     #[test]
+    fn lua_to_json_converts_a_float_to_the_exact_json_number() {
+        assert_eq!(
+            lua_to_json(LuaValue::Number(1.5), 0),
+            Ok(serde_json::json!(1.5))
+        );
+        assert_eq!(
+            lua_to_json(LuaValue::Number(f64::NAN), 0),
+            Err(EngineError::InvalidResult("non-finite Lua number".into()))
+        );
+    }
+
+    #[test]
+    fn lua_to_json_maps_only_the_null_light_userdata_to_null() {
+        assert_eq!(lua_to_json(LuaValue::NULL, 0), Ok(Value::Null));
+
+        let pointer = std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr();
+        assert_eq!(
+            lua_to_json(LuaValue::LightUserData(mlua::LightUserData(pointer)), 0),
+            Err(EngineError::InvalidResult("unsupported Lua value".into()))
+        );
+    }
+
+    #[test]
     fn lua_table_to_json_refuses_a_sparse_array() {
         let lua = Lua::new();
         let table = lua.create_table().unwrap();

@@ -406,6 +406,58 @@ mod tests {
     }
 
     #[test]
+    fn hook_allow_returns_a_wire_allow() {
+        let folder = PluginFolder::new(
+            r#"
+            return {
+                name = "allow-test",
+                toolBefore = function(payload, ctx)
+                    if ctx.tool == "shell" and payload.command == "ls" then
+                        return ctx.allow()
+                    end
+                    return ctx.deny("unexpected invocation")
+                end,
+            }
+            "#,
+        );
+        let sandbox = sandbox(&folder.0);
+
+        assert_eq!(
+            dispatch(&sandbox, shell_request(json!({ "command": "ls" }))),
+            Reply::Hook {
+                id: 7,
+                version: PROTOCOL_VERSION,
+                outcome: Outcome::Allow,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_tool_returns_a_wire_unknown_tool_error() {
+        let folder = PluginFolder::new(
+            r#"
+            return {
+                name = "unknown-tool-test",
+                tools = {
+                    known = { run = function() return { content = {} } end },
+                },
+            }
+            "#,
+        );
+        let sandbox = sandbox(&folder.0);
+
+        assert_eq!(
+            dispatch(&sandbox, tool_request("missing_tool")),
+            Reply::Error {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::UnknownTool,
+                message: "tack: unknown tool: missing_tool".into(),
+            }
+        );
+    }
+
+    #[test]
     fn state_dir_follows_the_environment_precedence() {
         assert_eq!(
             state_dir_from(Some("/custom"), Some("/xdg"), Some("/home/u")).unwrap(),
