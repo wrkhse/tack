@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { isDeepStrictEqual, parseArgs } from "node:util";
+import { isDeepStrictEqual } from "node:util";
 
 const here = fileURLToPath(new URL("./", import.meta.url));
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -594,17 +594,6 @@ async function runCase(pi, expected, root, target, check) {
 async function main() {
   if (process.platform !== "linux") throw new Error("Pi conformance requires disposable Linux");
 
-  const { values } = parseArgs({
-    options: { only: { type: "string" }, repeat: { type: "string", default: "1" } },
-  });
-  const selected = values.only === undefined ? cases : cases.filter(({ name }) => name === values.only);
-  const repeat = Number(values.repeat);
-
-  if (selected.length === 0) throw new Error("unknown Pi conformance case: " + values.only);
-  if (!/^\d+$/.test(values.repeat) || !Number.isSafeInteger(repeat) || repeat < 1) {
-    throw new Error("--repeat must be a positive integer");
-  }
-
   const pi = findExecutable("pi", process.env.PATH ?? "");
   if (!pi) throw new Error("pi is not on PATH");
 
@@ -615,25 +604,19 @@ async function main() {
   const rows = [];
   let failed = false;
 
-  for (const expected of selected) {
-    const caseArtifacts = path.join(artifacts, expected.name);
+  for (const expected of cases) {
+    const check = (label, ok, evidence) => {
+      failed ||= ok !== true;
+      const row = (ok === true ? "PASS " : "FAIL ") + expected.name + ": " + label;
+      rows.push(row);
+      console.log(row);
+      if (ok !== true) console.error("  evidence: " + JSON.stringify(evidence)?.slice(0, 4000));
+    };
 
-    for (let iteration = 1; iteration <= repeat; iteration += 1) {
-      const name = `${expected.name} [${iteration}/${repeat}]`;
-      const target = repeat === 1 ? caseArtifacts : path.join(caseArtifacts, String(iteration));
-      const check = (label, ok, evidence) => {
-        failed ||= ok !== true;
-        const row = (ok === true ? "PASS " : "FAIL ") + name + ": " + label;
-        rows.push(row);
-        console.log(row);
-        if (ok !== true) console.error("  evidence: " + JSON.stringify(evidence)?.slice(0, 4000));
-      };
-
-      try {
-        await runCase(pi, expected, root, target, check);
-      } catch (error) {
-        check("conformance evidence and cleanup", false, String(error.stack ?? error));
-      }
+    try {
+      await runCase(pi, expected, root, path.join(artifacts, expected.name), check);
+    } catch (error) {
+      check("conformance evidence and cleanup", false, String(error.stack ?? error));
     }
   }
 
