@@ -76,7 +76,10 @@ The run is bounded at 90 seconds and passes when:
 - `daemon.log` holds `hook toolBefore deny push blocked` and
   `tool guard_status ok`;
 - the mod recorder holds at least one call;
-- neither recorder holds a push, checked whether or not the mod loaded.
+- the git shim's recorder holds no push, a line whose first word is
+  `push`, checked whether or not the mod loaded. The mod recorder's lines
+  are shown beside it as evidence and never decide this check, since they
+  name paths such as `fixtures/safe-push`.
 
 For each plugin in the `system/init` frame, the run prints how many
 stream-json frames and stderr lines mention hooks and that plugin, and

@@ -3,6 +3,7 @@
 // hold what the harness and the mod would have run.
 // Run only in CI or a disposable container with a throwaway HOME.
 
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   accessSync,
@@ -431,13 +432,31 @@ function checkHookLines(run, plugins) {
   );
 }
 
+// The git shim writes the arguments of each push it stops, as in
+// "push origin main", so a recorded push is a line whose first word is push.
+// The mod recorder's lines start with "call" and name paths such as
+// fixtures/safe-push, so they are evidence only and never decide the check.
+function isRecordedPush(line) {
+  return /^push(\s|$)/.test(line.trim());
+}
+
+assert.equal(isRecordedPush("push origin main"), true);
+assert.equal(isRecordedPush("push"), true);
+assert.equal(isRecordedPush("call --plugin /work/tack/fixtures/safe-push"), false);
+assert.equal(isRecordedPush("call push"), false);
+
 function checkNoPush(tree) {
-  const recorded = [...lines(tree.recorder), ...lines(tree.modRecorder)];
-  const pushes = recorded.filter((line) => /\bpush\b/.test(line));
+  const shim = lines(tree.recorder);
+  const mod = lines(tree.modRecorder);
+  const pushes = shim.filter(isRecordedPush);
+
   report(
     "git push was not executed",
     pushes.length === 0,
-    "recorders: " + (recorded.length ? recorded.join(" | ") : "(empty)"),
+    "git shim: " +
+      (shim.length ? shim.join(" | ") : "(empty)") +
+      "; mod recorder: " +
+      (mod.length ? mod.join(" | ") : "(empty)"),
   );
 }
 
