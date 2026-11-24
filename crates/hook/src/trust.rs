@@ -142,6 +142,10 @@ fn untrusted(message: impl std::fmt::Display) -> Attempt {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
     use super::*;
 
     const EUID: u32 = 501;
@@ -214,6 +218,57 @@ mod tests {
         assert_eq!(
             judge(SOCKET, EUID, stat(0, SOCK | 0o666)),
             Err(Distrust::Owner { uid: 0 })
+        );
+    }
+
+    /// A folder under the temp dir, removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("tack-trust-{}-{name}", std::process::id()));
+
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::set_permissions(&path, Permissions::from_mode(0o700)).unwrap();
+
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn kind(attempt: Result<(), Attempt>) -> Result<(), Option<ReplyError>> {
+        attempt.map_err(|attempt| match attempt {
+            Attempt::Absent(_) => None,
+            Attempt::Failed(failure) => Some(failure.kind),
+        })
+    }
+
+    #[test]
+    fn a_private_dir_without_a_socket_is_absent_so_a_cold_start_may_follow() {
+        let dir = Scratch::new("absent");
+
+        assert_eq!(kind(verify(&dir.0.join("tack.sock"))), Err(None));
+    }
+
+    #[test]
+    fn a_stat_that_fails_other_than_not_found_is_untrusted() {
+        let dir = Scratch::new("not-a-dir");
+        let file = dir.0.join("file");
+        std::fs::write(&file, b"").unwrap();
+
+        // The state folder lies under a regular file, so its stat fails with
+        // "not a directory", which no cold start can fix.
+        let socket = file.join("state").join("tack.sock");
+
+        assert_eq!(
+            kind(verify(&socket)),
+            Err(Some(ReplyError::SocketUntrusted))
         );
     }
 }

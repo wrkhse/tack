@@ -140,3 +140,45 @@ pub fn check(reply: &[u8], request: &Request) -> Result<(), Failure> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tack_protocol::wire::{self, Outcome};
+
+    #[test]
+    fn a_missing_socket_is_socket_missing_and_a_refusing_one_socket_closed() {
+        let socket = Path::new("/run/tack/tack.sock");
+
+        let missing = Attempt::Absent(io::Error::from(ErrorKind::NotFound)).into_failure(socket);
+        let refused =
+            Attempt::Absent(io::Error::from(ErrorKind::ConnectionRefused)).into_failure(socket);
+
+        assert_eq!(missing.kind, ReplyError::SocketMissing);
+        assert_eq!(refused.kind, ReplyError::SocketClosed);
+    }
+
+    #[tokio::test]
+    async fn a_reply_of_exactly_the_frame_limit_is_read_whole() {
+        let mut line = wire::encode_line(&Reply::Hook {
+            id: 1,
+            version: PROTOCOL_VERSION,
+            outcome: Outcome::Allow,
+        })
+        .unwrap();
+        line.pop();
+        line.resize(MAX_FRAME_BYTES.checked_sub(1).unwrap(), b' ');
+        line.push(b'\n');
+        assert_eq!(line.len(), MAX_FRAME_BYTES);
+
+        let (mut daemon, mut hook) = UnixStream::pair().unwrap();
+        let sent = line.clone();
+        let writer = tokio::spawn(async move { daemon.write_all(&sent).await });
+
+        let reply = read_reply(&mut hook).await;
+
+        writer.await.unwrap().unwrap();
+        assert_eq!(reply, Ok(line));
+    }
+}

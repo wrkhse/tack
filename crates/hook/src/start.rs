@@ -122,3 +122,32 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_state_path_that_is_a_file_fails_before_any_process_starts() {
+        let file =
+            std::env::temp_dir().join(format!("tack-hook-start-{}.file", std::process::id()));
+        std::fs::write(&file, b"").unwrap();
+
+        // The bin does not exist either, so no process could start even if
+        // spawn reached the command.
+        let launch = Launch {
+            bin: file.with_extension("missing-bin"),
+            socket: file.with_extension("sock"),
+            plugin: file.with_extension("plugin"),
+            state: file.clone(),
+        };
+
+        let result = launch.spawn();
+        let _ = std::fs::remove_file(&file);
+
+        assert_eq!(
+            result.map_err(|failure| failure.kind),
+            Err(ReplyError::DaemonError)
+        );
+    }
+}
