@@ -1,0 +1,70 @@
+name: pi
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  conformance:
+    name: conformance (pi)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PI_VERSION: "1.6.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+
+      - name: Install Pi
+        run: |
+          set -euo pipefail
+
+          prefix="$RUNNER_TEMP/pi-npm"
+          npm install --global --prefix "$prefix" --no-audit --no-fund \
+            "@earendil-works/pi-coding-agent@$PI_VERSION"
+
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          export PATH="$prefix/bin:$PATH"
+
+          version="$(pi --version)"
+          echo "$version"
+          if [ "$version" != "$PI_VERSION" ]; then
+            echo "pi reports $version, expected $PI_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build tack
+        run: |
+          set -euo pipefail
+
+          cargo build --workspace --bins --locked
+          echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+      - run: tack build fixtures/safe-push --out dist --target pi
+      - run: node adapters/pi/extension.test.mjs
+      # The runner supplies a dummy key and a fresh loopback model for each case.
+      - run: node test/pi/run.mjs
+        env:
+          TACK_PI_ARTIFACTS: ${{ runner.temp }}/pi-artifacts
+
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-pi
+          path: ${{ runner.temp }}/pi-artifacts
+          if-no-files-found: ignore

@@ -16,6 +16,7 @@ tack_protocol = { path = "../protocol" }
 tack-luau = { path = "../luau" }
 tack-adapter-opencode = { path = "../../adapters/opencode" }
 tack-adapter-claude = { path = "../../adapters/claude" }
+tack-adapter-pi = { path = "../../adapters/pi" }
 
 [lints]
 workspace = true
