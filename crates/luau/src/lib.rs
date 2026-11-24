@@ -1,4 +1,4 @@
-//! A Luau sandbox with a scoped module loader and host-supplied capabilities.
+#![doc = include_str!("../README.md")]
 
 pub mod api;
 mod require;

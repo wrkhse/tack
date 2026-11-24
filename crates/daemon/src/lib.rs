@@ -5,7 +5,9 @@ pub mod transport;
 
 use std::path::{Path, PathBuf};
 
-use tack_luau::{EngineError, Sandbox, api};
+use serde_json::{Value, json};
+use tack_luau::api::{Invocation, Outcome as EngineOutcome};
+use tack_luau::{EngineError, Sandbox};
 use tack_protocol::wire::{
     Content, DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request, ToolCall,
 };
@@ -59,13 +61,9 @@ fn reply_error(id: u64, error: &EngineError) -> Reply {
     let kind = match error {
         EngineError::Limit(_) => ReplyError::Limit,
         EngineError::UnknownTool(_) => ReplyError::UnknownTool,
-        EngineError::Load(_)
-        | EngineError::Script(_)
-        | EngineError::Capability { .. }
-        | EngineError::InvalidResult(_)
-        | EngineError::Poisoned => ReplyError::Script,
+        _ => ReplyError::Script,
     };
-    let message = error.to_string();
+    let message = format!("tack: {error}");
 
     eprintln!("tack-daemon: engine error {message}");
 
@@ -88,92 +86,324 @@ fn version_error(id: u64, version: u32) -> Reply {
     }
 }
 
+fn merge_rewrite(input: Value, payload: Value) -> Result<Outcome, EngineError> {
+    let (Value::Object(mut input), Value::Object(payload)) = (input, payload) else {
+        return Err(EngineError::InvalidResult(
+            "hook rewrite requires object input and payload".into(),
+        ));
+    };
+
+    input.extend(payload);
+
+    Ok(Outcome::Rewrite {
+        input: Value::Object(input),
+    })
+}
+
+fn dispatch_hook(sandbox: &Sandbox, id: u64, hook: String, call: ToolCall) -> Reply {
+    if hook != "toolBefore" {
+        eprintln!("tack-daemon: hook {hook} unsupported");
+
+        return Reply::Error {
+            id,
+            version: PROTOCOL_VERSION,
+            error: ReplyError::UnsupportedHook,
+            message: format!("unsupported_hook:{hook}"),
+        };
+    }
+
+    let ToolCall {
+        tool,
+        name,
+        input,
+        session_id,
+    } = call;
+    let invocation = Invocation {
+        hook,
+        payload: input,
+        context: json!({ "tool": tool, "name": name, "session_id": session_id }),
+    };
+    let outcome =
+        sandbox
+            .hook(&invocation, DEFAULT_DEADLINE_MS)
+            .and_then(|outcome| match outcome {
+                EngineOutcome::Allow => {
+                    eprintln!("tack-daemon: hook toolBefore allow");
+
+                    Ok(Outcome::Allow)
+                }
+                EngineOutcome::Deny { reason } => {
+                    eprintln!("tack-daemon: hook toolBefore deny {reason}");
+
+                    Ok(Outcome::Deny { reason })
+                }
+                EngineOutcome::Rewrite { payload } => {
+                    let outcome = merge_rewrite(invocation.payload, payload)?;
+                    eprintln!("tack-daemon: hook toolBefore rewrite");
+
+                    Ok(outcome)
+                }
+                _ => Err(EngineError::InvalidResult(
+                    "unsupported hook outcome".into(),
+                )),
+            });
+
+    match outcome {
+        Ok(outcome) => Reply::Hook {
+            id,
+            version: PROTOCOL_VERSION,
+            outcome,
+        },
+        Err(error) => reply_error(id, &error),
+    }
+}
+
+fn decode_tool_content(result: Value) -> Result<Vec<Content>, EngineError> {
+    let Value::Object(mut result) = result else {
+        return Err(EngineError::InvalidResult(
+            "tool must return a table".into(),
+        ));
+    };
+    let content = result
+        .remove("content")
+        .ok_or_else(|| EngineError::InvalidResult("tool result needs content".into()))?;
+
+    // The engine represents an empty Luau table as an object.
+    if matches!(&content, Value::Object(table) if table.is_empty()) {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_value(content)
+        .map_err(|error| EngineError::InvalidResult(format!("invalid tool content: {error}")))
+}
+
+fn dispatch_tool(sandbox: &Sandbox, id: u64, name: &str, input: &Value) -> Reply {
+    let content = sandbox
+        .run(name, input, DEFAULT_DEADLINE_MS)
+        .and_then(decode_tool_content);
+
+    match content {
+        Ok(content) => {
+            eprintln!("tack-daemon: tool {name} ok");
+
+            Reply::Tool {
+                id,
+                version: PROTOCOL_VERSION,
+                content,
+            }
+        }
+        Err(error) => reply_error(id, &error),
+    }
+}
+
 pub fn dispatch(sandbox: &Sandbox, request: Request) -> Reply {
-    let id = request.id();
     let version = request.version();
 
     if version != PROTOCOL_VERSION {
-        return version_error(id, version);
+        return version_error(request.id(), version);
     }
 
     match request {
-        Request::Hook { id, hook, call, .. } => {
-            if hook != "toolBefore" {
-                eprintln!("tack-daemon: hook {hook} unsupported");
-
-                return Reply::Error {
-                    id,
-                    version: PROTOCOL_VERSION,
-                    error: ReplyError::UnsupportedHook,
-                    message: format!("unsupported_hook:{hook}"),
-                };
-            }
-
-            let ToolCall {
-                tool,
-                name,
-                input,
-                session_id,
-            } = call;
-            let call = api::Call {
-                tool,
-                name,
-                input,
-                session_id,
-            };
-
-            match sandbox.hook("toolBefore", &call, DEFAULT_DEADLINE_MS) {
-                Ok(outcome) => {
-                    let outcome = match outcome {
-                        api::Outcome::Allow => {
-                            eprintln!("tack-daemon: hook toolBefore allow");
-
-                            Outcome::Allow
-                        }
-                        api::Outcome::Deny { reason } => {
-                            eprintln!("tack-daemon: hook toolBefore deny {reason}");
-
-                            Outcome::Deny { reason }
-                        }
-                        api::Outcome::Rewrite { input } => {
-                            eprintln!("tack-daemon: hook toolBefore rewrite");
-
-                            Outcome::Rewrite { input }
-                        }
-                    };
-
-                    Reply::Hook {
-                        id,
-                        version: PROTOCOL_VERSION,
-                        outcome,
-                    }
-                }
-                Err(error) => reply_error(id, &error),
-            }
-        }
+        Request::Hook { id, hook, call, .. } => dispatch_hook(sandbox, id, hook, call),
         Request::Tool {
             id, name, input, ..
-        } => match sandbox.tool(&name, &input, DEFAULT_DEADLINE_MS) {
-            Ok(content) => {
-                eprintln!("tack-daemon: tool {name} ok");
-
-                Reply::Tool {
-                    id,
-                    version: PROTOCOL_VERSION,
-                    content: content
-                        .into_iter()
-                        .map(|api::Content { kind, text }| Content { kind, text })
-                        .collect(),
-                }
-            }
-            Err(error) => reply_error(id, &error),
-        },
+        } => dispatch_tool(sandbox, id, &name, &input),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    use tack_luau::{Capabilities, Limits};
+    use tack_protocol::wire::DEFAULT_MEMORY_BYTES;
+
     use super::*;
+
+    static NEXT_PLUGIN: AtomicU64 = AtomicU64::new(0);
+
+    struct PluginFolder(PathBuf);
+
+    impl PluginFolder {
+        fn new(source: &str) -> Self {
+            let nanos = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos();
+            let seq = NEXT_PLUGIN.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "tack-dispatch-{}-{nanos}-{seq}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+
+            let folder = Self(path);
+            fs::write(folder.0.join("plugin.luau"), source).unwrap();
+
+            folder
+        }
+    }
+
+    impl Drop for PluginFolder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sandbox(folder: &Path) -> Sandbox {
+        let limits = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS).unwrap();
+
+        Sandbox::new(folder, limits, Capabilities::default()).unwrap()
+    }
+
+    fn shell_request(input: Value) -> Request {
+        Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "bash".into(),
+                input,
+                session_id: Some("s-1".into()),
+            },
+        }
+    }
+
+    fn tool_request(name: &str) -> Request {
+        Request::Tool {
+            id: 8,
+            version: PROTOCOL_VERSION,
+            name: name.into(),
+            input: json!({}),
+        }
+    }
+
+    #[test]
+    fn shell_rewrite_preserves_other_input_fields() {
+        let folder = PluginFolder::new(
+            r#"
+            return {
+                name = "rewrite-test",
+                toolBefore = function(payload, ctx)
+                    if ctx.tool == "shell" and ctx.name == "bash"
+                        and ctx.session_id == "s-1" and payload.command == "pwd" then
+                        return ctx.rewrite({ command = "pwd -P" })
+                    end
+                    return ctx.deny("unexpected invocation")
+                end,
+            }
+            "#,
+        );
+        let sandbox = sandbox(&folder.0);
+
+        let reply = dispatch(
+            &sandbox,
+            shell_request(json!({ "command": "pwd", "cwd": "/repo", "timeout": 5000 })),
+        );
+
+        assert_eq!(
+            reply,
+            Reply::Hook {
+                id: 7,
+                version: PROTOCOL_VERSION,
+                outcome: Outcome::Rewrite {
+                    input: json!({ "command": "pwd -P", "cwd": "/repo", "timeout": 5000 }),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn non_object_rewrites_fail_closed() {
+        let folder = PluginFolder::new(
+            r#"
+            return {
+                name = "rewrite-test",
+                toolBefore = function(payload, ctx)
+                    if type(payload) ~= "table" then
+                        return ctx.rewrite({ command = "pwd" })
+                    end
+                    return ctx.rewrite("pwd")
+                end,
+            }
+            "#,
+        );
+        let sandbox = sandbox(&folder.0);
+
+        for input in [json!("pwd"), json!({ "command": "pwd" })] {
+            assert_eq!(
+                dispatch(&sandbox, shell_request(input)),
+                Reply::Error {
+                    id: 7,
+                    version: PROTOCOL_VERSION,
+                    error: ReplyError::Script,
+                    message: "tack: hook rewrite requires object input and payload".into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn safe_push_fixture_returns_wire_deny_and_tool_content() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/safe-push");
+        let sandbox = sandbox(&folder);
+
+        assert_eq!(
+            dispatch(&sandbox, shell_request(json!({ "command": "git push" }))),
+            Reply::Hook {
+                id: 7,
+                version: PROTOCOL_VERSION,
+                outcome: Outcome::Deny {
+                    reason: "push blocked".into(),
+                },
+            }
+        );
+        assert_eq!(
+            dispatch(&sandbox, tool_request("guard_status")),
+            Reply::Tool {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                content: vec![Content {
+                    kind: "text".into(),
+                    text: "guard_status: daemon ok".into(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn tool_content_accepts_an_empty_list_but_requires_a_content_field() {
+        let folder = PluginFolder::new(
+            r#"
+            return {
+                name = "tool-content-test",
+                tools = {
+                    empty = { run = function() return { content = {} } end },
+                    missing = { run = function() return {} end },
+                },
+            }
+            "#,
+        );
+        let sandbox = sandbox(&folder.0);
+
+        assert_eq!(
+            dispatch(&sandbox, tool_request("empty")),
+            Reply::Tool {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                content: vec![],
+            }
+        );
+        assert_eq!(
+            dispatch(&sandbox, tool_request("missing")),
+            Reply::Error {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::Script,
+                message: "tack: tool result needs content".into(),
+            }
+        );
+    }
 
     #[test]
     fn state_dir_follows_the_environment_precedence() {

@@ -13,7 +13,7 @@ pub(super) fn load_plugin(loader: &Function) -> Result<Table, EngineError> {
     match value {
         LuaValue::Table(table) => Ok(table),
         _ => Err(EngineError::Load(LoadCause::Message(
-            "tack: plugin.luau must return a table".into(),
+            "plugin.luau must return a table".into(),
         ))),
     }
 }

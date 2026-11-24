@@ -17,9 +17,9 @@ local guardStatus = require("./guard-status")
 return {
   name = "safe-push",
 
-  toolBefore = function(call, ctx)
-    if call.tool == "shell"
-      and string.find(call.input.command, "^git push") then
+  toolBefore = function(payload, ctx)
+    if ctx.tool == "shell"
+      and string.find(payload.command, "^git push") then
       return ctx.deny("push blocked")
     end
   end,
@@ -82,11 +82,11 @@ cd tack
 cargo build --release
 ```
 
-The binary is at `target/release/tack`. A command to build a Luau plugin is
-planned in slice 1.
+Build the example plugin with
+`target/release/tack build fixtures/safe-push --out dist`.
 
 ## Roadmap
 
-- Slice 1: one plugin, OpenCode, unsandboxed daemon — In progress
-  ([tack#34](https://github.com/wrkhse/tack/issues/34)).
+- [Slice 1: one plugin, OpenCode, unsandboxed daemon](docs/plans/slices/slice-1.md) —
+  Implemented (v0.1.0-rc.2).
 - More harnesses and MCP support — Planned.

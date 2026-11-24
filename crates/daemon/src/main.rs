@@ -61,14 +61,12 @@ async fn main() {
         std::process::exit(EXIT_USAGE);
     }
 
-    let limits = Limits {
-        memory_bytes: DEFAULT_MEMORY_BYTES,
-        call_deadline_ms: DEFAULT_DEADLINE_MS,
-    };
-    let sandbox = match Sandbox::new(&args.plugin, limits, Capabilities::default()) {
+    let sandbox = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+        .and_then(|limits| Sandbox::new(&args.plugin, limits, Capabilities::default()));
+    let sandbox = match sandbox {
         Ok(sandbox) => Arc::new(sandbox),
         Err(error) => {
-            eprintln!("tack-daemon: sandbox: {error}");
+            eprintln!("tack-daemon: sandbox: tack: {error}");
             std::process::exit(EXIT_ENGINE);
         }
     };

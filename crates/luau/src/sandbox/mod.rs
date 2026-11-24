@@ -2,7 +2,7 @@
 //!
 //! The plugin is a Luau table at plugin.luau: named hook functions and a tools
 //! table. A hook returns nil for allow, a deny table or a rewrite table; a
-//! tool returns a table of content items. Every input crossing the boundary is
+//! runnable returns a JSON-compatible value. Every input crossing the boundary is
 //! converted under both a depth and a table-size ceiling.
 
 use std::collections::HashSet;
@@ -10,9 +10,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use mlua::{Function, Lua, Table, Value as LuaValue, VmState};
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::api::{Call, Content, Manifest, Outcome, ToolDef};
+use crate::api::{Invocation, Outcome};
 use crate::require;
 
 mod call;
@@ -31,24 +31,35 @@ pub use errors::{EngineError, LimitCause, LoadCause};
 use deadline::Deadline;
 use errors::MAX_ENTRIES;
 use loading::load_plugin;
-use outcome::{decode_content, decode_outcome};
-use values::{json_to_lua, lua_key, read_tool};
+use outcome::decode_outcome;
+use values::{json_to_lua, lua_key, lua_to_json, read_tool};
+
+// The supported floor for the VM, its sandbox globals, and plugin startup.
+const MIN_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 
 /// The host's bounds for a single sandbox.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    /// Maximum bytes tracked by the Luau allocator.
-    pub memory_bytes: usize,
-    /// Maximum milliseconds for startup, manifest reads, and each call.
-    pub call_deadline_ms: u64,
+    memory_bytes: usize,
+    call_deadline_ms: u64,
 }
 
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            memory_bytes: 16 * 1024 * 1024,
-            call_deadline_ms: 100,
+impl Limits {
+    /// Set the Luau allocator ceiling and the budget in milliseconds for
+    /// startup, manifest reads, and each call.
+    ///
+    /// # Errors
+    ///
+    /// Returns a memory limit error for ceilings below the 16 MiB VM baseline.
+    pub const fn new(memory_bytes: usize, call_deadline_ms: u64) -> Result<Self, EngineError> {
+        if memory_bytes < MIN_MEMORY_BYTES {
+            return Err(EngineError::Limit(LimitCause::Memory));
         }
+
+        Ok(Self {
+            memory_bytes,
+            call_deadline_ms,
+        })
     }
 }
 
@@ -79,8 +90,7 @@ impl Sandbox {
         capabilities.validate()?;
         let lua = Lua::new();
 
-        // The allocator treats zero as unlimited.
-        if limits.memory_bytes == 0 || limits.memory_bytes < lua.used_memory() {
+        if limits.memory_bytes < lua.used_memory() {
             return Err(EngineError::Limit(LimitCause::Memory));
         }
 
@@ -130,15 +140,15 @@ impl Sandbox {
     /// memory ceiling, [`EngineError::InvalidResult`] when the hook returns
     /// a malformed result, [`EngineError::Capability`] when a callback error
     /// reaches the host, and [`EngineError::Poisoned`] after a call panics.
-    pub fn hook(&self, hook: &str, call: &Call, deadline_ms: u64) -> Result<Outcome, EngineError> {
+    pub fn hook(&self, invocation: &Invocation, deadline_ms: u64) -> Result<Outcome, EngineError> {
         let _guard = self.lock_call()?;
         self.deadline.begin(deadline_ms.min(self.call_deadline_ms));
-        let outcome = self.run_hook(hook, call);
+        let outcome = self.run_hook(invocation);
         self.deadline.disarm();
         outcome
     }
 
-    /// Run a named tool and decode its content within the smaller of the two deadlines.
+    /// Run a named runnable and convert its result to JSON within the smaller deadline.
     ///
     /// # Errors
     ///
@@ -147,20 +157,15 @@ impl Sandbox {
     /// [`EngineError::InvalidResult`] when the tool returns malformed content,
     /// [`EngineError::Capability`] when a callback error reaches the host,
     /// and [`EngineError::Poisoned`] after a call panics.
-    pub fn tool(
-        &self,
-        name: &str,
-        input: &Value,
-        deadline_ms: u64,
-    ) -> Result<Vec<Content>, EngineError> {
+    pub fn run(&self, name: &str, input: &Value, deadline_ms: u64) -> Result<Value, EngineError> {
         let _guard = self.lock_call()?;
         self.deadline.begin(deadline_ms.min(self.call_deadline_ms));
-        let content = self.run_tool(name, input);
+        let result = self.run_runnable(name, input);
         self.deadline.disarm();
-        content
+        result
     }
 
-    /// Read the plugin manifest.
+    /// Read the plugin's name, needs, and array of tool metadata as JSON.
     ///
     /// # Errors
     ///
@@ -168,7 +173,7 @@ impl Sandbox {
     /// or repeats a tool name, [`EngineError::Limit`] when reading is bounded,
     /// and [`EngineError::Poisoned`] when a previous call panicked while
     /// holding the call lock.
-    pub fn manifest(&self) -> Result<Manifest, EngineError> {
+    pub fn manifest(&self) -> Result<Value, EngineError> {
         let _guard = self.lock_call()?;
         self.deadline.begin(self.call_deadline_ms);
         let manifest = self.read_manifest();
@@ -176,15 +181,21 @@ impl Sandbox {
         manifest
     }
 
-    fn run_hook(&self, hook: &str, call: &Call) -> Result<Outcome, EngineError> {
-        let Some(function) = self.plugin.get::<Option<Function>>(hook)? else {
+    fn run_hook(&self, invocation: &Invocation) -> Result<Outcome, EngineError> {
+        let Some(function) = self
+            .plugin
+            .get::<Option<Function>>(invocation.hook.as_str())?
+        else {
             return Ok(Outcome::Allow);
         };
-        let result = function.call::<LuaValue>((self.call_table(call)?, self.ctx()?))?;
-        decode_outcome(result, &call.input)
+
+        let payload = json_to_lua(&self.lua, &invocation.payload, 0)?;
+        let result = function.call::<LuaValue>((payload, self.ctx(&invocation.context)?))?;
+
+        decode_outcome(result)
     }
 
-    fn run_tool(&self, name: &str, input: &Value) -> Result<Vec<Content>, EngineError> {
+    fn run_runnable(&self, name: &str, input: &Value) -> Result<Value, EngineError> {
         let tools = self
             .plugin
             .get::<Option<Table>>("tools")?
@@ -196,27 +207,27 @@ impl Sandbox {
             .get::<Option<Function>>("run")?
             .ok_or_else(|| EngineError::UnknownTool(name.to_owned()))?;
         let lua_input = json_to_lua(&self.lua, input, 0)?;
-        let result = run.call::<LuaValue>((lua_input, self.ctx()?))?;
-        decode_content(result)
+        let result = run.call::<LuaValue>((lua_input, self.ctx(&Value::Null)?))?;
+
+        lua_to_json(result, 0)
     }
 }
 
 impl Sandbox {
-    fn read_manifest(&self) -> Result<Manifest, EngineError> {
+    fn read_manifest(&self) -> Result<Value, EngineError> {
         let name = self
             .plugin
             .get::<Option<String>>("name")?
             .unwrap_or_default();
         if name.is_empty() {
-            return Err(EngineError::InvalidResult(
-                "tack: plugin name is empty".into(),
-            ));
+            return Err(EngineError::InvalidResult("plugin name is empty".into()));
         }
-        Ok(Manifest {
-            name,
-            needs: self.read_needs()?,
-            tools: self.read_tools()?,
-        })
+
+        Ok(json!({
+            "name": name,
+            "needs": self.read_needs()?,
+            "tools": self.read_tools()?,
+        }))
     }
 
     fn read_needs(&self) -> Result<Vec<String>, EngineError> {
@@ -224,9 +235,7 @@ impl Sandbox {
             return Ok(Vec::new());
         };
         let LuaValue::Table(table) = value else {
-            return Err(EngineError::InvalidResult(
-                "tack: needs must be an array".into(),
-            ));
+            return Err(EngineError::InvalidResult("needs must be an array".into()));
         };
         let mut needs = Vec::new();
         for pair in table.pairs::<LuaValue, LuaValue>() {
@@ -240,7 +249,7 @@ impl Sandbox {
                 LuaValue::String(value) => value.to_str()?.to_string(),
                 _ => {
                     return Err(EngineError::InvalidResult(
-                        "tack: needs must contain strings".into(),
+                        "needs must contain strings".into(),
                     ));
                 }
             };
@@ -249,7 +258,7 @@ impl Sandbox {
         Ok(needs)
     }
 
-    fn read_tools(&self) -> Result<Vec<ToolDef>, EngineError> {
+    fn read_tools(&self) -> Result<Vec<Value>, EngineError> {
         let Some(tools) = self.plugin.get::<Option<Table>>("tools")? else {
             return Ok(Vec::new());
         };
@@ -264,20 +273,18 @@ impl Sandbox {
             let (key, value) = pair?;
             let key = lua_key(key)?;
             let LuaValue::Table(table) = value else {
-                return Err(EngineError::InvalidResult(
-                    "tack: tool must be a table".into(),
-                ));
+                return Err(EngineError::InvalidResult("tool must be a table".into()));
             };
-            let definition = read_tool(&table, &key)?;
-            if definition.name.is_empty() {
-                return Err(EngineError::InvalidResult("tack: empty tool name".into()));
+            let (name, definition) = read_tool(&table, &key)?;
+            if name.is_empty() {
+                return Err(EngineError::InvalidResult("empty tool name".into()));
             }
-            if !seen.insert(definition.name.clone()) {
+            if seen.contains(&name) {
                 return Err(EngineError::InvalidResult(format!(
-                    "tack: duplicate tool name: {}",
-                    definition.name
+                    "duplicate tool name: {name}"
                 )));
             }
+            seen.insert(name);
             definitions.push(definition);
         }
         Ok(definitions)

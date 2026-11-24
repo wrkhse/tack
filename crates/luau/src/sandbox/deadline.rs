@@ -62,4 +62,12 @@ mod tests {
         deadline.disarm();
         assert!(!deadline.expired(), "disarming clears the budget");
     }
+
+    #[test]
+    fn a_saturated_budget_stays_below_the_disarmed_sentinel() {
+        let deadline = Deadline::new();
+        deadline.begin(u64::MAX);
+
+        assert_eq!(deadline.budget_us.load(Ordering::Relaxed), u64::MAX - 1);
+    }
 }

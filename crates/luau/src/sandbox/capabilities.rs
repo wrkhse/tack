@@ -35,7 +35,7 @@ impl Capabilities {
         for name in ["allow", "deny", "rewrite"] {
             if self.callbacks.contains_key(name) {
                 return Err(EngineError::InvalidResult(format!(
-                    "tack: reserved capability name: {name}"
+                    "reserved capability name: {name}"
                 )));
             }
         }
@@ -91,4 +91,37 @@ fn check_deadline(deadline: &Deadline) -> mlua::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_reports_only_the_callback_count() {
+        let mut capabilities = Capabilities::default();
+        capabilities.insert("lookup", Ok);
+
+        assert_eq!(format!("{capabilities:?}"), "Capabilities { count: 1, .. }");
+    }
+
+    #[test]
+    fn a_capability_refuses_an_expired_deadline() {
+        let lua = Lua::new();
+        let ctx = lua.create_table().expect("create context");
+        let deadline = Arc::new(Deadline::new());
+        let mut capabilities = Capabilities::default();
+        capabilities.insert("lookup", |_| Ok(Value::Bool(true)));
+        capabilities
+            .populate(&lua, &ctx, &deadline)
+            .expect("populate context");
+        let lookup: mlua::Function = ctx.get("lookup").expect("registered callback");
+
+        // Call the host function directly so a VM interrupt cannot provide the error.
+        deadline.begin(0);
+        assert_eq!(
+            lookup.call::<bool>(()).map_err(EngineError::from),
+            Err(EngineError::Limit(LimitCause::Deadline))
+        );
+    }
 }

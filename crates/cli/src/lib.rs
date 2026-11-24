@@ -8,8 +8,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
-use tack_luau::{Capabilities, EngineError, Limits, Sandbox, api};
-use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest, ToolDef};
+use tack_luau::{Capabilities, EngineError, Limits, Sandbox};
+use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest};
 use tack_protocol::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
 
 /// Wall-clock budget for one wrapper call in the default build.
@@ -27,6 +27,7 @@ const SUPPORTED: [&str; 3] = ["sandbox", "daemon", "opencode"];
 pub enum BuildError {
     NeedMissing(String),
     Sandbox(EngineError),
+    Manifest(serde_json::Error),
     Render(WrapperError),
     Io(std::io::Error),
 }
@@ -35,7 +36,8 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NeedMissing(name) => write!(f, "need_missing:{name}"),
-            Self::Sandbox(error) => write!(f, "sandbox:{error}"),
+            Self::Sandbox(error) => write!(f, "sandbox:tack: {error}"),
+            Self::Manifest(error) => write!(f, "manifest:{error}"),
             Self::Render(error) => write!(f, "render:{error}"),
             Self::Io(error) => write!(f, "io:{error}"),
         }
@@ -47,6 +49,7 @@ impl Error for BuildError {
         match self {
             Self::NeedMissing(_) => None,
             Self::Sandbox(error) => Some(error),
+            Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
             Self::Io(error) => Some(error),
         }
@@ -79,41 +82,30 @@ impl Default for BuildOptions {
 /// # Errors
 ///
 /// Returns [`BuildError::Io`] when the plugin folder or output files cannot be
-/// read or written, [`BuildError::Sandbox`] when the plugin cannot be loaded or
-/// read, [`BuildError::NeedMissing`] for an unsupported need, and
-/// [`BuildError::Render`] when the wrapper cannot be rendered.
+/// read or written, [`BuildError::Sandbox`] when the host limits are invalid or
+/// the plugin cannot be loaded or read, [`BuildError::Manifest`] when the
+/// manifest does not match the wire contract, [`BuildError::NeedMissing`] for
+/// an unsupported need, and [`BuildError::Render`] when the wrapper cannot be
+/// rendered.
 pub fn build(
     plugin_dir: &Path,
     out: &Path,
     options: BuildOptions,
 ) -> Result<(PathBuf, PathBuf), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
-    let limits = Limits {
-        memory_bytes: DEFAULT_MEMORY_BYTES,
-        call_deadline_ms: DEFAULT_DEADLINE_MS,
-    };
-    let sandbox =
-        Sandbox::new(&plugin_dir, limits, Capabilities::default()).map_err(BuildError::Sandbox)?;
-    let api::Manifest { name, needs, tools } = sandbox.manifest().map_err(BuildError::Sandbox)?;
+    let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+        .and_then(|limits| Sandbox::new(&plugin_dir, limits, Capabilities::default()))
+        .and_then(|sandbox| sandbox.manifest())
+        .map_err(BuildError::Sandbox)?;
+    let manifest: PluginManifest =
+        serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
 
-    for need in &needs {
+    for need in &manifest.needs {
         if !SUPPORTED.contains(&need.as_str()) {
             return Err(BuildError::NeedMissing(need.clone()));
         }
     }
 
-    let manifest = PluginManifest {
-        name,
-        needs,
-        tools: tools
-            .into_iter()
-            .map(|tool| ToolDef {
-                name: tool.name,
-                description: tool.description,
-                input: tool.input,
-            })
-            .collect(),
-    };
     let reasons: Vec<&str> = DenyReason::ALL
         .iter()
         .map(|reason| reason.as_str())
@@ -153,10 +145,14 @@ mod tests {
     #[test]
     fn build_error_reports_the_underlying_source() {
         let sandbox = EngineError::Limit(LimitCause::Deadline);
+        let build_error = BuildError::Sandbox(sandbox.clone());
+
         assert_eq!(
-            BuildError::Sandbox(sandbox.clone())
-                .source()
-                .map(ToString::to_string),
+            build_error.to_string(),
+            "sandbox:tack: script deadline exceeded"
+        );
+        assert_eq!(
+            build_error.source().map(ToString::to_string),
             Some(sandbox.to_string())
         );
 

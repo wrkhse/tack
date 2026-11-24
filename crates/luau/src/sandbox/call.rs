@@ -1,25 +1,21 @@
 use mlua::{Table, Value as LuaValue};
 
-use crate::api::Call;
+use serde_json::Value;
 
 use super::errors::EngineError;
 use super::values::json_to_lua;
 
 impl super::Sandbox {
-    pub(super) fn call_table(&self, call: &Call) -> Result<Table, EngineError> {
-        let table = self.lua.create_table()?;
-        table.set("tool", call.tool.as_str())?;
-        table.set("name", call.name.as_str())?;
-        table.set("input", json_to_lua(&self.lua, &call.input, 0)?)?;
-        match &call.session_id {
-            Some(session) => table.set("session_id", session.as_str())?,
-            None => table.set("session_id", LuaValue::Nil)?,
-        }
-        Ok(table)
-    }
+    pub(super) fn ctx(&self, context: &Value) -> Result<Table, EngineError> {
+        let ctx = match json_to_lua(&self.lua, context, 0)? {
+            LuaValue::Table(table) if context.is_object() => table,
+            host => {
+                let table = self.lua.create_table()?;
+                table.raw_set("host", host)?;
+                table
+            }
+        };
 
-    pub(super) fn ctx(&self) -> Result<Table, EngineError> {
-        let ctx = self.lua.create_table()?;
         ctx.set(
             "deny",
             self.lua.create_function(|lua, reason: String| {
@@ -30,11 +26,16 @@ impl super::Sandbox {
         )?;
         ctx.set(
             "rewrite",
-            self.lua.create_function(|lua, command: String| {
-                let rewritten = lua.create_table()?;
-                rewritten.set("command", command)?;
+            self.lua.create_function(|lua, payload: LuaValue| {
+                // Lua removes a field assigned nil; retain an explicit null rewrite.
+                let replacement = if matches!(payload, LuaValue::Nil) {
+                    LuaValue::NULL
+                } else {
+                    payload
+                };
+
                 let result = lua.create_table()?;
-                result.set("rewrite", rewritten)?;
+                result.raw_set("rewrite", replacement)?;
                 Ok(result)
             })?,
         )?;

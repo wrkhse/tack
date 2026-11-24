@@ -14,9 +14,9 @@ local guardStatus = require("./guard-status")
 return {
   name = "safe-push",
 
-  toolBefore = function(call, ctx)
-    if call.tool == "shell"
-      and string.find(call.input.command, "^git push") then
+  toolBefore = function(payload, ctx)
+    if ctx.tool == "shell"
+      and string.find(payload.command, "^git push") then
       return ctx.deny("push blocked")
     end
   end,
@@ -39,7 +39,8 @@ flowchart LR
 ## What it builds
 
 - **Build** — `crates/cli/src/lib.rs` is the public API of the build pipeline.
-  It checks a plugin's needs, renders the wrapper from
+  It decodes the engine's JSON manifest into the protocol's `PluginManifest`,
+  checks the plugin's needs, renders the wrapper from
   `adapters/opencode/opencode.js`, and writes the wrapper and a tool manifest
   into `dist/opencode`. `crates/cli/src/main.rs` parses the command line and
   calls it. Verification: a fixture plugin builds; a missing need fails with a
@@ -69,12 +70,14 @@ impl Default for BuildOptions {}
 ```
 
   **BuildError** names the stage that failed. `NeedMissing` carries the
-  unsupported need; the other variants wrap that stage's error:
+  unsupported need; `Manifest` wraps a JSON decoding error. The remaining
+  variants wrap sandbox, rendering or I/O errors:
 
 ```rust
 pub enum BuildError {
     NeedMissing(String),
     Sandbox(EngineError),
+    Manifest(serde_json::Error),
     Render(WrapperError),
     Io(std::io::Error),
 }
@@ -112,8 +115,8 @@ impl Request {
 }
 ```
 
-  A hook inspects a `ToolCall`; a reply carries an outcome, tool content or a
-  machine-readable error class:
+  A hook request carries a `ToolCall`; a reply carries an outcome, tool
+  content or a machine-readable error class:
 
 ```rust
 pub struct ToolCall {
@@ -267,19 +270,28 @@ pub enum TransportError {
 ```
 
 - **Daemon and SDK** — `crates/daemon/src/lib.rs` translates wire calls and
-  replies at the daemon boundary. The `tack-luau` crate in `crates/luau/` runs
-  the plugin in an `mlua` sandbox at 16 MiB and 100 ms per call, with no host
-  capabilities supplied by the daemon. Verification: a hook denies the call;
-  a runaway loop and a memory hog are denied by the limits.
+  replies at the daemon boundary. The `tack-luau` crate in `crates/luau/`
+  accepts JSON values without depending on the agent protocol. The daemon
+  supplies a 16 MiB ceiling, a 100 ms deadline and no host capabilities.
+  Verification: a hook denies a call, a shell rewrite preserves untouched
+  fields, and runaway scripts hit the configured time or memory limit.
 
-  **Structure.** `Sandbox::new` loads the plugin under a memory ceiling and a
-  deadline. The sandbox uses its own API types. Each hook or tool call uses the
-  smaller of its requested deadline and the sandbox limit:
+  **Structure.** `Limits::new` rejects zero and memory ceilings below the VM
+  baseline. `Sandbox::new` sets the allocator ceiling before installing
+  `require`. Each hook or tool call uses the smaller of its requested
+  deadline and the sandbox limit:
 
 ```rust
 pub struct Limits {
-    pub memory_bytes: usize,
-    pub call_deadline_ms: u64,
+    memory_bytes: usize,
+    call_deadline_ms: u64,
+}
+
+impl Limits {
+    pub const fn new(
+        memory_bytes: usize,
+        call_deadline_ms: u64,
+    ) -> Result<Self, EngineError>;
 }
 
 pub struct Sandbox {
@@ -300,26 +312,49 @@ impl Sandbox {
 
     pub fn hook(
         &self,
-        hook: &str,
-        call: &Call,
+        invocation: &Invocation,
         deadline_ms: u64,
     ) -> Result<Outcome, EngineError>;
 
-    pub fn tool(
+    pub fn run(
         &self,
         name: &str,
         input: &Value,
         deadline_ms: u64,
-    ) -> Result<Vec<Content>, EngineError>;
+    ) -> Result<Value, EngineError>;
 
-    pub fn manifest(&self) -> Result<Manifest, EngineError>;
+    pub fn manifest(&self) -> Result<Value, EngineError>;
 }
 ```
 
-  `EngineError` carries typed causes for limits and loads, so the daemon maps
-  each failure to a wire error without reading a message string:
+  The daemon passes `ToolCall.input` as the invocation payload and places
+  `tool`, `name` and `session_id` in its context. The engine returns a
+  whole replacement payload for a rewrite. The daemon requires objects
+  for both inputs, overlays the rewritten fields on the original, and
+  rejects malformed rewrites. It also decodes a tool result's `content`
+  into protocol `Content` items.
 
 ```rust
+pub struct Invocation {
+    pub hook: String,
+    pub payload: Value,
+    pub context: Value,
+}
+
+#[non_exhaustive]
+pub enum Outcome {
+    Allow,
+    Deny { reason: String },
+    Rewrite { payload: Value },
+}
+```
+
+  `EngineError` carries typed causes. The daemon maps limit and unknown-tool
+  errors to their own wire classes and defaults to a script error. Tack
+  adds its prefix at the caller boundary:
+
+```rust
+#[non_exhaustive]
 pub enum LimitCause {
     Deadline,
     Memory,
@@ -327,11 +362,13 @@ pub enum LimitCause {
     TooDeep { limit: usize },
 }
 
+#[non_exhaustive]
 pub enum LoadCause {
     Require(RequireCause),
     Message(String),
 }
 
+#[non_exhaustive]
 pub enum EngineError {
     Load(LoadCause),
     Script(String),
@@ -391,7 +428,7 @@ fn version_error(id: u64, version: u32) -> Reply;
 export type Plugin = {
     name: string,
     needs: { string }?,
-    toolBefore: ((call: ToolCall, ctx: HookCtx) -> ToolBeforeResult)?,
+    toolBefore: ((payload: any, ctx: ToolBeforeCtx) -> ToolBeforeResult)?,
     tools: { [string]: ToolDef }?,
 }
 
@@ -404,8 +441,14 @@ export type ToolDef = {
 
 export type HookCtx = {
     deny: (reason: string) -> DenyResult,
-    rewrite: (command: string) -> RewriteResult,
+    rewrite: (payload: any) -> RewriteResult,
     allow: () -> nil,
+}
+
+export type ToolBeforeCtx = HookCtx & {
+    tool: string,
+    name: string,
+    session_id: string?,
 }
 ```
 
