@@ -344,18 +344,33 @@ function initFrame(output) {
   return null;
 }
 
-// Claude Code's own plugins, such as cc-plugin-agents-md, load in every
-// session. Only these are left out of the loaded set.
-function isBuiltIn(plugin) {
-  const source = typeof plugin?.source === "string" ? plugin.source : "";
-  const name = typeof plugin?.name === "string" ? plugin.name : "";
+// The built-in plugins Claude Code 2.1.328 loads in every session, each as
+// its exact name and source. Only a plugin that matches a pair in both is
+// left out of the loaded set; any other plugin fails it.
+const BUILT_INS = new Set(
+  ["cc-plugin-agents-md", "cc-plugin-privacy", "cc-plugin-plugin-authoring"].map(
+    (name) => name + "\u0000" + name + "@builtin",
+  ),
+);
 
-  return source.endsWith("@builtin") || name.startsWith("cc-plugin-");
+function isBuiltIn(plugin) {
+  const name = plugin?.name;
+  const source = plugin?.source;
+  if (typeof name !== "string" || typeof source !== "string") return false;
+
+  return BUILT_INS.has(name + "\u0000" + source);
+}
+
+// The tack mod comes from --plugin-dir, so a tack entry whose source says
+// built-in is not the mod under test.
+function claimsBuiltIn(plugin) {
+  return typeof plugin.source === "string" && plugin.source.endsWith("@builtin");
 }
 
 // The system/init frame names every plugin Claude Code loaded and every one
 // that failed or loaded without a part, such as its hooks file. Apart from
-// the built-ins, the run loads exactly the tack mod, with no plugin error.
+// the exact built-ins, the run loads exactly the tack mod, with no plugin
+// error.
 function loadedSet(output) {
   const frame = initFrame(output);
   if (!frame) {
@@ -364,22 +379,50 @@ function loadedSet(output) {
 
   const plugins = Array.isArray(frame.plugins) ? frame.plugins : [];
   const errors = Array.isArray(frame.plugin_errors) ? frame.plugin_errors : [];
-  const builtIn = plugins.filter(isBuiltIn).map((plugin) => plugin?.name);
-  const names = plugins
-    .filter((plugin) => !isBuiltIn(plugin))
-    .map((plugin) => plugin?.name);
+  const builtIn = plugins.filter(isBuiltIn).map((plugin) => plugin.name);
+  const own = plugins.filter((plugin) => !isBuiltIn(plugin));
+  const tack = own.length === 1 && own[0]?.name === PLUGIN_NAME ? own[0] : null;
 
-  const ok = names.length === 1 && names[0] === PLUGIN_NAME && errors.length === 0;
+  const ok = tack !== null && !claimsBuiltIn(tack) && errors.length === 0;
   const evidence =
     "plugins: " +
     JSON.stringify(plugins) +
-    ", built-ins left out: " +
+    ", exact built-ins left out: " +
     JSON.stringify(builtIn) +
     ", plugin_errors: " +
     JSON.stringify(errors);
 
   return { ok, plugins, evidence };
 }
+
+function initWith(plugins) {
+  return JSON.stringify({ type: "system", subtype: "init", plugins }) + "\n";
+}
+
+const TACK = { name: PLUGIN_NAME, path: "/dist/claude", source: "tack@inline" };
+const REAL_BUILT_INS = [
+  { name: "cc-plugin-agents-md", source: "cc-plugin-agents-md@builtin" },
+  { name: "cc-plugin-privacy", source: "cc-plugin-privacy@builtin" },
+  { name: "cc-plugin-plugin-authoring", source: "cc-plugin-plugin-authoring@builtin" },
+];
+
+for (const plugin of REAL_BUILT_INS) assert.equal(isBuiltIn(plugin), true);
+assert.equal(isBuiltIn({ name: "cc-plugin-privacy", source: "tack@inline" }), false);
+assert.equal(isBuiltIn({ name: "tack", source: "cc-plugin-privacy@builtin" }), false);
+assert.equal(isBuiltIn({ name: "cc-plugin-other", source: "cc-plugin-other@builtin" }), false);
+assert.equal(isBuiltIn({ name: "cc-plugin-privacy" }), false);
+assert.equal(loadedSet(initWith([TACK, ...REAL_BUILT_INS])).ok, true);
+assert.equal(loadedSet(initWith(REAL_BUILT_INS)).ok, false);
+assert.equal(
+  loadedSet(initWith([TACK, { name: "cc-plugin-privacy", source: "tack@inline" }])).ok,
+  false,
+);
+assert.equal(
+  loadedSet(initWith([{ name: "tack", source: "cc-plugin-privacy@builtin" }])).ok,
+  false,
+);
+assert.equal(loadedSet(initWith([{ name: "tack", source: "tack@builtin" }])).ok, false);
+assert.equal(loadedSet(initWith([TACK, TACK])).ok, false);
 
 // The stream-json frames, other than system/init, and the stderr lines that
 // mention hooks and the plugin's name.
