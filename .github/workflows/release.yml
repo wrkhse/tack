@@ -43,7 +43,7 @@ jobs:
 
           cargo build --release --locked \
             --target "$TARGET" \
-            -p tack-cli -p tack_daemon
+            -p tack-cli -p tack_daemon -p tack-hook
       - name: Verify version matches tag
         shell: bash
         env:
@@ -72,7 +72,7 @@ jobs:
 
           tar -czf "$out/tack-$TAG-$TARGET.tar.gz" \
             -C "target/$TARGET/release" \
-            tack tack-daemon
+            tack tack-daemon tack-hook
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.22.3
@@ -128,7 +128,7 @@ jobs:
             --prerelease \
             --verify-tag \
             --title "tack $TAG" \
-            --notes "Rust-built tack CLI and daemon for the three targets; checksums attached; release candidate for slice 1." \
+            --notes "Rust-built tack CLI, daemon and hook for the three targets; checksums attached; release candidate." \
             "${tarballs[@]}" dist/SHA256SUMS
 
   skip:
