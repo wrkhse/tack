@@ -59,15 +59,21 @@ async fn handle(plugin: Option<PathBuf>, budget: Budget) -> Vec<u8> {
     let reply = match locate::state_dir() {
         Ok(state) => {
             let socket = state.join(SOCKET_NAME);
+            // The daemon binary is found only for a cold start, so a running
+            // daemon still answers when none sits beside the hook.
             let start = plugin.map(|plugin| {
-                let launch = Launch {
-                    bin: locate::daemon_bin(),
-                    socket: socket.clone(),
-                    plugin,
-                    state,
-                };
+                let socket = socket.clone();
 
-                move || launch.spawn()
+                move || {
+                    let launch = Launch {
+                        bin: locate::daemon_bin()?,
+                        socket,
+                        plugin,
+                        state,
+                    };
+
+                    launch.spawn()
+                }
             });
 
             forward(&call, &socket, start, budget).await

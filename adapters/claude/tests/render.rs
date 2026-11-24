@@ -8,11 +8,11 @@ use serde_json::json;
 use tack_adapter_claude::{
     BUDGET_MS, HOOKS_JSON, ModConfig, ModError, ModFile, PLUGIN_JSON, REGISTER_JS, render,
 };
-use tack_protocol::wire::{PluginManifest, ToolDef};
+use tack_protocol::wire::{DenyReason, PluginManifest, ToolDef};
 
 const GOLDEN: &str = include_str!("../golden/register.js");
 
-const REASONS: [&str; 11] = [
+const REASONS: [&str; 12] = [
     "socket_missing",
     "timeout",
     "socket_closed",
@@ -24,6 +24,7 @@ const REASONS: [&str; 11] = [
     "daemon_error",
     "aborted",
     "unsupported_hook",
+    "socket_untrusted",
 ];
 
 fn manifest() -> PluginManifest {
@@ -56,6 +57,13 @@ fn rendered() -> [ModFile; 3] {
 fn register_js() -> String {
     let [_, _, register] = rendered();
     register.contents
+}
+
+// tack build passes every protocol deny reason in this order, so the golden
+// holds the list a real build emits.
+#[test]
+fn the_fixture_reasons_are_the_protocol_deny_reasons() {
+    assert_eq!(REASONS, DenyReason::ALL.map(DenyReason::as_str));
 }
 
 #[test]
@@ -156,9 +164,40 @@ fn every_gating_registration_carries_a_catch() {
         gating,
         [
             "on(\"tool.call\", { tool: \"Bash\" }, guardBash).catch(refuseFailed);",
-            "on(\"tool.call\", { tool: TOOL_PREFIX + spec.name }, serve).catch(refuseFailed);",
+            "on(\"tool.call\", { tool: TOOL_PREFIX + spec.name }, serveTool).catch(refuseFailed);",
         ]
     );
+}
+
+// Claude Code refuses the whole module when an `on(...)` hook is not a
+// function declared at the top of the file, so every hook and every `.catch`
+// handler names one.
+#[test]
+fn every_hook_and_handler_is_a_top_level_function() {
+    let script = register_js();
+    let calls: Vec<&str> = script
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("on("))
+        .collect();
+
+    assert_eq!(calls.len(), 3);
+
+    for call in calls {
+        let (registration, catch) = call.split_once(").catch(").expect("a .catch");
+        let hook = registration.rsplit(", ").next().expect("a hook");
+        let handler = catch.strip_suffix(");").expect("a closed .catch");
+
+        for name in [hook, handler] {
+            let plain = format!("function {name}(");
+            let awaited = format!("async function {name}(");
+            let declared = script
+                .lines()
+                .any(|line| line.starts_with(&plain) || line.starts_with(&awaited));
+
+            assert!(declared, "{name} in {call} is no top-level function");
+        }
+    }
 }
 
 #[test]
@@ -187,7 +226,7 @@ fn tools_register_from_session_start_under_the_mod_prefix() {
         "const TOOLS = [{\"description\":\"Reports whether the tack daemon is running\",\
          \"inputSchema\":{\"type\":\"object\"},\"isDeferred\":false,\"name\":\"guard_status\"}];",
         "const TOOL_PREFIX = \"mcp__tack__\";",
-        "on(\"session.start\", registerTools);",
+        "on(\"session.start\", registerTools).catch(logStartFailed);",
         "await $.tool.register(spec);",
     ] {
         assert!(lines.contains(&expected), "{expected}");

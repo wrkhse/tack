@@ -52,28 +52,47 @@ pub fn state_dir() -> Result<PathBuf, Failure> {
 }
 
 /// The daemon binary: `explicit` when set, else a `tack-daemon` beside
-/// `exe` that `exists`, else the bare name for a `PATH` lookup.
+/// `exe` that `exists`. `PATH` is never searched: it would start whichever
+/// `tack-daemon` the caller's environment names first.
+///
+/// # Errors
+///
+/// Returns a `daemon_error` failure when neither names a daemon.
 pub fn daemon_bin_from(
     explicit: Option<OsString>,
     exe: Option<&Path>,
     exists: impl Fn(&Path) -> bool,
-) -> PathBuf {
+) -> Result<PathBuf, Failure> {
     if let Some(bin) = explicit.filter(|bin| !bin.is_empty()) {
-        return PathBuf::from(bin);
+        return Ok(PathBuf::from(bin));
     }
 
-    let sibling = exe
-        .and_then(Path::parent)
-        .map(|dir| dir.join(DAEMON_NAME))
-        .filter(|sibling| exists(sibling));
+    let Some(sibling) = exe.and_then(Path::parent).map(|dir| dir.join(DAEMON_NAME)) else {
+        return Err(Failure::new(
+            ReplyError::DaemonError,
+            "tack-hook's own path is unknown; set TACK_DAEMON_BIN",
+        ));
+    };
 
-    sibling.unwrap_or_else(|| PathBuf::from(DAEMON_NAME))
+    if !exists(&sibling) {
+        return Err(Failure::new(
+            ReplyError::DaemonError,
+            format_args!(
+                "no tack-daemon at {}; set TACK_DAEMON_BIN",
+                sibling.display()
+            ),
+        ));
+    }
+
+    Ok(sibling)
 }
 
-/// The daemon binary from `TACK_DAEMON_BIN`, a sibling of this executable,
-/// or `PATH`.
-#[must_use]
-pub fn daemon_bin() -> PathBuf {
+/// The daemon binary from `TACK_DAEMON_BIN` or beside this executable.
+///
+/// # Errors
+///
+/// Returns a `daemon_error` failure when neither names a daemon.
+pub fn daemon_bin() -> Result<PathBuf, Failure> {
     let exe = std::env::current_exe().ok();
 
     daemon_bin_from(
@@ -111,25 +130,37 @@ mod tests {
     }
 
     #[test]
-    fn daemon_bin_prefers_the_variable_then_the_sibling_then_path() {
+    fn daemon_bin_is_the_variable_then_the_sibling() {
         let exe = Path::new("/opt/tack/bin/tack-hook");
         let sibling = PathBuf::from("/opt/tack/bin/tack-daemon");
 
         assert_eq!(
             daemon_bin_from(Some("/x/daemon".into()), Some(exe), |_| true),
-            PathBuf::from("/x/daemon")
+            Ok(PathBuf::from("/x/daemon"))
         );
         assert_eq!(
             daemon_bin_from(Some(OsString::new()), Some(exe), |path| path == sibling),
-            sibling
+            Ok(sibling)
         );
+    }
+
+    #[test]
+    fn no_daemon_beside_the_hook_is_daemon_error_not_a_path_lookup() {
+        let exe = Path::new("/opt/tack/bin/tack-hook");
+
         assert_eq!(
             daemon_bin_from(None, Some(exe), |_| false),
-            PathBuf::from(DAEMON_NAME)
+            Err(Failure::new(
+                ReplyError::DaemonError,
+                "no tack-daemon at /opt/tack/bin/tack-daemon; set TACK_DAEMON_BIN",
+            ))
         );
         assert_eq!(
             daemon_bin_from(None, None, |_| true),
-            PathBuf::from(DAEMON_NAME)
+            Err(Failure::new(
+                ReplyError::DaemonError,
+                "tack-hook's own path is unknown; set TACK_DAEMON_BIN",
+            ))
         );
     }
 }

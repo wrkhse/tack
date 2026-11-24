@@ -141,12 +141,13 @@ async function check(name, fn) {
 
 await check("register wires one guarded Bash hook, the tool and session.start", async () => {
   const registrations = await load();
-  const shape = registrations.map((r) => [r.pattern, r.matcher, r.handler?.name]);
+  const shape = registrations.map((r) =>
+    [r.pattern, r.matcher, r.hook.name, r.handler?.name]);
 
   assert.deepEqual(shape, [
-    ["session.start", undefined, undefined],
-    ["tool.call", { tool: "Bash" }, "refuseFailed"],
-    ["tool.call", { tool: "mcp__tack__guard_status" }, "refuseFailed"],
+    ["session.start", undefined, "registerTools", "logStartFailed"],
+    ["tool.call", { tool: "Bash" }, "guardBash", "refuseFailed"],
+    ["tool.call", { tool: "mcp__tack__guard_status" }, "serveTool", "refuseFailed"],
   ]);
 });
 
@@ -298,6 +299,7 @@ const ERRORS = [
   ["script", "script"],
   ["unknown_tool", "unknown_tool"],
   ["unsupported_hook", "unsupported_hook"],
+  ["socket_untrusted", "socket_untrusted"],
   ["malformed", "daemon_error"],
   ["too_large", "daemon_error"],
   ["something_new", "daemon_error"],
@@ -365,6 +367,44 @@ await check("session.start registers each tool after the session binds", async (
   ]);
 });
 
+await check("a failed tool registration fails the session.start hook", async () => {
+  const registrations = await load();
+  const start = find(registrations, "session.start");
+  const fake = fakeHost(() => assert.fail("no tack-hook run at start"));
+  fake.host.tool.register = async () => {
+    throw new Error("rejected until the session binds");
+  };
+
+  await assert.rejects(
+    start.hook(fake.host, { cwd: "/work" }, async () => ({ cwd: "/work" })),
+    { message: "rejected until the session binds" },
+  );
+});
+
+await check("the session.start catch logs a named error and starts the session", async () => {
+  const registrations = await load();
+  const { handler } = find(registrations, "session.start");
+  const logs = [];
+  const host = { ui: { log: (...args) => logs.push(args) } };
+  const event = { cwd: "/work" };
+
+  const thrown = Object.assign(async (e) => ({ cwd: e.cwd }), {
+    called: true,
+    error: { kind: "throw", message: "Error: register refused", budget: 1000 },
+  });
+  assert.deepEqual(await handler(host, event, thrown), { cwd: "/work" });
+
+  const slow = Object.assign(async (e) => ({ cwd: e.cwd }), {
+    called: false, error: { kind: "timeout", budget: 1000 },
+  });
+  assert.deepEqual(await handler(host, event, slow), { cwd: "/work" });
+
+  assert.deepEqual(logs, [
+    ["tack: session registration failed: throw: Error: register refused"],
+    ["tack: session registration failed: timeout"],
+  ]);
+});
+
 await check("the timer globals run on $.clock", async () => {
   const registrations = await load();
   const start = find(registrations, "session.start");
@@ -404,6 +444,19 @@ await check("a tool call runs guard_status through tack-hook", async () => {
   assert.deepEqual(fake.runs[0].request, {
     kind: "tool", id: 1, version: 1, name: "guard_status", input: {},
   });
+});
+
+await check("a tool call outside the mod's tools denies unknown_tool", async () => {
+  const registrations = await load();
+  const tool = find(registrations, "tool.call", "mcp__tack__guard_status");
+  const fake = fakeHost(() => assert.fail("no tack-hook run for an unknown tool"));
+
+  for (const name of ["mcp__tack__other", "guard_status", "mcp__other__guard_status"]) {
+    const result = await tool.hook(fake.host, { tool: name }, nextSpy().next);
+    assert.deepEqual(result, { deny: "tack: unknown_tool" });
+  }
+
+  assert.deepEqual(fake.runs, []);
 });
 
 const TOOL_FAILURES = [

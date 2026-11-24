@@ -4,7 +4,9 @@
 
 #![cfg(test)]
 
+use std::fs::Permissions;
 use std::io::Cursor;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -36,6 +38,7 @@ impl Scratch {
         let path = std::env::temp_dir().join(format!("tack-hook-{}-{seq}", std::process::id()));
 
         std::fs::create_dir_all(&path).unwrap();
+        chmod(&path, 0o700);
 
         Self(path)
     }
@@ -49,6 +52,19 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+fn chmod(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, Permissions::from_mode(mode)).unwrap();
+}
+
+/// Bind `socket` owner-only, as the daemon does.
+fn listen(socket: &Path) -> std::io::Result<UnixListener> {
+    let listener = UnixListener::bind(socket)?;
+
+    std::fs::set_permissions(socket, Permissions::from_mode(0o600))?;
+
+    Ok(listener)
 }
 
 fn hook_line(id: u64) -> Vec<u8> {
@@ -112,7 +128,7 @@ async fn answer(listener: UnixListener, stub: Stub) -> Vec<u8> {
 
 async fn forward_to(stub: Stub, call: &Call) -> Result<Vec<u8>, Failure> {
     let scratch = Scratch::new();
-    let listener = UnixListener::bind(scratch.socket()).unwrap();
+    let listener = listen(&scratch.socket()).unwrap();
     let server = tokio::spawn(answer(listener, stub));
 
     let result = forward(call, &scratch.socket(), NO_START, Budget::from_now(LIMITS)).await;
@@ -125,7 +141,7 @@ async fn forward_to(stub: Stub, call: &Call) -> Result<Vec<u8>, Failure> {
 #[tokio::test]
 async fn the_reply_line_passes_through_unchanged() {
     let scratch = Scratch::new();
-    let listener = UnixListener::bind(scratch.socket()).unwrap();
+    let listener = listen(&scratch.socket()).unwrap();
     let server = tokio::spawn(answer(listener, Stub::Reply(allow(7))));
 
     let output = forward(
@@ -189,8 +205,8 @@ async fn a_cold_start_binds_the_socket_and_the_one_retry_reaches_it() {
 
         move || {
             starts.fetch_add(1, Ordering::SeqCst);
-            let listener = UnixListener::bind(&socket)
-                .map_err(|error| Failure::new(ReplyError::DaemonError, error))?;
+            let listener =
+                listen(&socket).map_err(|error| Failure::new(ReplyError::DaemonError, error))?;
             drop(tokio::spawn(answer(listener, Stub::Reply(allow(7)))));
 
             Ok(())
@@ -261,7 +277,7 @@ async fn a_daemon_that_binds_late_and_never_replies_denies_by_the_total_deadline
         move || {
             drop(tokio::spawn(async move {
                 tokio::time::sleep(bind_after).await;
-                let listener = UnixListener::bind(&socket).unwrap();
+                let listener = listen(&socket).unwrap();
                 answer(listener, Stub::Hold).await
             }));
 
@@ -274,13 +290,14 @@ async fn a_daemon_that_binds_late_and_never_replies_denies_by_the_total_deadline
     let output = forward(&hook_call(7), &socket, Some(start), budget).await;
     let elapsed = began.elapsed();
 
-    // A fresh 9 s per attempt after a 2 s start would deny near 11 s.
+    // A fresh 8.5 s per attempt after a 2 s start would deny near 10.5 s,
+    // past the mod's own 9 s timeout.
     assert_eq!(
         output,
-        Err(Failure::new(ReplyError::Timeout, "no reply within 9000 ms"))
+        Err(Failure::new(ReplyError::Timeout, "no reply within 8500 ms"))
     );
-    assert!(elapsed >= Duration::from_millis(9000), "{elapsed:?}");
-    assert!(elapsed < Duration::from_millis(9500), "{elapsed:?}");
+    assert!(elapsed >= Duration::from_millis(8500), "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(9000), "{elapsed:?}");
 }
 
 #[tokio::test]
@@ -305,6 +322,142 @@ async fn the_start_wait_is_cut_to_the_budget_left() {
     assert_eq!(output, Err(missing(&socket)));
     assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
     assert!(elapsed < Duration::from_millis(1000), "{elapsed:?}");
+}
+
+/// Forward to a listening owner-only socket after `spoil` changes the scratch
+/// folder or socket, counting starts. Returns the result, the starts, and
+/// whether a connection reached the listener.
+async fn forward_after(spoil: impl FnOnce(&Scratch)) -> (Result<Vec<u8>, Failure>, usize, bool) {
+    let scratch = Scratch::new();
+    let socket = scratch.socket();
+    let listener = listen(&socket).unwrap();
+    let starts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&starts);
+
+    spoil(&scratch);
+
+    let output = forward(
+        &hook_call(7),
+        &socket,
+        Some(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+
+            Ok(())
+        }),
+        Budget::from_now(LIMITS),
+    )
+    .await;
+
+    let reached = tokio::time::timeout(Duration::from_millis(50), listener.accept())
+        .await
+        .is_ok();
+
+    (output, starts.load(Ordering::SeqCst), reached)
+}
+
+fn untrusted(message: impl std::fmt::Display) -> Failure {
+    Failure::new(ReplyError::SocketUntrusted, message)
+}
+
+#[tokio::test]
+async fn a_state_dir_others_can_enter_is_socket_untrusted_before_any_connect() {
+    let mut dir = PathBuf::new();
+    let output = forward_after(|scratch| {
+        dir.clone_from(&scratch.0);
+        chmod(&scratch.0, 0o750);
+    })
+    .await;
+
+    assert_eq!(
+        output,
+        (
+            Err(untrusted(format_args!(
+                "{} has mode 0750, it must be 0700 or stricter",
+                dir.display()
+            ))),
+            0,
+            false
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_group_or_world_writable_socket_is_socket_untrusted_before_any_connect() {
+    let mut socket = PathBuf::new();
+    let output = forward_after(|scratch| {
+        socket = scratch.socket();
+        chmod(&socket, 0o622);
+    })
+    .await;
+
+    assert_eq!(
+        output,
+        (
+            Err(untrusted(format_args!(
+                "{} has mode 0622, it must be not group or world writable",
+                socket.display()
+            ))),
+            0,
+            false
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_file_in_place_of_the_socket_is_socket_untrusted() {
+    let scratch = Scratch::new();
+    let socket = scratch.socket();
+    let starts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&starts);
+
+    std::fs::write(&socket, b"not a socket").unwrap();
+    chmod(&socket, 0o600);
+
+    let output = forward(
+        &hook_call(7),
+        &socket,
+        Some(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+
+            Ok(())
+        }),
+        Budget::from_now(LIMITS),
+    )
+    .await;
+
+    assert_eq!(
+        output,
+        Err(untrusted(format_args!(
+            "{} is not a socket",
+            socket.display()
+        )))
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_symlink_in_place_of_the_socket_is_socket_untrusted_before_any_connect() {
+    let mut link = PathBuf::new();
+    let output = forward_after(|scratch| {
+        let real = scratch.0.join("real.sock");
+
+        link = scratch.socket();
+        std::fs::rename(&link, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+    })
+    .await;
+
+    assert_eq!(
+        output,
+        (
+            Err(untrusted(format_args!(
+                "{} is not a socket",
+                link.display()
+            ))),
+            0,
+            false
+        )
+    );
 }
 
 #[tokio::test]

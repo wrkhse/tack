@@ -34,6 +34,7 @@ pub enum ReplyError {
     MalformedReply,
     DaemonError,
     Aborted,
+    SocketUntrusted,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -144,10 +145,11 @@ pub enum DenyReason {
     DaemonError,
     Aborted,
     UnsupportedHook,
+    SocketUntrusted,
 }
 
 impl DenyReason {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::SocketMissing,
         Self::Timeout,
         Self::SocketClosed,
@@ -159,6 +161,7 @@ impl DenyReason {
         Self::DaemonError,
         Self::Aborted,
         Self::UnsupportedHook,
+        Self::SocketUntrusted,
     ];
 
     #[must_use]
@@ -175,6 +178,7 @@ impl DenyReason {
             Self::DaemonError => "daemon_error",
             Self::Aborted => "aborted",
             Self::UnsupportedHook => "unsupported_hook",
+            Self::SocketUntrusted => "socket_untrusted",
         }
     }
 }
@@ -391,6 +395,7 @@ mod tests {
             (ReplyError::MalformedReply, "malformed_reply"),
             (ReplyError::DaemonError, "daemon_error"),
             (ReplyError::Aborted, "aborted"),
+            (ReplyError::SocketUntrusted, "socket_untrusted"),
         ] {
             assert_eq!(
                 serde_json::to_value(error).unwrap(),
@@ -502,6 +507,7 @@ mod tests {
             (DenyReason::DaemonError, "daemon_error"),
             (DenyReason::Aborted, "aborted"),
             (DenyReason::UnsupportedHook, "unsupported_hook"),
+            (DenyReason::SocketUntrusted, "socket_untrusted"),
         ] {
             assert_eq!(reason.as_str(), expected);
             assert_eq!(

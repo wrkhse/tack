@@ -67,6 +67,32 @@ jobs:
           cargo build --workspace --bins --locked
           echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
       - run: tack build fixtures/safe-push --out dist --target claude
+      # A diagnostic, not a gate: what Claude Code reads from the mod. A
+      # loadable hooks module gives a `hooks:` line; a refused one gives an
+      # error or warning line naming the reason.
+      - name: Validate the mod
+        continue-on-error: true
+        env:
+          ARTIFACTS: ${{ runner.temp }}/claude-artifacts
+        run: |
+          set -uo pipefail
+
+          mkdir -p "$ARTIFACTS"
+          log="$ARTIFACTS/validate.log"
+          status=0
+          claude plugin validate dist/claude > "$log" 2>&1 || status=$?
+          cat "$log"
+
+          if grep -Eq '^[[:space:]]*hooks:' "$log"; then
+            echo "validate lists a hooks line for dist/claude"
+          else
+            echo "::warning::claude plugin validate lists no hooks line for dist/claude"
+          fi
+
+          echo "validate lines on hooks, errors and warnings:"
+          grep -Ein 'hook|warning|error|✘|⚠' "$log" || echo "(none)"
+
+          exit "$status"
       # The mod's fail-closed checks, under a scripted $ with no process run.
       - run: node adapters/claude/register.test.mjs
       - run: node test/claude/run.mjs

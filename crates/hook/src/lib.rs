@@ -11,6 +11,7 @@ pub mod locate;
 pub mod start;
 
 mod exchange;
+mod trust;
 
 use std::ffi::OsString;
 use std::io::{BufRead, Read};
@@ -34,8 +35,10 @@ pub struct Limits {
 }
 
 impl Limits {
+    /// The total stays under the harness mod's 9000 ms timeout, so the
+    /// hook's own verdict arrives before the mod gives up on it.
     pub const DEFAULT: Self = Self {
-        total: Duration::from_millis(9000),
+        total: Duration::from_millis(8500),
         start: Duration::from_millis(3000),
     };
 }
@@ -190,8 +193,10 @@ impl Call {
 /// Forward `call` to the daemon at `socket` and return its reply line
 /// unchanged.
 ///
-/// When no daemon listens and `start` is given, run it once and connect at
-/// most once more. Every wait ends by `budget`'s deadline: the retry gets
+/// Before each connect the state folder and the socket must be this user's;
+/// otherwise the call fails `socket_untrusted` and nothing starts. When no
+/// daemon listens and `start` is given, run it once and connect at most
+/// once more. Every wait ends by `budget`'s deadline: the retry gets
 /// only what the start wait left.
 ///
 /// # Errors

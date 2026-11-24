@@ -38,6 +38,12 @@ const DAEMON_DENY = "hook toolBefore deny push blocked";
 const DAEMON_TOOL = "tool guard_status ok";
 // The name in dist/claude/.claude-plugin/plugin.json.
 const PLUGIN_NAME = "tack";
+// Lines Claude Code writes when a hooks module is refused, fails to load or
+// is unloaded, or a hook is skipped, and the lines that turn every installed
+// mod off; see the mods troubleshooting page.
+const HOOKS_FAILURE = /not loaded:|did not load|hook skipped|was unloaded/i;
+const HOOKS_OFF = /hooks modules are turned off|hooks worker are off/i;
+const STDERR_TAIL_LINES = 60;
 
 let failures = 0;
 
@@ -105,6 +111,17 @@ function findExecutable(name) {
     }
   }
   return null;
+}
+
+function printTail(label, text) {
+  const tail = text
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .slice(-STDERR_TAIL_LINES);
+
+  console.log(label + " (last " + tail.length + " lines):");
+  for (const line of tail) console.log("  | " + line);
+  if (tail.length === 0) console.log("  | (empty)");
 }
 
 function install(source, target) {
@@ -211,16 +228,17 @@ function runClaude(env, projectDir, onChild) {
     );
     onChild(child);
 
-    let output = "";
+    let stdout = "";
+    let stderr = "";
     let timedOut = false;
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (text) => {
-      output += text;
+      stdout += text;
     });
     child.stderr.on("data", (text) => {
-      output += text;
+      stderr += text;
     });
 
     const timer = setTimeout(() => {
@@ -235,7 +253,7 @@ function runClaude(env, projectDir, onChild) {
 
     child.once("close", (code) => {
       clearTimeout(timer);
-      resolve({ output, code, timedOut });
+      resolve({ output: stdout + stderr, stdout, stderr, code, timedOut });
     });
   });
 }
@@ -256,6 +274,7 @@ function layout(base) {
     modRecorder: path.join(base, "mod-recorder.log"),
     requestLog: path.join(base, "requests.jsonl"),
     output: path.join(base, "claude-output.jsonl"),
+    stderr: path.join(base, "claude-stderr.log"),
   };
 
   for (const dir of [
@@ -320,22 +339,92 @@ function initFrame(output) {
   return null;
 }
 
+// Claude Code's own plugins, such as cc-plugin-agents-md, load in every
+// session. Only these are left out of the loaded set.
+function isBuiltIn(plugin) {
+  const source = typeof plugin?.source === "string" ? plugin.source : "";
+  const name = typeof plugin?.name === "string" ? plugin.name : "";
+
+  return source.endsWith("@builtin") || name.startsWith("cc-plugin-");
+}
+
 // The system/init frame names every plugin Claude Code loaded and every one
-// that failed or loaded without a part, such as its hooks file. The run loads
-// exactly the tack mod, with no plugin error.
+// that failed or loaded without a part, such as its hooks file. Apart from
+// the built-ins, the run loads exactly the tack mod, with no plugin error.
 function loadedSet(output) {
   const frame = initFrame(output);
-  if (!frame) return { ok: false, evidence: "no system/init frame in the output" };
+  if (!frame) {
+    return { ok: false, plugins: [], evidence: "no system/init frame in the output" };
+  }
 
   const plugins = Array.isArray(frame.plugins) ? frame.plugins : [];
   const errors = Array.isArray(frame.plugin_errors) ? frame.plugin_errors : [];
-  const names = plugins.map((plugin) => plugin?.name);
+  const builtIn = plugins.filter(isBuiltIn).map((plugin) => plugin?.name);
+  const names = plugins
+    .filter((plugin) => !isBuiltIn(plugin))
+    .map((plugin) => plugin?.name);
 
   const ok = names.length === 1 && names[0] === PLUGIN_NAME && errors.length === 0;
   const evidence =
-    "plugins: " + JSON.stringify(plugins) + ", plugin_errors: " + JSON.stringify(errors);
+    "plugins: " +
+    JSON.stringify(plugins) +
+    ", built-ins left out: " +
+    JSON.stringify(builtIn) +
+    ", plugin_errors: " +
+    JSON.stringify(errors);
 
-  return { ok, evidence };
+  return { ok, plugins, evidence };
+}
+
+// The stream-json frames, other than system/init, and the stderr lines that
+// mention hooks and the plugin's name.
+function hookLines(run, name) {
+  const fromStdout = run.stdout.split("\n").filter((line) => {
+    const text = line.trim();
+    const mentions = /hook/i.test(text) && text.includes(name);
+    if (!text.startsWith("{") || !mentions) return false;
+
+    try {
+      const frame = JSON.parse(text);
+      return !(frame?.type === "system" && frame.subtype === "init");
+    } catch {
+      return false;
+    }
+  });
+  const fromStderr = run.stderr.split("\n").filter((line) => {
+    return /hook/i.test(line) && line.includes(name);
+  });
+
+  return { fromStdout, fromStderr };
+}
+
+// Prints, for every plugin in the init frame, whether the output holds a
+// hooks line for it, and fails on a line saying the tack mod's hooks module
+// was refused, failed to load, was unloaded, or had a hook skipped, or that
+// hooks modules are turned off for the whole process.
+function checkHookLines(run, plugins) {
+  const names = new Set([PLUGIN_NAME, ...plugins.map((plugin) => String(plugin?.name))]);
+
+  for (const name of names) {
+    const { fromStdout, fromStderr } = hookLines(run, name);
+    const counts = "stream-json " + fromStdout.length + ", stderr " + fromStderr.length;
+
+    console.log("hooks lines for " + name + ": " + counts);
+    for (const line of [...fromStdout, ...fromStderr]) console.log("  | " + line);
+  }
+
+  const own = hookLines(run, PLUGIN_NAME);
+  const ownFailures = [...own.fromStdout, ...own.fromStderr].filter((line) => {
+    return HOOKS_FAILURE.test(line);
+  });
+  const off = run.output.split("\n").filter((line) => HOOKS_OFF.test(line));
+  const failed = [...ownFailures, ...off];
+
+  report(
+    "no hooks failure reported for the tack mod",
+    failed.length === 0,
+    failed.length ? failed.join(" | ") : "(none)",
+  );
 }
 
 function checkNoPush(tree) {
@@ -353,6 +442,8 @@ function check(tree, run) {
 
   const loaded = loadedSet(run.output);
   report("claude loaded exactly the tack mod", loaded.ok, loaded.evidence);
+
+  checkHookLines(run, loaded.plugins);
 
   // A row about the mod's hook or tool proves nothing unless the mod loaded.
   if (!loaded.ok) {
@@ -390,6 +481,7 @@ function keepEvidence(tree) {
 
   const files = [
     tree.output,
+    tree.stderr,
     tree.requestLog,
     tree.recorder,
     tree.modRecorder,
@@ -418,7 +510,8 @@ async function main() {
     const run = await runClaude(claudeEnv(tree, model.port), tree.projectDir, (child) => {
       claude = child;
     });
-    writeFileSync(tree.output, run.output);
+    writeFileSync(tree.output, run.stdout);
+    writeFileSync(tree.stderr, run.stderr);
 
     if (run.timedOut) report("claude finished within 90s", false, "run was killed at 90s");
 
@@ -429,6 +522,8 @@ async function main() {
     if (claude && claude.exitCode === null) claude.kill("SIGKILL");
     if (model && model.child.exitCode === null) model.child.kill("SIGKILL");
     if (process.env.CI) await stopDaemon(tree.stateDir);
+
+    if (failures > 0) printTail("claude stderr", readOptional(tree.stderr));
 
     keepEvidence(tree);
     rmSync(tree.base, { recursive: true, force: true });

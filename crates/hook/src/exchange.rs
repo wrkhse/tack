@@ -8,7 +8,7 @@ use tack_protocol::wire::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Reply, ReplyError, 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::{Budget, Failure};
+use crate::{Budget, Failure, trust};
 
 /// How one attempt ended without a reply line.
 pub enum Attempt {
@@ -57,10 +57,12 @@ fn malformed(message: impl std::fmt::Display) -> Failure {
     Failure::new(ReplyError::MalformedReply, message)
 }
 
-/// Connect, send `line` and read one reply line, all by the budget's
-/// deadline.
+/// Check the socket is this user's, then connect, send `line` and read one
+/// reply line, all by the budget's deadline.
 pub async fn attempt(socket: &Path, line: &[u8], budget: &Budget) -> Result<Vec<u8>, Attempt> {
     let exchange = async {
+        trust::verify(socket)?;
+
         let mut stream = UnixStream::connect(socket)
             .await
             .map_err(|error| Attempt::connect_error(socket, error))?;

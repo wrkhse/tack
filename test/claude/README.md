@@ -64,8 +64,13 @@ written in; `TACK_DAEMON_BIN` names the daemon.
 
 The run is bounded at 90 seconds and passes when:
 
-- the `system/init` frame lists exactly the `tack` plugin as loaded, with
-  no `plugin_errors`; the rows below count only then;
+- the `system/init` frame lists the `tack` plugin as loaded, with no
+  `plugin_errors`, and no other plugin apart from Claude Code's built-ins,
+  those whose `source` ends in `@builtin` or whose name starts with
+  `cc-plugin-`; the rows below count only then;
+- no stream-json frame or stderr line says the `tack` hooks module was not
+  loaded, did not load or was unloaded, or a hook of it was skipped, and no
+  line says hooks modules are turned off for the process;
 - the session output holds `tack: push blocked` and
   `guard_status: daemon ok`;
 - `daemon.log` holds `hook toolBefore deny push blocked` and
@@ -73,9 +78,17 @@ The run is bounded at 90 seconds and passes when:
 - the mod recorder holds at least one call;
 - neither recorder holds a push, checked whether or not the mod loaded.
 
-On failure the output, the stand-in's request log, both recorders and
-`daemon.log` are copied to `TACK_CLAUDE_ARTIFACTS`. The throwaway tree is
-always removed.
+For each plugin in the `system/init` frame, the run prints how many
+stream-json frames and stderr lines mention hooks and that plugin, and
+prints them. On failure it prints the last 60 lines of Claude Code's stderr,
+and copies the stream-json output, the stderr, the stand-in's request log,
+both recorders and `daemon.log` to `TACK_CLAUDE_ARTIFACTS`. The throwaway
+tree is always removed.
+
+Before the run, the workflow runs `claude plugin validate dist/claude` as a
+diagnostic that never fails the job. It prints the output, says whether it
+holds a `hooks:` line, which a loadable hooks module gives, and keeps it as
+`validate.log` in the same artifact folder.
 
 Run it only in CI or a disposable container, from the repository root, with
 Node, Rust 1.100 and Claude Code 2.1.328 installed:

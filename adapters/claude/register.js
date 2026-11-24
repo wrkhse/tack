@@ -210,6 +210,20 @@ async function runTool($, e, spec) {
   return { result: content.map((item) => item.text).join("\n") };
 }
 
+// One hook serves every tack tool, since Claude Code loads a hook only as a
+// function declared at the top of the file. The tool's name, less the mod
+// prefix, picks its spec; a name outside TOOLS is refused.
+async function serveTool($, e, next) {
+  const name = typeof e.tool === "string" && e.tool.startsWith(TOOL_PREFIX)
+    ? e.tool.slice(TOOL_PREFIX.length)
+    : undefined;
+  const spec = TOOLS.find((tool) => tool.name === name);
+
+  if (spec === undefined) return denial(denyName("unknown_tool"));
+
+  return runTool($, e, spec);
+}
+
 // Claude Code skips a hook that throws or overruns, and the call runs. This
 // answer stands in its place: a deny unless `next` already ran.
 function refuseFailed($, e, next) {
@@ -230,12 +244,22 @@ async function registerTools($, e, next) {
   return started;
 }
 
+// A session.start hook that throws is skipped without a word, and the
+// session runs with no tack tool. Name the failure in the transcript, then
+// let the session start: the result is next's, replayed if it already ran.
+function logStartFailed($, e, next) {
+  const error = next.error || {};
+  const detail = error.message ? ": " + error.message : "";
+
+  $.ui.log("tack: session registration failed: " + error.kind + detail);
+  return next(e);
+}
+
 export const register = (on, options) => {
-  on("session.start", registerTools);
+  on("session.start", registerTools).catch(logStartFailed);
   on("tool.call", { tool: "Bash" }, guardBash).catch(refuseFailed);
 
   for (const spec of TOOLS) {
-    const serve = ($, e, next) => runTool($, e, spec);
-    on("tool.call", { tool: TOOL_PREFIX + spec.name }, serve).catch(refuseFailed);
+    on("tool.call", { tool: TOOL_PREFIX + spec.name }, serveTool).catch(refuseFailed);
   }
 };

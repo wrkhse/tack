@@ -381,6 +381,7 @@ dependencies = [
 name = "tack-hook"
 version = "0.1.0-rc.2"
 dependencies = [
+ "rustix",
  "serde_json",
  "tack_protocol",
  "tokio",
