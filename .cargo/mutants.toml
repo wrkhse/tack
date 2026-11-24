@@ -8,4 +8,12 @@ test_tool = 'nextest'
 exclude_re = [
   # Untested by Rust tests; covered by the e2e job.
   'crates/daemon/src/main\.rs.*replace main with \(\)',
+  # Process entry points and environment readers. Rust tests may neither spawn
+  # these binaries nor set environment variables (no unsafe in edition 2024),
+  # so the CI e2e jobs, which run the built binaries in a real environment, are
+  # their coverage.
+  'crates/cli/src/main\.rs.*replace main with \(\)',
+  'crates/hook/src/main\.rs.*replace main with \(\)',
+  'crates/hook/src/locate\.rs.*replace state_dir ->',
+  'crates/hook/src/locate\.rs.*replace daemon_bin ->',
 ]

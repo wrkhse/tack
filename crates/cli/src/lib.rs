@@ -1,12 +1,14 @@
 //! Public API for the tack build pipeline.
 //!
 //! The CLI assembles a sandbox, validates a plugin's needs, and renders the
-//! `OpenCode` wrapper. No daemon, `OpenCode` process, or child process starts here.
+//! `OpenCode` wrapper or the Claude Code mod. No daemon, agent, or child process
+//! starts here.
 
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use tack_adapter_claude::{ModConfig, ModError};
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
 use tack_luau::{Capabilities, EngineError, Limits, Sandbox};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest};
@@ -20,6 +22,9 @@ pub const START_TIMEOUT_MS: u64 = 3000;
 /// `TACK_DAEMON_BIN` environment variable or PATH at run time, so the emitted
 /// script is host-independent.
 pub const DAEMON_BIN: &str = "tack-daemon";
+/// Hook client the Claude Code mod runs by its plain name, so the host's PATH
+/// resolves it.
+pub const HOOK_BIN: &str = "tack-hook";
 
 const SUPPORTED: [&str; 3] = ["sandbox", "daemon", "opencode"];
 
@@ -29,6 +34,7 @@ pub enum BuildError {
     Sandbox(EngineError),
     Manifest(serde_json::Error),
     Render(WrapperError),
+    RenderMod(ModError),
     Io(std::io::Error),
 }
 
@@ -39,6 +45,7 @@ impl fmt::Display for BuildError {
             Self::Sandbox(error) => write!(f, "sandbox:tack: {error}"),
             Self::Manifest(error) => write!(f, "manifest:{error}"),
             Self::Render(error) => write!(f, "render:{error}"),
+            Self::RenderMod(error) => write!(f, "render:{error}"),
             Self::Io(error) => write!(f, "io:{error}"),
         }
     }
@@ -51,6 +58,7 @@ impl Error for BuildError {
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
+            Self::RenderMod(error) => Some(error),
             Self::Io(error) => Some(error),
         }
     }
@@ -73,6 +81,33 @@ impl Default for BuildOptions {
     }
 }
 
+/// Canonicalize a plugin folder, read its manifest in the sandbox, and check
+/// its needs.
+fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
+    let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
+    let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
+        .and_then(|limits| Sandbox::new(&plugin_dir, limits, Capabilities::default()))
+        .and_then(|sandbox| sandbox.manifest())
+        .map_err(BuildError::Sandbox)?;
+    let manifest: PluginManifest =
+        serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
+
+    for need in &manifest.needs {
+        if !SUPPORTED.contains(&need.as_str()) {
+            return Err(BuildError::NeedMissing(need.clone()));
+        }
+    }
+
+    Ok((plugin_dir, manifest))
+}
+
+fn deny_reasons() -> Vec<&'static str> {
+    DenyReason::ALL
+        .iter()
+        .map(|reason| reason.as_str())
+        .collect()
+}
+
 /// Read one plugin, check its needs, and emit the `OpenCode` wrapper and manifest.
 ///
 /// The plugin folder is canonicalized so the emitted wrapper carries its
@@ -92,24 +127,8 @@ pub fn build(
     out: &Path,
     options: BuildOptions,
 ) -> Result<(PathBuf, PathBuf), BuildError> {
-    let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
-    let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
-        .and_then(|limits| Sandbox::new(&plugin_dir, limits, Capabilities::default()))
-        .and_then(|sandbox| sandbox.manifest())
-        .map_err(BuildError::Sandbox)?;
-    let manifest: PluginManifest =
-        serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
-
-    for need in &manifest.needs {
-        if !SUPPORTED.contains(&need.as_str()) {
-            return Err(BuildError::NeedMissing(need.clone()));
-        }
-    }
-
-    let reasons: Vec<&str> = DenyReason::ALL
-        .iter()
-        .map(|reason| reason.as_str())
-        .collect();
+    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = WrapperConfig {
         manifest: &manifest,
@@ -134,6 +153,51 @@ pub fn build(
     std::fs::write(&descriptor, pretty).map_err(BuildError::Io)?;
 
     Ok((index, descriptor))
+}
+
+/// Read one plugin, check its needs, and emit the Claude Code mod into
+/// `<out>/claude`: `.claude-plugin/plugin.json`, `hooks/hooks.json` and
+/// `hooks/register.js`.
+///
+/// The mod runs [`HOOK_BIN`] by its plain name with `--plugin` and the
+/// canonical plugin folder, the only host-specific value in the output.
+///
+/// # Errors
+///
+/// Returns [`BuildError::Io`] when the plugin folder or output files cannot be
+/// read or written, [`BuildError::Sandbox`] when the plugin cannot be loaded
+/// or read, [`BuildError::Manifest`] when the manifest does not match the
+/// wire contract, [`BuildError::NeedMissing`] for an unsupported need, and
+/// [`BuildError::RenderMod`] when the mod cannot be rendered.
+pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
+    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let reasons = deny_reasons();
+    let plugin = plugin_dir.to_string_lossy();
+    let config = ModConfig {
+        manifest: &manifest,
+        hook_bin: HOOK_BIN,
+        plugin_dir: plugin.as_ref(),
+        protocol_version: PROTOCOL_VERSION,
+        deny_reasons: &reasons,
+        version: env!("CARGO_PKG_VERSION"),
+    };
+    let files = tack_adapter_claude::render(&config).map_err(BuildError::RenderMod)?;
+
+    let dest = out.join("claude");
+    let mut written = Vec::with_capacity(files.len());
+
+    for file in files {
+        let path = dest.join(file.path);
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(BuildError::Io)?;
+        }
+
+        std::fs::write(&path, file.contents).map_err(BuildError::Io)?;
+        written.push(path);
+    }
+
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -173,5 +237,17 @@ mod tests {
         );
 
         assert!(BuildError::NeedMissing("daemon".into()).source().is_none());
+    }
+
+    #[test]
+    fn a_mod_render_error_names_its_class_and_source() {
+        let render = ModError::ToolName("guard status".into());
+        let build_error = BuildError::RenderMod(render.clone());
+
+        assert_eq!(build_error.to_string(), "render:tool_name:guard status");
+        assert_eq!(
+            build_error.source().map(ToString::to_string),
+            Some(render.to_string())
+        );
     }
 }

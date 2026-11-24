@@ -1,0 +1,8 @@
+#!/bin/sh
+# The mod recorder: a second path, not named git, for the processes the
+# generated mod starts. run.mjs installs it as tack-hook first on PATH and
+# fills in the two placeholders below, each exactly once in this file: the
+# recorder file and the real tack-hook, as quoted absolute paths. Nothing is
+# read from the environment, since $.process.run may not pass it on.
+echo "call $*" >> @RECORDER@
+exec @EXEC@ "$@"

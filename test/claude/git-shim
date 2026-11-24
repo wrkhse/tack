@@ -1,0 +1,13 @@
+#!/bin/sh
+# The harness recorder: Claude Code's Bash tool resolves git here first on
+# PATH. A push is recorded and never run; every other call goes to real git.
+if [ "$1" = "push" ]; then
+  echo "$*" >> "$TACK_RECORDER"
+  echo "recorded"
+  exit 0
+fi
+if [ -z "$TACK_REAL_GIT" ]; then
+  echo "tack-claude: real git not found" >&2
+  exit 127
+fi
+exec "$TACK_REAL_GIT" "$@"
