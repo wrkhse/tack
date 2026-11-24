@@ -52,7 +52,7 @@ the tarball for your target, verify it, unpack it, and put its three binaries
 on your `PATH`:
 
 ```bash
-TAG=v0.1.0-rc.3
+TAG=v0.1.0-rc.4
 TARGET=x86_64-apple-darwin
 base="https://github.com/wrkhse/tack/releases/download/$TAG"
 
@@ -77,6 +77,14 @@ A Claude mod build sends each guarded Bash call and each tack tool run to
 ```bash
 tack build fixtures/safe-push --out dist --target claude
 ```
+
+A Pi mod build targets a pinned Pi session:
+
+```bash
+tack build fixtures/safe-push --out dist --target pi
+```
+
+It emits `dist/pi/extension.js` for the pinned Pi session.
 
 This is a pre-release for trying the current slice, not a stable release.
 
