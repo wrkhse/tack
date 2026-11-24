@@ -6,7 +6,8 @@
 // always cleaned up.
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -88,27 +89,44 @@ function execVersion() {
 }
 
 function checkPiBuild() {
-  const out = path.join(home, "pi-dist");
-  const extension = path.join(out, "pi", "extension.js");
+  const outputs = [path.join(home, "pi-dist-a"), path.join(home, "pi-dist-b")];
 
-  const result = spawnSync(
-    path.join(binDir, "tack"),
-    ["build", pluginDir, "--out", out, "--target", "pi"],
-    {
-      encoding: "utf8",
-      env: { ...process.env, HOME: home },
-      timeout: PI_BUILD_TIMEOUT_MS,
-      killSignal: "SIGKILL",
-    },
-  );
+  for (const out of outputs) {
+    const result = spawnSync(
+      path.join(binDir, "tack"),
+      ["build", pluginDir, "--out", out, "--target", "pi"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, HOME: home },
+        timeout: PI_BUILD_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      },
+    );
+    assert(
+      result.status === 0,
+      "tack build --target pi failed for " + out + ": " +
+        (result.error?.message ?? result.stderr.trim()),
+    );
+  }
+
+  const extensions = outputs.map((out) => readFileSync(path.join(out, "pi", "extension.js")));
+  const [digestA, digestB] = extensions.map((bytes) => createHash("sha256").update(bytes).digest("hex"));
+  assert(digestA === digestB, "Pi extension SHA-256 mismatch: " + digestA + " != " + digestB);
+
+  const text = extensions[0].toString("utf8");
+  const lines = text.split("\n");
+  const pluginPath = path.resolve(pluginDir);
   assert(
-    result.status === 0,
-    "tack build --target pi failed: " + (result.error?.message ?? result.stderr.trim()),
+    lines.includes("const PLUGIN_DIR = " + JSON.stringify(pluginPath) + ";"),
+    "Pi extension has no PLUGIN_DIR set to " + pluginPath,
+  );
+  assert(lines.includes("const BUDGET_MS = 8500;"), "Pi extension has no 8500 ms budget");
+  assert(
+    /^export default function register\(/m.test(text),
+    "Pi extension has no top-level default register export",
   );
 
-  const stat = statSync(extension, { throwIfNoEntry: false });
-  assert(stat?.isFile() && stat.size > 0, "missing or empty Pi extension: " + extension);
-  console.log("PASS tack build --target pi wrote " + extension);
+  console.log("PASS tack build --target pi produced matching extensions with the expected path, budget, and export");
 }
 
 function startDaemon() {
