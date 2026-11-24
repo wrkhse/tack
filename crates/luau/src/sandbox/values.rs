@@ -1,25 +1,49 @@
 use mlua::{Lua, Table, Value as LuaValue};
-use serde_json::Value;
-use tack_protocol::wire::ToolDef;
+use serde_json::{Map, Value};
 
 use super::errors::{EngineError, LimitCause, MAX_DEPTH, MAX_ENTRIES};
 
-pub(super) fn read_tool(table: &Table, key: &str) -> Result<ToolDef, EngineError> {
+pub(super) fn read_tool(table: &Table, key: &str) -> Result<(String, Value), EngineError> {
     let name = table
-        .get::<Option<String>>("name")?
+        .raw_get::<Option<String>>("name")?
         .unwrap_or_else(|| key.to_owned());
     let description = table
-        .get::<Option<String>>("description")?
+        .raw_get::<Option<String>>("description")?
         .unwrap_or_default();
-    let input = match table.get::<Option<LuaValue>>("input")? {
-        Some(value) => lua_to_json(value, 0)?,
-        None => serde_json::json!({}),
-    };
-    Ok(ToolDef {
-        name,
-        description,
-        input,
-    })
+    let mut fields = Map::new();
+
+    for (index, field) in table.pairs::<LuaValue, LuaValue>().enumerate() {
+        if index >= MAX_ENTRIES {
+            return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                limit: MAX_ENTRIES,
+            }));
+        }
+
+        let (key, value) = field?;
+        if matches!(value, LuaValue::Function(_)) {
+            continue;
+        }
+
+        let LuaValue::String(key) = key else {
+            return Err(EngineError::InvalidResult(
+                "tool field key must be a string".into(),
+            ));
+        };
+        let key = key.to_str()?.to_string();
+        if matches!(key.as_str(), "name" | "description") {
+            continue;
+        }
+
+        fields.insert(key, lua_to_json(value, 0)?);
+    }
+
+    fields.insert("name".into(), Value::String(name.clone()));
+    fields.insert("description".into(), Value::String(description));
+    fields
+        .entry("input")
+        .or_insert_with(|| Value::Object(Map::new()));
+
+    Ok((name, Value::Object(fields)))
 }
 
 pub(super) fn lua_key(value: LuaValue) -> Result<String, EngineError> {
@@ -28,28 +52,25 @@ pub(super) fn lua_key(value: LuaValue) -> Result<String, EngineError> {
         LuaValue::Integer(value) => Ok(value.to_string()),
         LuaValue::Number(value) => Ok(value.to_string()),
         _ => Err(EngineError::InvalidResult(
-            "tack: tool key must be a string".into(),
+            "tool key must be a string".into(),
         )),
     }
 }
 
 /// Translate a table position into the one-based integer keys Lua expects.
 fn lua_index(index: usize) -> Result<i64, EngineError> {
-    i64::try_from(index)
-        .map_err(|_| EngineError::InvalidResult("tack: table index out of range".into()))
+    i64::try_from(index).map_err(|_| EngineError::InvalidResult("table index out of range".into()))
 }
 
 /// Accept only positive integers inside the entry ceiling as array keys.
 fn array_position(index: impl TryInto<usize>) -> Result<usize, EngineError> {
     let position = index
         .try_into()
-        .map_err(|_| EngineError::InvalidResult("tack: unsupported table key".into()))?;
+        .map_err(|_| EngineError::InvalidResult("unsupported table key".into()))?;
     if (1..=MAX_ENTRIES).contains(&position) {
         Ok(position)
     } else {
-        Err(EngineError::InvalidResult(
-            "tack: unsupported table key".into(),
-        ))
+        Err(EngineError::InvalidResult("unsupported table key".into()))
     }
 }
 
@@ -65,7 +86,7 @@ pub(super) fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaV
                 value
                     .as_f64()
                     .map(LuaValue::Number)
-                    .ok_or_else(|| EngineError::InvalidResult("tack: invalid JSON number".into()))
+                    .ok_or_else(|| EngineError::InvalidResult("invalid JSON number".into()))
             },
             |number| Ok(LuaValue::Integer(number)),
         ),
@@ -100,22 +121,21 @@ pub(super) fn json_to_lua(lua: &Lua, value: &Value, depth: usize) -> Result<LuaV
     }
 }
 
-fn lua_to_json(value: LuaValue, depth: usize) -> Result<Value, EngineError> {
+pub(super) fn lua_to_json(value: LuaValue, depth: usize) -> Result<Value, EngineError> {
     if depth > MAX_DEPTH {
         return Err(EngineError::Limit(LimitCause::TooDeep { limit: MAX_DEPTH }));
     }
     match value {
         LuaValue::Nil => Ok(Value::Null),
+        LuaValue::LightUserData(value) if value.0.is_null() => Ok(Value::Null),
         LuaValue::Boolean(value) => Ok(Value::Bool(value)),
         LuaValue::Integer(value) => Ok(Value::Number(value.into())),
         LuaValue::Number(value) => serde_json::Number::from_f64(value)
             .map(Value::Number)
-            .ok_or_else(|| EngineError::InvalidResult("tack: non-finite Lua number".into())),
+            .ok_or_else(|| EngineError::InvalidResult("non-finite Lua number".into())),
         LuaValue::String(value) => Ok(Value::String(value.to_str()?.to_string())),
         LuaValue::Table(table) => lua_table_to_json(&table, depth),
-        _ => Err(EngineError::InvalidResult(
-            "tack: unsupported Lua value".into(),
-        )),
+        _ => Err(EngineError::InvalidResult("unsupported Lua value".into())),
     }
 }
 
@@ -134,7 +154,7 @@ fn lua_table_to_json(table: &Table, depth: usize) -> Result<Value, EngineError> 
         match key {
             LuaValue::String(key) => {
                 if array_mode == Some(true) {
-                    return Err(EngineError::InvalidResult("tack: mixed table keys".into()));
+                    return Err(EngineError::InvalidResult("mixed table keys".into()));
                 }
                 array_mode = Some(false);
                 let converted = lua_to_json(value, depth.saturating_add(1))?;
@@ -143,16 +163,14 @@ fn lua_table_to_json(table: &Table, depth: usize) -> Result<Value, EngineError> 
             LuaValue::Integer(index) => {
                 let position = array_position(index)?;
                 if array_mode == Some(false) {
-                    return Err(EngineError::InvalidResult("tack: mixed table keys".into()));
+                    return Err(EngineError::InvalidResult("mixed table keys".into()));
                 }
                 array_mode = Some(true);
                 let converted = lua_to_json(value, depth.saturating_add(1))?;
                 array.push((position, converted));
             }
             _ => {
-                return Err(EngineError::InvalidResult(
-                    "tack: unsupported table key".into(),
-                ));
+                return Err(EngineError::InvalidResult("unsupported table key".into()));
             }
         }
     }
@@ -163,7 +181,7 @@ fn lua_table_to_json(table: &Table, depth: usize) -> Result<Value, EngineError> 
     array.sort_by_key(|(index, _)| *index);
     for (position, (index, _)) in array.iter().enumerate() {
         if *index != position.saturating_add(1) {
-            return Err(EngineError::InvalidResult("tack: sparse Lua array".into()));
+            return Err(EngineError::InvalidResult("sparse Lua array".into()));
         }
     }
     Ok(Value::Array(
@@ -176,7 +194,7 @@ mod tests {
     use super::*;
 
     fn unsupported() -> EngineError {
-        EngineError::InvalidResult("tack: unsupported table key".into())
+        EngineError::InvalidResult("unsupported table key".into())
     }
 
     #[test]
@@ -189,7 +207,7 @@ mod tests {
         assert_eq!(
             lua_index(usize::MAX),
             Err(EngineError::InvalidResult(
-                "tack: table index out of range".into()
+                "table index out of range".into()
             ))
         );
     }
@@ -273,6 +291,29 @@ mod tests {
     }
 
     #[test]
+    fn lua_to_json_converts_a_float_to_the_exact_json_number() {
+        assert_eq!(
+            lua_to_json(LuaValue::Number(1.5), 0),
+            Ok(serde_json::json!(1.5))
+        );
+        assert_eq!(
+            lua_to_json(LuaValue::Number(f64::NAN), 0),
+            Err(EngineError::InvalidResult("non-finite Lua number".into()))
+        );
+    }
+
+    #[test]
+    fn lua_to_json_maps_only_the_null_light_userdata_to_null() {
+        assert_eq!(lua_to_json(LuaValue::NULL, 0), Ok(Value::Null));
+
+        let pointer = std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr();
+        assert_eq!(
+            lua_to_json(LuaValue::LightUserData(mlua::LightUserData(pointer)), 0),
+            Err(EngineError::InvalidResult("unsupported Lua value".into()))
+        );
+    }
+
+    #[test]
     fn lua_table_to_json_refuses_a_sparse_array() {
         let lua = Lua::new();
         let table = lua.create_table().unwrap();
@@ -280,7 +321,7 @@ mod tests {
         table.set(3i64, "c").unwrap();
         assert_eq!(
             lua_table_to_json(&table, 0),
-            Err(EngineError::InvalidResult("tack: sparse Lua array".into()))
+            Err(EngineError::InvalidResult("sparse Lua array".into()))
         );
     }
 }

@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
 use tack_cli::{BuildOptions, DAEMON_BIN, build};
-use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest};
+use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest, ToolDef};
 
 const GOLDEN: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -58,13 +58,15 @@ fn fixture() -> PathBuf {
 }
 
 fn manifest() -> PluginManifest {
-    let sandbox = tack_runtime::Sandbox::new(
-        &fixture(),
-        tack_protocol::DEFAULT_MEMORY_BYTES,
-        tack_protocol::DEFAULT_DEADLINE_MS,
-    )
-    .expect("fixture loads");
-    sandbox.manifest().expect("manifest reads")
+    PluginManifest {
+        name: "safe-push".into(),
+        needs: vec![],
+        tools: vec![ToolDef {
+            name: "guard_status".into(),
+            description: "Reports whether the tack daemon is running".into(),
+            input: serde_json::json!({}),
+        }],
+    }
 }
 
 fn reasons() -> Vec<&'static str> {
@@ -182,9 +184,7 @@ fn the_manifest_json_has_the_plugin_contract() {
 
     let (_, descriptor) = build(&fixture(), &out, BuildOptions::default()).expect("fixture builds");
     let bytes = std::fs::read(&descriptor).expect("manifest is readable");
-    let manifest: PluginManifest = serde_json::from_slice(&bytes).expect("manifest parses");
+    let emitted: PluginManifest = serde_json::from_slice(&bytes).expect("manifest parses");
 
-    assert_eq!(manifest.name, "safe-push");
-    assert_eq!(manifest.tools.len(), 1);
-    assert_eq!(manifest.tools[0].name, "guard_status");
+    assert_eq!(emitted, manifest());
 }

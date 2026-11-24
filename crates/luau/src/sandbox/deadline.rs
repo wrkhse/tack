@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+#[derive(Debug)]
 pub(super) struct Deadline {
     started: Mutex<Instant>,
     budget_us: AtomicU64,
@@ -25,7 +26,7 @@ impl Deadline {
 
         *started = Instant::now();
         self.budget_us
-            .store(ms.saturating_mul(1000), Ordering::Relaxed);
+            .store(ms.saturating_mul(1000).min(u64::MAX - 1), Ordering::Relaxed);
     }
 
     pub(super) fn disarm(&self) {
@@ -60,5 +61,13 @@ mod tests {
 
         deadline.disarm();
         assert!(!deadline.expired(), "disarming clears the budget");
+    }
+
+    #[test]
+    fn a_saturated_budget_stays_below_the_disarmed_sentinel() {
+        let deadline = Deadline::new();
+        deadline.begin(u64::MAX);
+
+        assert_eq!(deadline.budget_us.load(Ordering::Relaxed), u64::MAX - 1);
     }
 }

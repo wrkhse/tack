@@ -25,10 +25,11 @@ use mlua::{Function, Lua, Result as LuaResult, Table, Value as LuaValue};
 const MAX_MODULE_BYTES: u64 = 1024 * 1024;
 
 /// Error raised by the global require refuser. Scoped requires shadow it.
-pub const REQUIRE_CONFINED: &str = "tack: require is confined to the plugin folder";
+pub const REQUIRE_CONFINED: &str = "require is confined to the plugin folder";
 
 /// A refused module load, carrying the specifier that caused it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RequireCause {
     Absolute(String),
     Parent(String),
@@ -44,17 +45,17 @@ impl fmt::Display for RequireCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Absolute(spec) => {
-                write!(f, "tack: require rejects absolute path: {spec}")
+                write!(f, "require rejects absolute path: {spec}")
             }
-            Self::Parent(spec) => write!(f, "tack: require rejects parent path: {spec}"),
-            Self::Escape(spec) => write!(f, "tack: require escapes plugin folder: {spec}"),
-            Self::Cycle(spec) => write!(f, "tack: require cycle detected: {spec}"),
-            Self::Missing(spec) => write!(f, "tack: require module not found: {spec}"),
-            Self::TooLarge(spec) => write!(f, "tack: require module too large: {spec}"),
+            Self::Parent(spec) => write!(f, "require rejects parent path: {spec}"),
+            Self::Escape(spec) => write!(f, "require escapes plugin folder: {spec}"),
+            Self::Cycle(spec) => write!(f, "require cycle detected: {spec}"),
+            Self::Missing(spec) => write!(f, "require module not found: {spec}"),
+            Self::TooLarge(spec) => write!(f, "require module too large: {spec}"),
             Self::Unreadable { spec, detail } => {
-                write!(f, "tack: require cannot read {spec}: {detail}")
+                write!(f, "require cannot read {spec}: {detail}")
             }
-            Self::Poisoned => f.write_str("tack: require state lock poisoned"),
+            Self::Poisoned => f.write_str("require state lock poisoned"),
         }
     }
 }
@@ -79,7 +80,7 @@ enum Resolved {
 impl RequireState {
     pub fn new(folder: &Path) -> Result<Self, String> {
         let root = std::fs::canonicalize(folder)
-            .map_err(|error| format!("tack: plugin folder unavailable: {error}"))?;
+            .map_err(|error| format!("plugin folder unavailable: {error}"))?;
         Ok(Self {
             root,
             cache: HashMap::new(),
@@ -204,7 +205,7 @@ fn scoped_require(
     lua.create_function(move |lua, requested: LuaValue| {
         let spec = match requested {
             LuaValue::String(value) => value.to_str()?.to_string(),
-            _ => return Err(mlua::Error::runtime("tack: require expects a string path")),
+            _ => return Err(mlua::Error::runtime("require expects a string path")),
         };
 
         let resolved = {
@@ -285,38 +286,38 @@ mod tests {
         for (cause, expected) in [
             (
                 RequireCause::Absolute("/etc/passwd".into()),
-                "tack: require rejects absolute path: /etc/passwd".to_owned(),
+                "require rejects absolute path: /etc/passwd".to_owned(),
             ),
             (
                 RequireCause::Parent("../x".into()),
-                "tack: require rejects parent path: ../x".to_owned(),
+                "require rejects parent path: ../x".to_owned(),
             ),
             (
                 RequireCause::Escape("./linked".into()),
-                "tack: require escapes plugin folder: ./linked".to_owned(),
+                "require escapes plugin folder: ./linked".to_owned(),
             ),
             (
                 RequireCause::Cycle("./a".into()),
-                "tack: require cycle detected: ./a".to_owned(),
+                "require cycle detected: ./a".to_owned(),
             ),
             (
                 RequireCause::Missing("./nope".into()),
-                "tack: require module not found: ./nope".to_owned(),
+                "require module not found: ./nope".to_owned(),
             ),
             (
                 RequireCause::TooLarge("./big".into()),
-                "tack: require module too large: ./big".to_owned(),
+                "require module too large: ./big".to_owned(),
             ),
             (
                 RequireCause::Unreadable {
                     spec: "./x".into(),
                     detail: "boom".into(),
                 },
-                "tack: require cannot read ./x: boom".to_owned(),
+                "require cannot read ./x: boom".to_owned(),
             ),
             (
                 RequireCause::Poisoned,
-                "tack: require state lock poisoned".to_owned(),
+                "require state lock poisoned".to_owned(),
             ),
         ] {
             assert_eq!(cause.to_string(), expected);

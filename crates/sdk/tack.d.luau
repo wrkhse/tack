@@ -8,23 +8,23 @@
 -- requires under --!strict using this declaration.
 declare require: (path: string) -> any
 
--- The call a toolBefore hook inspects before the harness runs it.
-export type ToolCall = {
-    tool: string,
-    name: string,
-    input: any,
-    session_id: string?,
-}
-
 export type DenyResult = { deny: string }
-export type RewriteResult = { rewrite: { command: string } }
+export type RewriteResult = { rewrite: any }
 export type ToolBeforeResult = DenyResult | RewriteResult | nil
 
 -- Rust-backed helpers passed as the second hook and tool argument.
 export type HookCtx = {
     deny: (reason: string) -> DenyResult,
-    rewrite: (command: string) -> RewriteResult,
+    rewrite: (payload: any) -> RewriteResult,
     allow: () -> nil,
+}
+
+-- The tack daemon adds this metadata for toolBefore hooks. The payload is
+-- the tool input. The daemon overlays rewrite fields on that input.
+export type ToolBeforeCtx = HookCtx & {
+    tool: string,
+    name: string,
+    session_id: string?,
 }
 
 export type Content = { kind: string, text: string }
@@ -41,6 +41,6 @@ export type ToolDef = {
 export type Plugin = {
     name: string,
     needs: { string }?,
-    toolBefore: ((call: ToolCall, ctx: HookCtx) -> ToolBeforeResult)?,
+    toolBefore: ((payload: any, ctx: ToolBeforeCtx) -> ToolBeforeResult)?,
     tools: { [string]: ToolDef }?,
 }
