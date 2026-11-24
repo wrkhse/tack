@@ -108,8 +108,14 @@ jobs:
 
           echo "$RUNNER_TEMP/tack-bin" >> "$GITHUB_PATH"
           export PATH="$RUNNER_TEMP/tack-bin:$PATH"
-          tack --version
-          tack --version | grep -F "${TAG#v}"
+          actual="$(tack --version)"
+          expected="tack ${TAG#v}"
+          echo "tack --version: $actual"
+          echo "expected:       $expected"
+          if [ "$actual" != "$expected" ]; then
+            echo "tack --version printed '$actual', expected '$expected'" >&2
+            exit 1
+          fi
 
       - name: Install OpenCode
         run: |
@@ -365,8 +371,14 @@ jobs:
             echo "TACK_HOOK_BIN=$RUNNER_TEMP/tack-bin/tack-hook"
           } >> "$GITHUB_ENV"
           export PATH="$RUNNER_TEMP/tack-bin:$PATH"
-          tack --version
-          tack --version | grep -F "${TAG#v}"
+          actual="$(tack --version)"
+          expected="tack ${TAG#v}"
+          echo "tack --version: $actual"
+          echo "expected:       $expected"
+          if [ "$actual" != "$expected" ]; then
+            echo "tack --version printed '$actual', expected '$expected'" >&2
+            exit 1
+          fi
 
       # Every install script is off; only claude-code's own postinstall,
       # which places the native binary, runs.
