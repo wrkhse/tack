@@ -98,4 +98,6 @@ Build the example plugin with
 
 - [Slice 1: one plugin, OpenCode, unsandboxed daemon](docs/plans/slices/slice-1.md) —
   Implemented (v0.1.0-rc.2).
+- [Slice 2: one plugin, Claude Code, native hook client](docs/plans/slices/slice-2.md) —
+  Implemented (v0.1.0-rc.3).
 - More harnesses and MCP support — Planned.
