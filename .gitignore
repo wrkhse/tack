@@ -11,3 +11,8 @@ node_modules/
 .tsbuild/
 coverage/
 .vitest/
+/verdict-pi.txt
+/demo-pi.gif
+/run-pi.*
+/frames/
+/fontprobe.png

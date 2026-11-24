@@ -1,16 +1,19 @@
 // Smoke test for one release tarball, run on that target's CI runner.
-// It unpacks into a throwaway HOME, checks the version, then drives the real
-// daemon with one NDJSON hook request twice: over its Unix socket directly,
-// and through the released tack-hook binary. Every wait has a deadline and
-// the daemon, the hook and the temp folder are always cleaned up.
+// It unpacks into a throwaway HOME, checks the version, builds the Pi
+// extension, then drives the real daemon with one NDJSON hook request twice:
+// over its Unix socket directly, and through the released tack-hook binary.
+// Every wait has a deadline and the daemon, the hook and the temp folder are
+// always cleaned up.
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const TOTAL_TIMEOUT_MS = 20_000;
+const PI_BUILD_TIMEOUT_MS = 5_000;
 const DAEMON_START_TIMEOUT_MS = 5_000;
 const REPLY_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 5_000;
@@ -83,6 +86,47 @@ function execVersion() {
   assert(result.status === 0, "tack --version failed: " + result.stderr.trim());
 
   return result.stdout;
+}
+
+function checkPiBuild() {
+  const outputs = [path.join(home, "pi-dist-a"), path.join(home, "pi-dist-b")];
+
+  for (const out of outputs) {
+    const result = spawnSync(
+      path.join(binDir, "tack"),
+      ["build", pluginDir, "--out", out, "--target", "pi"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, HOME: home },
+        timeout: PI_BUILD_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      },
+    );
+    assert(
+      result.status === 0,
+      "tack build --target pi failed for " + out + ": " +
+        (result.error?.message ?? result.stderr.trim()),
+    );
+  }
+
+  const extensions = outputs.map((out) => readFileSync(path.join(out, "pi", "extension.js")));
+  const [digestA, digestB] = extensions.map((bytes) => createHash("sha256").update(bytes).digest("hex"));
+  assert(digestA === digestB, "Pi extension SHA-256 mismatch: " + digestA + " != " + digestB);
+
+  const text = extensions[0].toString("utf8");
+  const lines = text.split("\n");
+  const pluginPath = path.resolve(pluginDir);
+  assert(
+    lines.includes("const PLUGIN_DIR = " + JSON.stringify(pluginPath) + ";"),
+    "Pi extension has no PLUGIN_DIR set to " + pluginPath,
+  );
+  assert(lines.includes("const BUDGET_MS = 8500;"), "Pi extension has no 8500 ms budget");
+  assert(
+    /^export default function register\(/m.test(text),
+    "Pi extension has no top-level default register export",
+  );
+
+  console.log("PASS tack build --target pi produced matching extensions with the expected path, budget, and export");
 }
 
 function startDaemon() {
@@ -286,6 +330,7 @@ async function main() {
 
   unpack();
   checkVersion();
+  checkPiBuild();
   startDaemon();
   await waitForSocket();
 
