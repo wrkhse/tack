@@ -1,14 +1,35 @@
 //! The tack command-line entry point.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use tack_cli::{BuildError, BuildOptions, build};
+use tack_cli::{BuildError, BuildOptions, build, build_claude};
 
 const MAX_TIMEOUT_MS: u64 = 60_000;
 
 enum CliError {
     Usage(String),
     Build(BuildError),
+}
+
+/// The agent a build emits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    OpenCode,
+    Claude,
+}
+
+struct BuildArgs<'a> {
+    out: &'a str,
+    target: Target,
+    options: BuildOptions,
+}
+
+fn parse_target(value: &str) -> Result<Target, CliError> {
+    match value {
+        "opencode" => Ok(Target::OpenCode),
+        "claude" => Ok(Target::Claude),
+        _ => Err(CliError::Usage(format!("unknown target {value}"))),
+    }
 }
 
 fn print_version() {
@@ -27,8 +48,10 @@ fn parse_timeout(flag: &str, value: &str) -> Result<u64, CliError> {
     Ok(timeout)
 }
 
-fn parse_build_args(rest: &[String]) -> Result<(&str, BuildOptions), CliError> {
+fn parse_build_args(rest: &[String]) -> Result<BuildArgs<'_>, CliError> {
     let mut out = None;
+    let mut target = Target::OpenCode;
+    let mut timed = false;
     let mut options = BuildOptions::default();
     let mut args = rest.iter();
 
@@ -39,18 +62,44 @@ fn parse_build_args(rest: &[String]) -> Result<(&str, BuildOptions), CliError> {
             .as_str();
         match flag.as_str() {
             "--out" => out = Some(value),
+            "--target" => target = parse_target(value)?,
             "--call-timeout-ms" => {
                 options.call_timeout_ms = parse_timeout(flag, value)?;
+                timed = true;
             }
             "--start-timeout-ms" => {
                 options.start_timeout_ms = parse_timeout(flag, value)?;
+                timed = true;
             }
             _ => return Err(CliError::Usage(format!("unknown build option {flag}"))),
         }
     }
 
     let out = out.ok_or_else(|| CliError::Usage("build needs --out <dist-dir>".into()))?;
-    Ok((out, options))
+
+    if timed && target == Target::Claude {
+        return Err(CliError::Usage(
+            "the timeout options apply only to --target opencode".into(),
+        ));
+    }
+
+    Ok(BuildArgs {
+        out,
+        target,
+        options,
+    })
+}
+
+fn run_build(plugin_dir: &Path, args: &BuildArgs) -> Result<Vec<PathBuf>, BuildError> {
+    let out = Path::new(args.out);
+
+    match args.target {
+        Target::OpenCode => {
+            let (index, manifest) = build(plugin_dir, out, args.options)?;
+            Ok(vec![index, manifest])
+        }
+        Target::Claude => build_claude(plugin_dir, out),
+    }
 }
 
 fn dispatch(args: &[String]) -> Result<(), CliError> {
@@ -58,11 +107,12 @@ fn dispatch(args: &[String]) -> Result<(), CliError> {
         [] => print_version(),
         [flag] if flag == "--version" => print_version(),
         [command, plugin_dir, rest @ ..] if command == "build" => {
-            let (out, options) = parse_build_args(rest)?;
-            let (index, manifest) =
-                build(Path::new(plugin_dir), Path::new(out), options).map_err(CliError::Build)?;
-            println!("{}", index.display());
-            println!("{}", manifest.display());
+            let args = parse_build_args(rest)?;
+            let written = run_build(Path::new(plugin_dir), &args).map_err(CliError::Build)?;
+
+            for path in written {
+                println!("{}", path.display());
+            }
         }
         _ => return Err(CliError::Usage("unknown arguments".into())),
     }
@@ -77,6 +127,7 @@ fn main() {
                 eprintln!("tack: {message}");
                 eprintln!(
                     "usage: tack [--version | build <plugin-dir> --out <dist-dir> \
+                     [--target opencode|claude] \
                      [--call-timeout-ms <n>] [--start-timeout-ms <n>]]"
                 );
                 std::process::exit(2);
@@ -97,12 +148,22 @@ mod tests {
         args.iter().map(|arg| (*arg).to_owned()).collect()
     }
 
-    fn parsed(args: &[&str]) -> (String, BuildOptions) {
+    fn parsed_with_target(args: &[&str]) -> (String, Target, BuildOptions) {
         let args = owned(args);
-        let Ok((out, options)) = parse_build_args(&args) else {
+        let Ok(BuildArgs {
+            out,
+            target,
+            options,
+        }) = parse_build_args(&args)
+        else {
             panic!("arguments parse");
         };
-        (out.to_owned(), options)
+        (out.to_owned(), target, options)
+    }
+
+    fn parsed(args: &[&str]) -> (String, BuildOptions) {
+        let (out, _, options) = parsed_with_target(args);
+        (out, options)
     }
 
     fn error_for(args: &[&str]) -> CliError {
@@ -165,6 +226,49 @@ mod tests {
                 "60001"
             ])),
             "--start-timeout-ms must be at most 60000"
+        );
+    }
+
+    #[test]
+    fn parse_build_args_reads_the_target() {
+        assert_eq!(parsed_with_target(&["--out", "/dist"]).1, Target::OpenCode);
+        assert_eq!(
+            parsed_with_target(&["--out", "/dist", "--target", "opencode"]).1,
+            Target::OpenCode
+        );
+
+        let (out, target, _) = parsed_with_target(&["--target", "claude", "--out", "/dist"]);
+        assert_eq!(out, "/dist");
+        assert_eq!(target, Target::Claude);
+    }
+
+    #[test]
+    fn parse_build_args_refuses_a_bad_target_and_claude_timeouts() {
+        assert_eq!(
+            usage(error_for(&["--out", "/dist", "--target", "codex"])),
+            "unknown target codex"
+        );
+        assert_eq!(
+            usage(error_for(&[
+                "--out",
+                "/dist",
+                "--target",
+                "claude",
+                "--call-timeout-ms",
+                "250"
+            ])),
+            "the timeout options apply only to --target opencode"
+        );
+        assert_eq!(
+            usage(error_for(&[
+                "--start-timeout-ms",
+                "250",
+                "--target",
+                "claude",
+                "--out",
+                "/dist"
+            ])),
+            "the timeout options apply only to --target opencode"
         );
     }
 }

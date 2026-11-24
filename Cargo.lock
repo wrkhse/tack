@@ -351,6 +351,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tack-adapter-claude"
+version = "0.1.0-rc.2"
+dependencies = [
+ "serde_json",
+ "tack_protocol",
+]
+
+[[package]]
 name = "tack-adapter-opencode"
 version = "0.1.0-rc.2"
 dependencies = [
@@ -363,9 +371,19 @@ name = "tack-cli"
 version = "0.1.0-rc.2"
 dependencies = [
  "serde_json",
+ "tack-adapter-claude",
  "tack-adapter-opencode",
  "tack-luau",
  "tack_protocol",
+]
+
+[[package]]
+name = "tack-hook"
+version = "0.1.0-rc.2"
+dependencies = [
+ "serde_json",
+ "tack_protocol",
+ "tokio",
 ]
 
 [[package]]

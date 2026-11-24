@@ -15,6 +15,9 @@ pub use crate::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES, MAX_FRAME_BYTES, MAX_
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The machine-readable class carried by an error reply.
+///
+/// The daemon sends the first seven. A native client such as `tack-hook`
+/// writes the transport kinds itself when it fails closed without a verdict.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyError {
@@ -25,6 +28,12 @@ pub enum ReplyError {
     UnsupportedHook,
     UnknownTool,
     ProtocolVersion,
+    SocketMissing,
+    Timeout,
+    SocketClosed,
+    MalformedReply,
+    DaemonError,
+    Aborted,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -134,10 +143,11 @@ pub enum DenyReason {
     UnknownTool,
     DaemonError,
     Aborted,
+    UnsupportedHook,
 }
 
 impl DenyReason {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::SocketMissing,
         Self::Timeout,
         Self::SocketClosed,
@@ -148,6 +158,7 @@ impl DenyReason {
         Self::UnknownTool,
         Self::DaemonError,
         Self::Aborted,
+        Self::UnsupportedHook,
     ];
 
     #[must_use]
@@ -163,6 +174,7 @@ impl DenyReason {
             Self::UnknownTool => "unknown_tool",
             Self::DaemonError => "daemon_error",
             Self::Aborted => "aborted",
+            Self::UnsupportedHook => "unsupported_hook",
         }
     }
 }
@@ -371,6 +383,26 @@ mod tests {
     }
 
     #[test]
+    fn transport_reply_errors_round_trip_as_named_strings() {
+        for (error, expected) in [
+            (ReplyError::SocketMissing, "socket_missing"),
+            (ReplyError::Timeout, "timeout"),
+            (ReplyError::SocketClosed, "socket_closed"),
+            (ReplyError::MalformedReply, "malformed_reply"),
+            (ReplyError::DaemonError, "daemon_error"),
+            (ReplyError::Aborted, "aborted"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(error).unwrap(),
+                serde_json::json!(expected)
+            );
+
+            let decoded: ReplyError = serde_json::from_value(serde_json::json!(expected)).unwrap();
+            assert_eq!(decoded, error);
+        }
+    }
+
+    #[test]
     fn wire_errors_display_their_messages() {
         for (error, expected) in [
             (WireError::TooLarge, "frame exceeds the size cap"),
@@ -469,6 +501,7 @@ mod tests {
             (DenyReason::UnknownTool, "unknown_tool"),
             (DenyReason::DaemonError, "daemon_error"),
             (DenyReason::Aborted, "aborted"),
+            (DenyReason::UnsupportedHook, "unsupported_hook"),
         ] {
             assert_eq!(reason.as_str(), expected);
             assert_eq!(

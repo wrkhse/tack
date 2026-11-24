@@ -15,6 +15,7 @@ serde_json.workspace = true
 tack_protocol = { path = "../protocol" }
 tack-luau = { path = "../luau" }
 tack-adapter-opencode = { path = "../../adapters/opencode" }
+tack-adapter-claude = { path = "../../adapters/claude" }
 
 [lints]
 workspace = true
