@@ -86,6 +86,12 @@ tack build fixtures/safe-push --out dist --target pi
 
 It emits `dist/pi/extension.js` for the pinned Pi session.
 
+A Codex mod build emits the Codex hook and MCP files under `dist/codex/`:
+
+```bash
+tack build fixtures/safe-push --out dist --target codex
+```
+
 This is a pre-release for trying the current slice, not a stable release.
 
 ### From source
