@@ -11,9 +11,11 @@ if ! command -v node >/dev/null 2>&1; then
   exit 2
 fi
 
-# The inner subshell runs node; the redirection outside it also swallows a
-# shell's own notice of a node killed by a signal, so stderr stays exact.
-output=$( (node "$script") 2>/dev/null )
+# An inner sh runs and reaps node with its stderr closed off, so a shell's
+# notice of a node killed by a signal ("Segmentation fault") goes nowhere,
+# and it turns a signal into a plain exit 1 the outer shell sees normally.
+# shellcheck disable=SC2016 # $1 expands in the inner sh, not here.
+output=$(sh -c 'node "$1" 2>/dev/null; s=$?; if [ "$s" -gt 128 ]; then exit 1; fi; exit "$s"' sh "$script" 2>/dev/null)
 status=$?
 
 if [ "$status" -ne 0 ]; then

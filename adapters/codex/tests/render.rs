@@ -127,7 +127,10 @@ fn the_wrapper_names_a_missing_node_apart_from_a_failing_one() {
             "  echo 'tack: node_missing' >&2",
             "  exit 2",
             "fi",
-            r#"output=$( (node "$script") 2>/dev/null )"#,
+            concat!(
+                r#"output=$(sh -c 'node "$1" 2>/dev/null; s=$?; "#,
+                r#"if [ "$s" -gt 128 ]; then exit 1; fi; exit "$s"' sh "$script" 2>/dev/null)"#,
+            ),
             "status=$?",
             r#"if [ "$status" -ne 0 ]; then"#,
             "  echo 'tack: node_failed' >&2",

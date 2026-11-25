@@ -38,7 +38,9 @@ Each hook command is `sh '<dir>/run-hook.sh' '<dir>/<script>.js'`. Codex runs
 it with `$SHELL -lc` and lets the call run on exit 127 or a crash, so the
 wrapper exits 2 with an exact reason on stderr and nothing on stdout:
 `tack: node_missing` when there is no `node`, and `tack: node_failed` when
-`node` exits nonzero or dies of a signal.
+`node` exits nonzero or dies of a signal. An inner `sh` with its stderr
+discarded runs and reaps `node`, so a shell's crash notice never reaches the
+wrapper's stderr.
 
 The `config.toml` fragment marks the `tack` server `required`, so a server
 that fails to start is a named failure, and passes `TACK_RECORDER`,
