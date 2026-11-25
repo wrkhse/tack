@@ -43,6 +43,7 @@ const ERROR_REASONS = new Map([
   ["limit", "limit"],
   ["script", "script"],
   ["unknown_tool", "unknown_tool"],
+  ["busy", "busy"],
   ["malformed", "daemon_error"],
   ["too_large", "daemon_error"],
   ["unsupported_hook", "daemon_error"],
@@ -202,10 +203,15 @@ function forward(request, signal) {
           deny("malformed_reply");
           return;
         }
+
+        // An overflow reply may arrive before the daemon knows the request id.
+        const overflow =
+          reply?.id === 0 && reply.kind === "error" && reply.error === "busy";
+
         if (
           !reply ||
           typeof reply !== "object" ||
-          reply.id !== request.id ||
+          (!overflow && reply.id !== request.id) ||
           !KINDS.has(reply.kind)
         ) {
           deny("malformed_reply");

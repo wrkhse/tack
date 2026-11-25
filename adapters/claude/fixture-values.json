@@ -22,7 +22,8 @@
     "aborted",
     "unsupported_hook",
     "socket_untrusted",
-    "hook_missing"
+    "hook_missing",
+    "busy"
   ],
   "PROTOCOL_VERSION": 1,
   "BUDGET_MS": 9000,

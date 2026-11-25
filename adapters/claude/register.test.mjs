@@ -15,6 +15,7 @@ const TEMPLATE = readFileSync(
 const VALUES = JSON.parse(
   readFileSync(new URL("./fixture-values.json", import.meta.url), "utf8"),
 );
+const { PROTOCOL_VERSION } = VALUES;
 
 let SOURCE = TEMPLATE;
 
@@ -404,6 +405,7 @@ const ERRORS = [
   ["unknown_tool", "unknown_tool"],
   ["unsupported_hook", "unsupported_hook"],
   ["socket_untrusted", "socket_untrusted"],
+  ["busy", "busy"],
   ["malformed", "daemon_error"],
   ["too_large", "daemon_error"],
   ["something_new", "daemon_error"],
@@ -420,6 +422,20 @@ for (const [error, reason] of ERRORS) {
     assert.deepEqual(result, { deny: "tack: " + reason });
   });
 }
+
+await check("an id-0 busy reply denies busy", async () => {
+  const { result } = await guard((request) =>
+    reply(request, {
+      id: 0,
+      version: PROTOCOL_VERSION,
+      kind: "error",
+      error: "busy",
+      message: "tack: busy",
+    }),
+  );
+
+  assert.deepEqual(result, { deny: "tack: busy" });
+});
 
 await check("the catch refuses a failed guard unless next ran", async () => {
   const registrations = await load();

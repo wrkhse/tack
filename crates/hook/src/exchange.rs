@@ -104,8 +104,9 @@ async fn read_reply(stream: &mut UnixStream) -> Result<Vec<u8>, Failure> {
     Ok(reply)
 }
 
-/// A reply passes when it is a protocol reply of this version that answers
-/// `request`: the same id, and the same kind or an error.
+/// A reply must use this protocol version. A `busy` error passes with any
+/// id because the daemon can reject the connection without reading `request`.
+/// Every other reply must have the same id and be the same kind or an error.
 ///
 /// # Errors
 ///
@@ -127,7 +128,15 @@ pub fn check(reply: &[u8], request: &Request) -> Result<(), Failure> {
         ));
     }
 
-    if id != request.id() {
+    let busy = matches!(
+        parsed,
+        Reply::Error {
+            error: ReplyError::Busy,
+            ..
+        }
+    );
+
+    if !busy && id != request.id() {
         return Err(malformed(format_args!(
             "the reply id {id} does not match the request id {}",
             request.id()
@@ -151,6 +160,47 @@ mod tests {
 
     /// Far above a correct read, so only a broken read reaches it.
     const READ_LIMIT: Duration = Duration::from_secs(2);
+
+    fn tool_request() -> Request {
+        Request::Tool {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            name: "status".into(),
+            input: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn a_busy_reply_without_the_request_id_passes() {
+        let reply = wire::encode_line(&Reply::Error {
+            id: 0,
+            version: PROTOCOL_VERSION,
+            error: ReplyError::Busy,
+            message: "tack: busy".into(),
+        })
+        .unwrap();
+
+        assert_eq!(check(&reply, &tool_request()), Ok(()));
+    }
+
+    #[test]
+    fn a_non_busy_error_without_the_request_id_is_malformed() {
+        let reply = wire::encode_line(&Reply::Error {
+            id: 0,
+            version: PROTOCOL_VERSION,
+            error: ReplyError::Script,
+            message: "tack: script".into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            check(&reply, &tool_request()),
+            Err(Failure::new(
+                ReplyError::MalformedReply,
+                "the reply id 0 does not match the request id 7",
+            ))
+        );
+    }
 
     #[test]
     fn a_missing_socket_is_socket_missing_and_a_refusing_one_socket_closed() {

@@ -118,10 +118,14 @@ function readReply(request, done) {
     return refuse("malformed_reply");
   }
 
+  // An overflow reply may arrive before the daemon knows the request id.
+  const overflow =
+    reply?.id === 0 && reply.kind === "error" && reply.error === "busy";
+
   if (
     !reply ||
     typeof reply !== "object" ||
-    reply.id !== request.id ||
+    (!overflow && reply.id !== request.id) ||
     !KINDS.has(reply.kind)
   ) {
     return refuse("malformed_reply");

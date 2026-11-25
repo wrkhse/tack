@@ -535,7 +535,7 @@ mod tests {
                 concat!(
                     r#"["socket_missing","timeout","socket_closed","malformed_reply","#,
                     r#""protocol_version","limit","script","unknown_tool","daemon_error","#,
-                    r#""aborted","unsupported_hook","socket_untrusted","hook_missing"]"#,
+                    r#""aborted","unsupported_hook","socket_untrusted","hook_missing","busy"]"#,
                 ),
             ),
         ];

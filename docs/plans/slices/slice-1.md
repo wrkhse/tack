@@ -155,6 +155,7 @@ pub enum ReplyError {
     Script,
     UnsupportedHook,
     UnknownTool,
+    Busy,
 }
 ```
 
@@ -173,10 +174,15 @@ pub enum DenyReason {
     Script,
     UnknownTool,
     DaemonError,
+    Aborted,
+    UnsupportedHook,
+    SocketUntrusted,
+    HookMissing,
+    Busy,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 9];
+    pub const ALL: [DenyReason; 14];
     pub fn as_str(self) -> &'static str;
 }
 ```
