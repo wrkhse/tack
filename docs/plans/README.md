@@ -13,6 +13,8 @@
 
 [Release: v0.1.0-rc.4](https://github.com/wrkhse/tack/releases/tag/v0.1.0-rc.4).
 
+[Release: v0.1.0-rc.5](https://github.com/wrkhse/tack/releases/tag/v0.1.0-rc.5).
+
 [Architecture plan: tack#1](https://github.com/wrkhse/tack/issues/1).
 
 [Slice 1 issue: tack#34](https://github.com/wrkhse/tack/issues/34).
