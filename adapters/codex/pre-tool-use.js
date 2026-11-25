@@ -2,9 +2,9 @@
 // Codex runs this once per call that matches ^Bash$ and reads one JSON line
 // from stdout. An empty object lets the call run and a block stops it. Codex
 // lets the call run on a timeout, another exit code or malformed output, so
-// every path here prints exactly one of those two results and exits 0.
+// every path here prints exactly one of those two results and exits 0. Every
+// Bash command goes to tack-hook; the plugin's toolBefore decides which run.
 
-const GUARDED = "git push";
 const HOOK_ID = 1;
 
 function verdict(reason) {
@@ -56,7 +56,7 @@ async function decide(event, deadline) {
   if (event?.tool_name !== "Bash") return null;
 
   const command = event.tool_input?.command;
-  if (typeof command !== "string" || !command.startsWith(GUARDED)) return null;
+  if (typeof command !== "string") return null;
 
   const result = await forward({
     kind: "hook",

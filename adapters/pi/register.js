@@ -164,7 +164,7 @@ export default function register(pi) {
       if (event.toolName !== "bash") return;
 
       const command = event.input?.command;
-      if (typeof command !== "string" || !command.startsWith("git push")) return;
+      if (typeof command !== "string") return;
 
       const id = nextId();
       const result = await forward({

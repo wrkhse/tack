@@ -147,14 +147,31 @@ test("Pi registers one guarded Bash handler, tool and session load marker", () =
   assert.deepEqual(h.starts, []);
 });
 
-test("only a Bash command starting with git push goes to tack-hook", async () => {
+test("every Bash command goes to tack-hook and other tools skip it", async () => {
   const h = harness(answer(ALLOW));
+  const commands = ["git status", "echo git push", "git push origin main"];
 
-  assert.equal(await guard(h, bash("git status")), undefined);
-  assert.equal(await guard(h, bash("echo git push")), undefined);
   assert.equal(await guard(h, { ...bash(), toolName: "read" }), undefined);
   assert.deepEqual(h.starts, []);
-  assert.deepEqual(h.writes, []);
+
+  for (const command of commands) {
+    assert.equal(await guard(h, bash(command)), undefined);
+  }
+
+  const invocation = [
+    "tack-hook", ["--plugin", "/plugins/safe-push"],
+    { stdio: ["pipe", "pipe", "ignore"] },
+  ];
+  const requests = commands.map((command, index) => ({
+    kind: "hook", id: index + 1, version: 1, hook: "toolBefore",
+    call: { tool: "shell", name: "Bash", input: { command }, session_id: null },
+  }));
+
+  assert.deepEqual(h.starts, [invocation, invocation, invocation]);
+  assert.deepEqual(h.lines, requests.map((request) =>
+    JSON.stringify(request) + "\n"));
+  assert.deepEqual(h.writes, [1, 2, 3].map((id) =>
+    ["/recorder", `{"call":"bash","id":${id}}\n`]));
 });
 
 test("allow uses the last non-empty stdout line without rewriting", async () => {

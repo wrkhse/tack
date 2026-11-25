@@ -54,6 +54,9 @@ under a header that ticks off each step.
   local origin/main, and builds `fixtures/safe-push` with the released CLI
   for `--target pi`. It runs `pi --mode json --no-extensions` with
   `-e <dist>/pi/extension.js`. video-edit-pi.json is its edit plan.
+- record-codex.mjs records Codex 0.172.0 in two sessions: one pushes and
+  calls guard_status, one runs a harmless `git status --short`.
+  video-edit-codex.json is its edit plan.
 
 record-claude.mjs installs test/claude/git-shim as git and
 test/claude/mod-recorder as tack-hook, first on PATH, with the recorder file
@@ -130,3 +133,81 @@ Terminal Control. It exits 0 only on proof success and an all-true verdict.
 Run record-pi.mjs only in the record workflow on a Linux CI runner. Never
 run the recorder, Pi, tack-hook, the daemon, or Terminal Control for this
 recording on a workstation. Use static checks on the host.
+
+### Codex recording
+
+record-codex.mjs reads `TACK_CLI`, `TACK_DAEMON_BIN`, `TACK_HOOK_BIN` and
+`RUNNER_TEMP` with the defaults in the table above, and runs the `codex`
+launcher first on PATH under its own Node. The workflow installs Codex with
+`npm ci --prefix test/codex --ignore-scripts` and checks its version.
+
+Setup follows test/codex/run.mjs. Codex gets its own `HOME`, `CODEX_HOME`
+and XDG folders, and `HOME/.local/state/tack`, mode 0700, is
+`TACK_STATE_DIR`. `tack build fixtures/safe-push --target codex` writes the
+hooks and their trust into `CODEX_HOME`, and the generated
+`<dist>/codex/config.toml` goes at the top of `CODEX_HOME/config.toml`. The
+recorder starts the released tack-daemon on `tack.sock`, logging to
+`daemon.log`. The git shim from test/claude records pushes in
+`TACK_RECORDER`; the hook recorder, first on PATH as `tack-hook`, passes
+each call to the released one and logs each verdict to a file outside git.
+Each session runs a fresh test/codex/model.mjs on 127.0.0.1 as a custom
+Responses provider with `supports_websockets=false` and
+`CODEX_API_KEY=dummy`:
+
+| Session  | Prompt                 | The model calls                         |
+| -------- | ---------------------- | --------------------------------------- |
+| normal   | push my branch         | `git push origin main`, `guard_status` |
+| harmless | check the working tree | `git status --short`                    |
+
+The left pane, titled `Codex session`, shows the `codex exec --json`
+events and what Codex returned to the model for each Bash call, read from
+the stand-in's request log. The right pane is `daemon.log`. Panes are 72
+and 48 columns and keep at most 200 lines. The workflow waits for these
+exact strings in turn and marks each:
+
+| Marker       | String                                   |
+| ------------ | ---------------------------------------- |
+| ready        | `Codex session`                          |
+| denied       | `tack: push blocked`                     |
+| tool         | `guard_status: daemon ok`                |
+| allow        | `PreToolUse allowed: git status --short` |
+| session-done | `SESSION_DONE`                           |
+| proof        | `NO_PUSH_REACHED_ORIGIN`                 |
+
+Each step holds the left pane still for 2.5 seconds before the next line
+joins it. After `SESSION_DONE` the recorder takes one proof command on
+stdin, `git log --oneline origin/main`, and prints
+`NO_PUSH_REACHED_ORIGIN` once it exits 0 and the git shim holds no push.
+The proof stays on screen 4 seconds before the recorder finishes. The
+model, build, daemon start, each session and the proof command are bounded
+at 10, 15, 5, 90 and 10 seconds. video-edit-codex.json captions the four
+steps at half speed, then three quarters, holding each clip's last frame
+2.5 seconds and the final frame 3.5 seconds.
+
+The recorder writes verdict-codex.txt at the repository root, also when a
+step fails, from the same judgement that ticks the header:
+
+    push_denied=true
+    guard_status_ran=true
+    no_push_recorded=true
+    hook_called=true
+    extension_loaded=true
+    harmless_allowed=true
+
+Each row is true when the pane shows `tack: push blocked` and daemon.log
+holds `tack-daemon: hook toolBefore deny push blocked`; the pane shows
+`guard_status: daemon ok` and daemon.log holds
+`tack-daemon: tool guard_status ok`; the git shim recorded no push; the hook
+recorder holds exactly the deny, the guard_status and the allow verdicts, in
+that order; `TACK_RECORDER` holds one `{"call":"tack-loaded"}` for each
+session; and the pane shows the allow line, which needs `?? harmless.txt`
+from real git in what Codex returned, while daemon.log holds
+`tack-daemon: hook toolBefore allow`. The workflow greps each row after
+`termctrl stop`. The recorder exits 0 only with an all-true verdict and the
+proof shown, then removes its processes, any daemon tack-hook started, and
+the scratch tree, and stays up until Terminal Control stops it.
+
+Run record-codex.mjs only in the record workflow on a Linux CI runner; it
+refuses to start elsewhere. Never run it, Codex, tack-hook, the daemon or
+Terminal Control for this recording on a workstation. Use static checks on
+the host. The GIF is a workflow artifact, not a file in the repository.

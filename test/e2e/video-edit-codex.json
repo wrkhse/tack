@@ -1,0 +1,32 @@
+{
+  "clips": [
+    {
+      "from": "ready",
+      "to": "denied",
+      "caption": "1. git push is denied",
+      "speed": 0.5,
+      "hold_ms": 2500
+    },
+    {
+      "from": "denied",
+      "to": "tool",
+      "caption": "2. guard_status runs",
+      "speed": 0.5,
+      "hold_ms": 2500
+    },
+    {
+      "from": "tool",
+      "to": "allow",
+      "caption": "3. a harmless git status runs",
+      "speed": 0.75,
+      "hold_ms": 2500
+    },
+    {
+      "from": "allow",
+      "to": "proof",
+      "caption": "4. tack-hook carried every call",
+      "speed": 0.75,
+      "hold_ms": 3500
+    }
+  ]
+}

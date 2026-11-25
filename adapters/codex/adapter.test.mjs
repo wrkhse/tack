@@ -184,10 +184,29 @@ test("deny prints the one block form with a trimmed reason", async () => {
   assert.deepEqual(w.writes, [["/recorder", '{"call":"bash","id":1}\n']]);
 });
 
-test("only a Bash command starting with git push goes to tack-hook", async () => {
+test("every Bash command goes to tack-hook, which decides", async () => {
+  for (const [command, body, expected] of [
+    ["git status", ALLOW, ALLOWED],
+    ["echo git push", ALLOW, ALLOWED],
+    ["git push origin main", DENY, block("push blocked")],
+  ]) {
+    const w = world(answer(body));
+
+    assert.deepEqual(await startHook(w, send(bashEvent(command))), expected);
+    assert.deepEqual(w.starts, [[
+      "tack-hook", ["--plugin", "/plugins/safe-push"],
+      { stdio: ["pipe", "pipe", "ignore"] },
+    ]]);
+    assert.deepEqual(w.lines, [JSON.stringify({
+      kind: "hook", id: 1, version: 1, hook: "toolBefore",
+      call: { tool: "shell", name: "Bash", input: { command }, session_id: null },
+    }) + "\n"]);
+    assert.deepEqual(w.writes, [["/recorder", '{"call":"bash","id":1}\n']]);
+  }
+});
+
+test("a call that is not a Bash command string skips tack-hook", async () => {
   for (const event of [
-    bashEvent("git status"),
-    bashEvent("echo git push"),
     { ...bashEvent(), tool_name: "apply_patch" },
     { ...bashEvent(), tool_input: { command: ["git", "push"] } },
   ]) {

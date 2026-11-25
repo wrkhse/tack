@@ -37,8 +37,9 @@ attached to the rc.4 release.
 
 `tack build --target pi` emits one ES module, `pi/extension.js`, with one
 top-level `export default function register(pi)`. Pi runs no Luau. The
-extension registers a `tool_call` handler for `bash` commands starting with
-`git push`, and a `guard_status` tool accepting an empty object. Each call
+extension registers a `tool_call` handler that sends every `bash` call to
+tack, where the plugin decides, and a `guard_status` tool accepting an empty
+object. Each call
 runs the released `tack-hook` binary from `PATH` with `--plugin` and the
 canonical plugin folder. Rule execution stays in the daemon's Luau sandbox.
 
