@@ -238,8 +238,7 @@ when the hook throws or overruns before the call runs. Each `tack-hook` run
 is bounded by a 9000 ms budget inside Claude Code's 10-second hook limit.
 
 Files: `adapters/claude/src/lib.rs`, `adapters/claude/register.js`,
-`adapters/claude/golden/register.js`, `crates/cli/src/lib.rs` and
-`crates/cli/src/main.rs`.
+`crates/cli/src/lib.rs` and `crates/cli/src/main.rs`.
 
 ```bash
 tack build fixtures/safe-push --out dist --target claude
@@ -356,12 +355,15 @@ pub enum BuildError {
 ```
 
 **Verification.** `adapters/claude/tests/render.rs` pins the rendered module
-to `golden/register.js` and checks the load rules: one top-level export, no
+to the template: equal line counts, byte-identical non-placeholder lines,
+exact filled values, whole-string equivalence after substitution, and no
+leftover `__TACK_` token. It checks the load rules: one top-level export, no
 `import`, `require` or `node:`, `$` only at call sites, every timer global on
 `$.clock`, a `.catch` on every `tool.call` registration, every hook and
 handler a top-level function, and `tack-hook` run with a 9000 ms budget.
 `node adapters/claude/register.test.mjs` runs 47 fail-closed checks on the
-golden module under a scripted `$`, with no process run.
+module rendered in memory with the same fixture values, under a scripted
+`$`, with no process run.
 `crates/cli/tests/build_claude.rs` checks the exact folder, the canonical
 plugin folder, no `git push` or `push blocked` in the output, and an unknown
 need failing as `need_missing:barn` with nothing written.

@@ -43,8 +43,7 @@ runs the released `tack-hook` binary from `PATH` with `--plugin` and the
 canonical plugin folder. Rule execution stays in the daemon's Luau sandbox.
 
 Files: `adapters/pi/src/lib.rs`, `adapters/pi/register.js`,
-`adapters/pi/golden/register.js`, `adapters/pi/tests/render.rs` and
-`adapters/pi/extension.test.mjs`.
+`adapters/pi/tests/render.rs` and `adapters/pi/extension.test.mjs`.
 
 ```bash
 tack build fixtures/safe-push --out dist --target pi
@@ -93,11 +92,14 @@ impl fmt::Display for ExtensionError {}
 impl Error for ExtensionError {}
 ```
 
-**Verification.** `adapters/pi/tests/render.rs` compares the output exactly
-with the golden module and checks the default export, Node imports, path
-escaping, fixed budget and protocol constants. The Node suite injects spawn,
-file writes and a clock, with no process or OS signal. It checks the load
-marker, exact requests and recorder lines, reply validation, missing hook,
+**Verification.** `adapters/pi/tests/render.rs` checks equal line counts,
+byte-identical non-placeholder lines, exact filled values, whole-string
+equivalence after substitution, and no leftover `__TACK_` token. It checks
+the default export, Node imports, path escaping, fixed budget and protocol
+constants. The Node suite renders the template in memory with the same
+fixture values and runs that output with injected spawn, file writes and a
+clock, with no process or OS signal. It checks the load marker, exact requests
+and recorder lines, reply validation, missing hook,
 deadline, frame bounds and fail-closed errors.
 
 ### CLI build and native hook
@@ -129,7 +131,9 @@ uses that named reason when spawning `tack-hook` fails with `ENOENT`.
 Other process and pipe failures deny `daemon_error`.
 
 **Verification.** The CLI's in-process dispatch tests check the exact
-output path and golden contents, refuse Pi timeout flags, and refuse an
+output path, equal line counts, byte-identical non-placeholder lines,
+exact filled values, whole-string equivalence after substitution, and no
+leftover `__TACK_` token. They refuse Pi timeout flags and refuse an
 unknown need as `need_missing:barn` with no output written. Protocol tests
 pin the named reason's wire spelling. The extension tests check missing-hook
 denials for both Bash and tool requests, with no recorder writes.

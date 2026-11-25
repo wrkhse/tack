@@ -3,8 +3,15 @@ import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const golden = new URL("./golden/register.js", import.meta.url);
-const source = readFileSync(golden, "utf8");
+const fixturePath = new URL("./fixture-values.json", import.meta.url);
+const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
+const { DENY_REASONS: reasonNames } = fixture;
+const template = new URL("./register.js", import.meta.url);
+let source = readFileSync(template, "utf8");
+
+for (const [name, value] of Object.entries(fixture)) {
+  source = source.replaceAll(`__TACK_${name}__`, () => JSON.stringify(value));
+}
 
 // Replace only the module boundary. Every call uses an injected spawn, file
 // writer and clock; the suite cannot launch tack-hook or send OS signals.
@@ -208,12 +215,6 @@ test("a successful allow also appends exactly one recorder line", async () => {
   assert.equal(await guard(h), undefined);
   assert.deepEqual(h.writes, [["/recorder", '{"call":"bash","id":1}\n']]);
 });
-
-const reasonNames = [
-  "socket_missing", "timeout", "socket_closed", "malformed_reply",
-  "protocol_version", "limit", "script", "unknown_tool", "daemon_error",
-  "aborted", "unsupported_hook", "socket_untrusted", "hook_missing",
-];
 
 for (const error of [...reasonNames, "malformed", "too_large", "unrecognized"]) {
   test("error envelope answers either request and is not recorded: " + error,

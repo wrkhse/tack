@@ -11,9 +11,9 @@ use tack_adapter_opencode::{WrapperConfig, WrapperError};
 use tack_cli::{BuildOptions, DAEMON_BIN, build};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest, ToolDef};
 
-const GOLDEN: &str = include_str!(concat!(
+const TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../adapters/opencode/golden/opencode.js"
+    "/../../adapters/opencode/opencode.js"
 ));
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -105,14 +105,58 @@ fn constant<'a>(script: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
-fn render_matches_the_checked_in_golden() {
+fn render_fills_only_the_template_placeholders() {
     let manifest = manifest();
     let reasons = reasons();
     let config = config(&manifest, "/plugins/tack", 2000, 3000, &reasons);
 
     let rendered = tack_adapter_opencode::render(&config).expect("render");
 
-    assert_eq!(rendered, GOLDEN);
+    assert_eq!(rendered.find("__TACK_"), None);
+
+    let template_lines = TEMPLATE.split_inclusive('\n');
+    let rendered_lines = rendered.split_inclusive('\n');
+    assert_eq!(
+        template_lines.clone().count(),
+        rendered_lines.clone().count()
+    );
+
+    for (template_line, rendered_line) in template_lines.zip(rendered_lines) {
+        if !template_line.contains("__TACK_") {
+            assert_eq!(rendered_line, template_line);
+        }
+    }
+
+    let values = [
+        (
+            "MANIFEST",
+            concat!(
+                r#"{"name":"safe-push","needs":[],"tools":[{"name":"guard_status","#,
+                r#""description":"Reports whether the tack daemon is running","input":{}}]}"#,
+            ),
+        ),
+        ("DAEMON_BIN", r#""tack-daemon""#),
+        ("PLUGIN_DIR", r#""/plugins/tack""#),
+        (
+            "DENY_REASONS",
+            concat!(
+                r#"["socket_missing","timeout","socket_closed","malformed_reply","#,
+                r#""protocol_version","limit","script","unknown_tool","daemon_error","#,
+                r#""aborted","unsupported_hook","socket_untrusted","hook_missing"]"#,
+            ),
+        ),
+        ("CALL_TIMEOUT_MS", "2000"),
+        ("START_TIMEOUT_MS", "3000"),
+        ("PROTOCOL_VERSION", "1"),
+    ];
+    let mut expected = TEMPLATE.to_owned();
+
+    for (name, value) in values {
+        assert_eq!(constant(&rendered, name), value, "{name}");
+        expected = expected.replace(&format!("__TACK_{name}__"), value);
+    }
+
+    assert_eq!(rendered, expected);
 }
 
 #[test]

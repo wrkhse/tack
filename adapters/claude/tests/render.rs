@@ -4,55 +4,80 @@
 
 #![cfg(test)]
 
-use serde_json::json;
+use serde_json::Value;
 use tack_adapter_claude::{
     BUDGET_MS, HOOKS_JSON, ModConfig, ModError, ModFile, PLUGIN_JSON, REGISTER_JS, render,
 };
 use tack_protocol::wire::{DenyReason, PluginManifest, ToolDef};
 
-const GOLDEN: &str = include_str!("../golden/register.js");
+const TEMPLATE: &str = include_str!("../register.js");
+const FIXTURE_VALUES: &str = include_str!("../fixture-values.json");
 
-const REASONS: [&str; 13] = [
-    "socket_missing",
-    "timeout",
-    "socket_closed",
-    "malformed_reply",
-    "protocol_version",
-    "limit",
-    "script",
-    "unknown_tool",
-    "daemon_error",
-    "aborted",
-    "unsupported_hook",
-    "socket_untrusted",
-    "hook_missing",
-];
+struct Fixture<'a> {
+    manifest: PluginManifest,
+    hook_bin: &'a str,
+    plugin_dir: &'a str,
+    protocol_version: u32,
+    deny_reasons: Vec<&'a str>,
+}
 
-fn manifest() -> PluginManifest {
-    PluginManifest {
-        name: "safe-push".into(),
-        needs: vec![],
-        tools: vec![ToolDef {
-            name: "guard_status".into(),
-            description: "Reports whether the tack daemon is running".into(),
-            input: json!({}),
-        }],
+impl<'a> Fixture<'a> {
+    fn from_values(values: &'a Value) -> Self {
+        let tools = values["TOOLS"]
+            .as_array()
+            .expect("fixture tools")
+            .iter()
+            .map(|tool| ToolDef {
+                name: tool["name"].as_str().expect("fixture tool name").into(),
+                description: tool["description"]
+                    .as_str()
+                    .expect("fixture tool description")
+                    .into(),
+                input: tool["inputSchema"].clone(),
+            })
+            .collect();
+        let manifest = PluginManifest {
+            name: "safe-push".into(),
+            needs: vec![],
+            tools,
+        };
+
+        Self {
+            manifest,
+            hook_bin: values["HOOK_BIN"].as_str().expect("fixture hook binary"),
+            plugin_dir: values["PLUGIN_DIR"]
+                .as_str()
+                .expect("fixture plugin directory"),
+            protocol_version: serde_json::from_value(values["PROTOCOL_VERSION"].clone())
+                .expect("fixture protocol version"),
+            deny_reasons: values["DENY_REASONS"]
+                .as_array()
+                .expect("fixture deny reasons")
+                .iter()
+                .map(|reason| reason.as_str().expect("fixture deny reason"))
+                .collect(),
+        }
+    }
+
+    fn config(&self) -> ModConfig<'_> {
+        ModConfig {
+            manifest: &self.manifest,
+            hook_bin: self.hook_bin,
+            plugin_dir: self.plugin_dir,
+            protocol_version: self.protocol_version,
+            deny_reasons: &self.deny_reasons,
+            version: "0.1.0",
+        }
     }
 }
 
-const fn config(manifest: &PluginManifest) -> ModConfig<'_> {
-    ModConfig {
-        manifest,
-        hook_bin: "tack-hook",
-        plugin_dir: "/plugins/safe-push",
-        protocol_version: 1,
-        deny_reasons: &REASONS,
-        version: "0.1.0",
-    }
+fn fixture_values() -> Value {
+    serde_json::from_str(FIXTURE_VALUES).expect("fixture values")
 }
 
 fn rendered() -> [ModFile; 3] {
-    render(&config(&manifest())).expect("render")
+    let values = fixture_values();
+    render(&Fixture::from_values(&values).config()).expect("render")
 }
 
 fn register_js() -> String {
@@ -60,11 +85,17 @@ fn register_js() -> String {
     register.contents
 }
 
-// tack build passes every protocol deny reason in this order, so the golden
+// tack build passes every protocol deny reason in this order, so the fixture
 // holds the list a real build emits.
 #[test]
 fn the_fixture_reasons_are_the_protocol_deny_reasons() {
-    assert_eq!(REASONS, DenyReason::ALL.map(DenyReason::as_str));
+    let values = fixture_values();
+    let fixture = Fixture::from_values(&values);
+
+    assert_eq!(
+        fixture.deny_reasons,
+        DenyReason::ALL.map(DenyReason::as_str)
+    );
 }
 
 #[test]
@@ -86,11 +117,52 @@ fn render_emits_the_exact_plugin_folder() {
         }
     );
     assert_eq!(register.path, "hooks/register.js");
-    assert_eq!(register.contents, GOLDEN);
     assert_eq!(
         [PLUGIN_JSON, HOOKS_JSON, REGISTER_JS],
         [plugin.path, hooks.path, register.path]
     );
+}
+
+#[test]
+fn register_render_only_fills_the_fixture_slots() {
+    let data = fixture_values();
+    let fixture = Fixture::from_values(&data);
+    let values = [
+        ("__TACK_TOOLS__", data["TOOLS"].to_string()),
+        ("__TACK_HOOK_BIN__", r#""tack-hook""#.to_owned()),
+        ("__TACK_PLUGIN_DIR__", r#""/plugins/safe-push""#.to_owned()),
+        ("__TACK_DENY_REASONS__", data["DENY_REASONS"].to_string()),
+        ("__TACK_PROTOCOL_VERSION__", "1".to_owned()),
+        ("__TACK_BUDGET_MS__", data["BUDGET_MS"].to_string()),
+        ("__TACK_TOOL_PREFIX__", data["TOOL_PREFIX"].to_string()),
+    ];
+
+    let [_, _, register] = render(&fixture.config()).expect("render");
+    let script = register.contents;
+    let template_lines = TEMPLATE.split_inclusive('\n');
+    let rendered_lines = script.split_inclusive('\n');
+    assert_eq!(
+        template_lines.clone().count(),
+        rendered_lines.clone().count()
+    );
+
+    let mut expected = String::new();
+
+    for (template, rendered) in template_lines.zip(rendered_lines) {
+        let mut line = template.to_owned();
+
+        for (token, value) in &values {
+            if template.contains(token) {
+                line = line.replace(token, value);
+            }
+        }
+
+        assert_eq!(rendered, line, "from template line {template:?}");
+        expected.push_str(&line);
+    }
+
+    assert_eq!(script, expected);
+    assert_eq!(script.find("__TACK_"), None);
 }
 
 #[test]
@@ -236,36 +308,43 @@ fn tools_register_from_session_start_under_the_mod_prefix() {
 
 #[test]
 fn render_refuses_unsafe_values_and_bad_tools() {
-    let manifest = manifest();
+    let values = fixture_values();
+    let fixture = Fixture::from_values(&values);
 
-    let mut newline = config(&manifest);
+    let mut newline = fixture.config();
     newline.hook_bin = "tack-hook\nother";
     assert_eq!(render(&newline), Err(ModError::UnsafeValue("hook_bin")));
 
-    let mut token = config(&manifest);
+    let mut token = fixture.config();
     token.plugin_dir = "__TACK_PLUGIN_DIR__";
     assert_eq!(render(&token), Err(ModError::UnsafeValue("plugin_dir")));
 
-    let mut version = config(&manifest);
+    let mut version = fixture.config();
     version.version = "1\r";
     assert_eq!(render(&version), Err(ModError::UnsafeValue("version")));
 
     let reasons = ["timeout\n"];
-    let mut reason = config(&manifest);
+    let mut reason = fixture.config();
     reason.deny_reasons = &reasons;
     assert_eq!(render(&reason), Err(ModError::UnsafeValue("deny_reasons")));
 
-    let mut described = manifest.clone();
+    let mut described = fixture.manifest.clone();
     described.tools[0].description = "__TACK_TOOLS__".into();
     assert_eq!(
-        render(&config(&described)),
+        render(&ModConfig {
+            manifest: &described,
+            ..fixture.config()
+        }),
         Err(ModError::UnsafeValue("tools"))
     );
 
-    let mut named = manifest.clone();
+    let mut named = fixture.manifest.clone();
     named.tools[0].name = "guard status".into();
     assert_eq!(
-        render(&config(&named)),
+        render(&ModConfig {
+            manifest: &named,
+            ..fixture.config()
+        }),
         Err(ModError::ToolName("guard status".into()))
     );
 }

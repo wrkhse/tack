@@ -1,17 +1,29 @@
-// Fail-closed checks for the generated Claude Code mod. It loads the golden
-// hooks module (the Rust golden test pins it to the rendered output) under a
-// fake `on` and `$` whose process.run is scripted: no Claude Code, tack-hook
-// or other process runs.
+// Fail-closed checks for the Claude Code mod rendered with fixture-values.json.
+// A fake `on` and `$` load the hooks module and script process.run:
+// no Claude Code, tack-hook or other process runs.
 //
 //   node adapters/claude/register.test.mjs
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const SOURCE = readFileSync(
-  new URL("./golden/register.js", import.meta.url),
+const TEMPLATE = readFileSync(
+  new URL("./register.js", import.meta.url),
   "utf8",
 );
+
+const VALUES = JSON.parse(readFileSync(
+  new URL("./fixture-values.json", import.meta.url),
+  "utf8",
+));
+
+let SOURCE = TEMPLATE;
+
+for (const [name, value] of Object.entries(VALUES)) {
+  SOURCE = SOURCE.replaceAll(`__TACK_${name}__`, () => JSON.stringify(value));
+}
+
+assert.equal(SOURCE.includes("__TACK_"), false);
 
 const HOOK_ARGV = ["tack-hook", "--plugin", "/plugins/safe-push"];
 const BASH = { tool: "Bash", tool_use_id: "toolu_1", command: "git push origin main" };

@@ -1,0 +1,21 @@
+{
+  "PLUGIN_DIR": "/plugins/safe-push",
+  "PROTOCOL_VERSION": 1,
+  "BUDGET_MS": 8500,
+  "MAX_FRAME_BYTES": 1048576,
+  "DENY_REASONS": [
+    "socket_missing",
+    "timeout",
+    "socket_closed",
+    "malformed_reply",
+    "protocol_version",
+    "limit",
+    "script",
+    "unknown_tool",
+    "daemon_error",
+    "aborted",
+    "unsupported_hook",
+    "socket_untrusted",
+    "hook_missing"
+  ]
+}

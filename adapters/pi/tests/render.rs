@@ -4,11 +4,15 @@
 
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use tack_adapter_pi::{ExtensionError, render};
 use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 
-const GOLDEN: &str = include_str!("../golden/register.js");
+const TEMPLATE: &str = include_str!("../register.js");
+
+fn fixture_values() -> Map<String, Value> {
+    serde_json::from_str(include_str!("../fixture-values.json")).expect("fixture values")
+}
 
 fn constant<'a>(script: &'a str, name: &str) -> &'a str {
     let prefix = format!("const {name} = ");
@@ -20,14 +24,49 @@ fn constant<'a>(script: &'a str, name: &str) -> &'a str {
         .expect("emitted constant")
 }
 
-#[test]
-fn render_matches_the_checked_in_golden() {
-    let script = render(Path::new("/plugins/safe-push")).expect("render");
+fn assert_template_substitutions(
+    script: &str,
+    plugin_dir_literal: &str,
+    fixture: &Map<String, Value>,
+) {
+    let template_lines = TEMPLATE.split_inclusive('\n');
+    let script_lines = script.split_inclusive('\n');
 
-    assert_eq!(script, GOLDEN);
+    assert_eq!(template_lines.clone().count(), script_lines.clone().count());
+
+    for (before, after) in template_lines.zip(script_lines) {
+        if !before.contains("__TACK_") {
+            assert_eq!(before, after);
+        }
+    }
+
+    let mut expected = TEMPLATE.replace("__TACK_PLUGIN_DIR__", plugin_dir_literal);
+
+    for (name, value) in fixture {
+        if name != "PLUGIN_DIR" {
+            expected = expected.replace(&format!("__TACK_{name}__"), &value.to_string());
+        }
+    }
+
+    assert_eq!(script, expected);
     assert_eq!(script.find("__TACK_"), None);
+}
+
+#[test]
+fn render_fills_only_template_placeholders() {
+    let fixture = fixture_values();
+    let plugin_dir = fixture["PLUGIN_DIR"]
+        .as_str()
+        .expect("fixture plugin directory");
+    let script = render(Path::new(plugin_dir)).expect("render");
+
+    assert_template_substitutions(&script, r#""/plugins/safe-push""#, &fixture);
     assert_eq!(constant(&script, "HOOK_BIN"), r#""tack-hook""#);
-    assert_eq!(constant(&script, "BUDGET_MS"), "8500");
+    assert_eq!(constant(&script, "PLUGIN_DIR"), r#""/plugins/safe-push""#);
+    assert_eq!(
+        constant(&script, "BUDGET_MS"),
+        fixture["BUDGET_MS"].to_string()
+    );
     assert_eq!(
         constant(&script, "PROTOCOL_VERSION"),
         PROTOCOL_VERSION.to_string()
@@ -38,17 +77,26 @@ fn render_matches_the_checked_in_golden() {
     );
     assert_eq!(
         constant(&script, "DENY_REASONS"),
-        json!(DenyReason::ALL.map(DenyReason::as_str)).to_string()
+        fixture["DENY_REASONS"].to_string()
+    );
+    assert_eq!(
+        fixture["DENY_REASONS"],
+        json!(DenyReason::ALL.map(DenyReason::as_str))
     );
 }
 
 #[test]
 fn pi_loads_one_default_factory_with_only_node_imports() {
-    let imports: Vec<_> = GOLDEN
+    let fixture = fixture_values();
+    let plugin_dir = fixture["PLUGIN_DIR"]
+        .as_str()
+        .expect("fixture plugin directory");
+    let script = render(Path::new(plugin_dir)).expect("render");
+    let imports: Vec<_> = script
         .lines()
         .filter(|line| line.trim_start().starts_with("import "))
         .collect();
-    let exports: Vec<_> = GOLDEN
+    let exports: Vec<_> = script
         .lines()
         .filter(|line| line.trim_start().starts_with("export "))
         .collect();
@@ -61,8 +109,8 @@ fn pi_loads_one_default_factory_with_only_node_imports() {
             r#"import { appendFileSync } from "node:fs";"#,
         ]
     );
-    assert_eq!(GOLDEN.find("import("), None);
-    assert_eq!(GOLDEN.find(".catch("), None);
+    assert_eq!(script.find("import("), None);
+    assert_eq!(script.find(".catch("), None);
 }
 
 #[test]
@@ -72,7 +120,7 @@ fn a_path_with_javascript_punctuation_is_only_a_json_string() {
     let literal = json!(path).to_string();
 
     assert_eq!(constant(&script, "PLUGIN_DIR"), literal);
-    assert_eq!(script, GOLDEN.replace(r#""/plugins/safe-push""#, &literal));
+    assert_template_substitutions(&script, &literal, &fixture_values());
 }
 
 #[test]
