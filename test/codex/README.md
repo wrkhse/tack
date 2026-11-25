@@ -87,20 +87,20 @@ enabled and `trusted`, keyed `<source>:<event>:<group>:<handler>`, with
 the current hash recomputed from the listing as Codex computes it; one
 PreToolUse handler matches Bash and one SessionStart handler loads.
 
-| Case                 | Passes when                                                            |
-| -------------------- | ---------------------------------------------------------------------- |
-| normal               | trusted after a rebuild into a new folder with the same IDs and a new hash; `tack: push blocked`; `guard_status: daemon ok`; exact daemon log |
+| Case                 | Passes when                                                                                                                                                                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| normal               | trusted after a rebuild into a new folder with the same IDs and a new hash; `tack: push blocked`; `guard_status: daemon ok`; exact daemon log                                                                                              |
 | harmless             | `git status --short` runs with no block reason and its output shows the untracked `harmless.txt`; `git-runs.log` holds exactly one `0 status --short`; tack-hook runs once; the daemon log is exactly `tack-daemon: hook toolBefore allow` |
-| missing-hook         | `tack: hook_missing`                                                   |
-| daemon-crash         | `tack: socket_closed`                                                  |
-| timeout              | `tack: timeout`, before the stalled tack-hook exits                    |
-| invalid-reply        | `tack: malformed_reply`                                                |
-| invalid-guard-status | the call fails with `tack: malformed` and never reaches tack-hook       |
-| mcp-start-failure    | Codex names the `tack` MCP server's failure and pushes nothing; it stops, or runs on with the push blocked and no `guard_status` |
-| node-missing         | the PreToolUse command, run with `$SHELL -lc`, exits 2 with `tack: node_missing` on stderr |
-| node-crash           | with a `node` that dies of SIGSEGV, it exits 2 with `tack: node_failed` on stderr |
-| stale-trust          | a changed PreToolUse handler lists as `modified` and blocks nothing    |
-| config-parse-error   | an unparsable hooks file fails the trust and load checks               |
+| missing-hook         | `tack: hook_missing`                                                                                                                                                                                                                       |
+| daemon-crash         | `tack: socket_closed`                                                                                                                                                                                                                      |
+| timeout              | `tack: timeout`, before the stalled tack-hook exits                                                                                                                                                                                        |
+| invalid-reply        | `tack: malformed_reply`                                                                                                                                                                                                                    |
+| invalid-guard-status | the call fails with `tack: malformed` and never reaches tack-hook                                                                                                                                                                          |
+| mcp-start-failure    | Codex names the `tack` MCP server's failure and pushes nothing; it stops, or runs on with the push blocked and no `guard_status`                                                                                                           |
+| node-missing         | the PreToolUse command, run with `$SHELL -lc`, exits 2 with `tack: node_missing` on stderr                                                                                                                                                 |
+| node-crash           | with a `node` that dies of SIGSEGV, it exits 2 with `tack: node_failed` on stderr                                                                                                                                                          |
+| stale-trust          | a changed PreToolUse handler lists as `modified` and blocks nothing                                                                                                                                                                        |
+| config-parse-error   | an unparsable hooks file fails the trust and load checks                                                                                                                                                                                   |
 
 Every session case also needs a clean exit with the text `done` and these
 lines in `TACK_RECORDER`: zero pushes from the git shim, exactly one

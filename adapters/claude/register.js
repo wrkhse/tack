@@ -118,8 +118,12 @@ function readReply(request, done) {
     return refuse("malformed_reply");
   }
 
-  if (!reply || typeof reply !== "object" || reply.id !== request.id ||
-      !KINDS.has(reply.kind)) {
+  if (
+    !reply ||
+    typeof reply !== "object" ||
+    reply.id !== request.id ||
+    !KINDS.has(reply.kind)
+  ) {
     return refuse("malformed_reply");
   }
   if (reply.version !== PROTOCOL_VERSION) return refuse("protocol_version");
@@ -202,7 +206,8 @@ async function runTool($, e, spec) {
   if (!result.ok) return denial(result.reason);
 
   const content = result.reply.content;
-  const texts = Array.isArray(content) &&
+  const texts =
+    Array.isArray(content) &&
     content.every((item) => item && typeof item.text === "string");
 
   if (!texts) return denial(denyName("malformed_reply"));
@@ -214,9 +219,10 @@ async function runTool($, e, spec) {
 // function declared at the top of the file. The tool's name, less the mod
 // prefix, picks its spec; a name outside TOOLS is refused.
 async function serveTool($, e, next) {
-  const name = typeof e.tool === "string" && e.tool.startsWith(TOOL_PREFIX)
-    ? e.tool.slice(TOOL_PREFIX.length)
-    : undefined;
+  const name =
+    typeof e.tool === "string" && e.tool.startsWith(TOOL_PREFIX)
+      ? e.tool.slice(TOOL_PREFIX.length)
+      : undefined;
   const spec = TOOLS.find((tool) => tool.name === name);
 
   if (spec === undefined) return denial(denyName("unknown_tool"));
@@ -260,6 +266,8 @@ export const register = (on, options) => {
   on("tool.call", { tool: "Bash" }, guardBash).catch(refuseFailed);
 
   for (const spec of TOOLS) {
-    on("tool.call", { tool: TOOL_PREFIX + spec.name }, serveTool).catch(refuseFailed);
+    on("tool.call", { tool: TOOL_PREFIX + spec.name }, serveTool).catch(
+      refuseFailed,
+    );
   }
 };

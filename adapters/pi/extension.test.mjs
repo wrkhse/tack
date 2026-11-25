@@ -16,12 +16,20 @@ for (const [name, value] of Object.entries(fixture)) {
 // Replace only the module boundary. Every call uses an injected spawn, file
 // writer and clock; the suite cannot launch tack-hook or send OS signals.
 const load = new Function(
-  "spawn", "appendFileSync", "process", "setTimeout", "clearTimeout",
-  '"use strict";\n' + source
-    .replace('import { spawn } from "node:child_process";', "")
-    .replace('import { appendFileSync } from "node:fs";', "")
-    .replace("export default function register(pi)", "function register(pi)") +
-  "\nreturn register;",
+  "spawn",
+  "appendFileSync",
+  "process",
+  "setTimeout",
+  "clearTimeout",
+  '"use strict";\n' +
+    source
+      .replace('import { spawn } from "node:child_process";', "")
+      .replace('import { appendFileSync } from "node:fs";', "")
+      .replace(
+        "export default function register(pi)",
+        "function register(pi)",
+      ) +
+    "\nreturn register;",
 );
 
 function fakeChild(onInput, kills, killError) {
@@ -54,10 +62,14 @@ function harness(respond, options = {}) {
 
     if (options.spawnError) throw options.spawnError;
 
-    return fakeChild((line, child) => {
-      lines.push(line);
-      respond(JSON.parse(line), child);
-    }, kills, options.killError);
+    return fakeChild(
+      (line, child) => {
+        lines.push(line);
+        respond(JSON.parse(line), child);
+      },
+      kills,
+      options.killError,
+    );
   }
 
   function setTimer(fn, ms) {
@@ -76,13 +88,21 @@ function harness(respond, options = {}) {
     },
     { env: options.noRecorder ? {} : { TACK_RECORDER: "/recorder" } },
     setTimer,
-    (timer) => { timer.cleared = true; },
+    (timer) => {
+      timer.cleared = true;
+    },
   );
 
   register({
-    on(type, handler) { handlers.set(type, handler); },
-    appendEntry(...args) { entries.push(args); },
-    registerTool(tool) { tools.push(tool); },
+    on(type, handler) {
+      handlers.set(type, handler);
+    },
+    appendEntry(...args) {
+      entries.push(args);
+    },
+    registerTool(tool) {
+      tools.push(tool);
+    },
   });
 
   return { handlers, entries, tools, starts, writes, lines, kills, timers };
@@ -132,7 +152,9 @@ const DENY = { outcome: { kind: "deny", reason: "push blocked" } };
 const STATUS = { content: [{ kind: "text", text: "guard_status: daemon ok" }] };
 
 test("Pi registers one guarded Bash handler, tool and session load marker", () => {
-  const h = harness(() => { assert.fail("registration cannot spawn"); });
+  const h = harness(() => {
+    assert.fail("registration cannot spawn");
+  });
 
   assert.deepEqual([...h.handlers.keys()], ["tool_call", "session_start"]);
   assert.deepEqual(h.entries, []);
@@ -159,28 +181,39 @@ test("every Bash command goes to tack-hook and other tools skip it", async () =>
   }
 
   const invocation = [
-    "tack-hook", ["--plugin", "/plugins/safe-push"],
+    "tack-hook",
+    ["--plugin", "/plugins/safe-push"],
     { stdio: ["pipe", "pipe", "ignore"] },
   ];
   const requests = commands.map((command, index) => ({
-    kind: "hook", id: index + 1, version: 1, hook: "toolBefore",
+    kind: "hook",
+    id: index + 1,
+    version: 1,
+    hook: "toolBefore",
     call: { tool: "shell", name: "Bash", input: { command }, session_id: null },
   }));
 
   assert.deepEqual(h.starts, [invocation, invocation, invocation]);
-  assert.deepEqual(h.lines, requests.map((request) =>
-    JSON.stringify(request) + "\n"));
-  assert.deepEqual(h.writes, [1, 2, 3].map((id) =>
-    ["/recorder", `{"call":"bash","id":${id}}\n`]));
+  assert.deepEqual(
+    h.lines,
+    requests.map((request) => JSON.stringify(request) + "\n"),
+  );
+  assert.deepEqual(
+    h.writes,
+    [1, 2, 3].map((id) => ["/recorder", `{"call":"bash","id":${id}}\n`]),
+  );
 });
 
 test("allow uses the last non-empty stdout line without rewriting", async () => {
-  const h = harness((request, child) => {
-    emitLine(child, reply(request, DENY));
-    emitLine(child, reply(request, ALLOW));
-    child.stdout.emit("data", Buffer.from("\n \t\r\n"));
-    child.emit("close", 0);
-  }, { noRecorder: true });
+  const h = harness(
+    (request, child) => {
+      emitLine(child, reply(request, DENY));
+      emitLine(child, reply(request, ALLOW));
+      child.stdout.emit("data", Buffer.from("\n \t\r\n"));
+      child.emit("close", 0);
+    },
+    { noRecorder: true },
+  );
   const event = bash();
 
   assert.equal(await guard(h, event), undefined);
@@ -189,42 +222,55 @@ test("allow uses the last non-empty stdout line without rewriting", async () => 
   assert.deepEqual(h.kills, []);
 });
 
-test("a valid deny and tool success each append one line with their request id",
-  async () => {
-    const h = harness((request, child) => {
-      answer(request.kind === "hook" ? DENY : STATUS)(request, child);
-    });
+test("a valid deny and tool success each append one line with their request id", async () => {
+  const h = harness((request, child) => {
+    answer(request.kind === "hook" ? DENY : STATUS)(request, child);
+  });
 
-    assert.deepEqual(await guard(h), block("push blocked"));
-    assert.deepEqual(await runTool(h, {}), {
-      content: [{ type: "text", text: "guard_status: daemon ok" }], details: {},
-    });
+  assert.deepEqual(await guard(h), block("push blocked"));
+  assert.deepEqual(await runTool(h, {}), {
+    content: [{ type: "text", text: "guard_status: daemon ok" }],
+    details: {},
+  });
 
-    const command = "git push origin main";
-    const hook = {
-      kind: "hook", id: 1, version: 1, hook: "toolBefore",
-      call: { tool: "shell", name: "Bash", input: { command }, session_id: null },
-    };
-    const tool = {
-      kind: "tool", id: 2, version: 1, name: "guard_status", input: {},
-    };
-    const invocation = [
-      "tack-hook", ["--plugin", "/plugins/safe-push"],
-      { stdio: ["pipe", "pipe", "ignore"] },
-    ];
+  const command = "git push origin main";
+  const hook = {
+    kind: "hook",
+    id: 1,
+    version: 1,
+    hook: "toolBefore",
+    call: { tool: "shell", name: "Bash", input: { command }, session_id: null },
+  };
+  const tool = {
+    kind: "tool",
+    id: 2,
+    version: 1,
+    name: "guard_status",
+    input: {},
+  };
+  const invocation = [
+    "tack-hook",
+    ["--plugin", "/plugins/safe-push"],
+    { stdio: ["pipe", "pipe", "ignore"] },
+  ];
 
-    assert.deepEqual(h.starts, [invocation, invocation]);
-    assert.deepEqual(h.lines, [hook, tool].map((request) =>
-      JSON.stringify(request) + "\n"));
-    assert.deepEqual(h.writes, [
-      ["/recorder", '{"call":"bash","id":1}\n'],
-      ["/recorder", '{"call":"guard_status","id":2}\n'],
-    ]);
-    assert.deepEqual(h.timers.map(({ ms, cleared }) => [ms, cleared]), [
-      [8500, true], [8500, true],
-    ]);
-  },
-);
+  assert.deepEqual(h.starts, [invocation, invocation]);
+  assert.deepEqual(
+    h.lines,
+    [hook, tool].map((request) => JSON.stringify(request) + "\n"),
+  );
+  assert.deepEqual(h.writes, [
+    ["/recorder", '{"call":"bash","id":1}\n'],
+    ["/recorder", '{"call":"guard_status","id":2}\n'],
+  ]);
+  assert.deepEqual(
+    h.timers.map(({ ms, cleared }) => [ms, cleared]),
+    [
+      [8500, true],
+      [8500, true],
+    ],
+  );
+});
 
 test("a successful allow also appends exactly one recorder line", async () => {
   const h = harness(answer(ALLOW));
@@ -233,11 +279,19 @@ test("a successful allow also appends exactly one recorder line", async () => {
   assert.deepEqual(h.writes, [["/recorder", '{"call":"bash","id":1}\n']]);
 });
 
-for (const error of [...reasonNames, "malformed", "too_large", "unrecognized"]) {
-  test("error envelope answers either request and is not recorded: " + error,
+for (const error of [
+  ...reasonNames,
+  "malformed",
+  "too_large",
+  "unrecognized",
+]) {
+  test(
+    "error envelope answers either request and is not recorded: " + error,
     async () => {
       const reason = reasonNames.includes(error) ? error : "daemon_error";
-      const h = harness(answer({ kind: "error", error, message: "test error" }));
+      const h = harness(
+        answer({ kind: "error", error, message: "test error" }),
+      );
 
       assert.deepEqual(await guard(h), block(reason));
       assert.deepEqual(await runTool(h, {}), toolError(reason));
@@ -247,27 +301,47 @@ for (const error of [...reasonNames, "malformed", "too_large", "unrecognized"]) 
 }
 
 const badReplies = [
-  ["empty output", (_request, child) => child.emit("close", 0), "malformed_reply"],
-  ["invalid JSON", (_request, child) => {
-    child.stdout.emit("data", Buffer.from("not json\n"));
-    child.emit("close", 0);
-  }, "malformed_reply"],
-  ["invalid UTF-8", (_request, child) => {
-    child.stdout.emit("data", Buffer.from([0xff]));
-    child.emit("close", 0);
-  }, "malformed_reply"],
+  [
+    "empty output",
+    (_request, child) => child.emit("close", 0),
+    "malformed_reply",
+  ],
+  [
+    "invalid JSON",
+    (_request, child) => {
+      child.stdout.emit("data", Buffer.from("not json\n"));
+      child.emit("close", 0);
+    },
+    "malformed_reply",
+  ],
+  [
+    "invalid UTF-8",
+    (_request, child) => {
+      child.stdout.emit("data", Buffer.from([0xff]));
+      child.emit("close", 0);
+    },
+    "malformed_reply",
+  ],
   ["wrong id", answer({ ...ALLOW, id: 2 }), "malformed_reply"],
   ["wrong version", answer({ ...ALLOW, version: 2 }), "protocol_version"],
   ["wrong kind", answer({ kind: "tool", ...STATUS }), "malformed_reply"],
   ["unrecognized kind", answer({ kind: "nope" }), "malformed_reply"],
   ["invalid error reply", answer({ kind: "error" }), "malformed_reply"],
   ["missing outcome", answer({}), "malformed_reply"],
-  ["invalid deny", answer({
-    outcome: { kind: "deny", reason: 2 },
-  }), "malformed_reply"],
-  ["rewrite", answer({
-    outcome: { kind: "rewrite", input: { command: "git push --dry-run" } },
-  }), "malformed_reply"],
+  [
+    "invalid deny",
+    answer({
+      outcome: { kind: "deny", reason: 2 },
+    }),
+    "malformed_reply",
+  ],
+  [
+    "rewrite",
+    answer({
+      outcome: { kind: "rewrite", input: { command: "git push --dry-run" } },
+    }),
+    "malformed_reply",
+  ],
 ];
 
 for (const [label, respond, reason] of badReplies) {
@@ -282,10 +356,14 @@ for (const [label, respond, reason] of badReplies) {
 }
 
 for (const code of ["EPIPE", "ERR_STREAM_DESTROYED"]) {
-  test("invalid stdout after stdin " + code + " is refused as malformed",
+  test(
+    "invalid stdout after stdin " + code + " is refused as malformed",
     async () => {
       const h = harness((_request, child) => {
-        child.stdin.emit("error", Object.assign(new Error("input failed"), { code }));
+        child.stdin.emit(
+          "error",
+          Object.assign(new Error("input failed"), { code }),
+        );
         child.stdout.emit("data", Buffer.from("not JSON\n"));
         child.emit("close", 0);
       });
@@ -309,7 +387,8 @@ test("an invalid guard_status reply is refused and never recorded", async () => 
   ]) {
     const h = harness(answer(body));
 
-    const expected = body.version === 2 ? "protocol_version" : "malformed_reply";
+    const expected =
+      body.version === 2 ? "protocol_version" : "malformed_reply";
     assert.deepEqual(await runTool(h, {}), toolError(expected));
     assert.deepEqual(h.writes, []);
   }
@@ -348,35 +427,31 @@ test("one 8500 ms deadline kills the child and resolves without close", async ()
   assert.deepEqual(h.writes, []);
 });
 
-test("throwing while killing a timed out child still returns the named error",
-  async () => {
-    const h = harness(() => {}, { killError: new Error("kill failed") });
-    const pending = runTool(h, {});
+test("throwing while killing a timed out child still returns the named error", async () => {
+  const h = harness(() => {}, { killError: new Error("kill failed") });
+  const pending = runTool(h, {});
 
-    h.timers[0].fn();
+  h.timers[0].fn();
 
-    assert.deepEqual(await pending, toolError("timeout"));
-    assert.deepEqual(h.kills, ["SIGKILL"]);
+  assert.deepEqual(await pending, toolError("timeout"));
+  assert.deepEqual(h.kills, ["SIGKILL"]);
+  assert.deepEqual(h.writes, []);
+});
+
+test("a missing tack-hook blocks either request without recording", async () => {
+  const enoent = Object.assign(new Error("hook not found"), { code: "ENOENT" });
+
+  for (const [respond, options] of [
+    [(_request, child) => child.emit("error", enoent), {}],
+    [() => {}, { spawnError: enoent }],
+  ]) {
+    const h = harness(respond, options);
+
+    assert.deepEqual(await guard(h), block("hook_missing"));
+    assert.deepEqual(await runTool(h, {}), toolError("hook_missing"));
     assert.deepEqual(h.writes, []);
-  },
-);
-
-test("a missing tack-hook blocks either request without recording",
-  async () => {
-    const enoent = Object.assign(new Error("hook not found"), { code: "ENOENT" });
-
-    for (const [respond, options] of [
-      [(_request, child) => child.emit("error", enoent), {}],
-      [() => {}, { spawnError: enoent }],
-    ]) {
-      const h = harness(respond, options);
-
-      assert.deepEqual(await guard(h), block("hook_missing"));
-      assert.deepEqual(await runTool(h, {}), toolError("hook_missing"));
-      assert.deepEqual(h.writes, []);
-    }
-  },
-);
+  }
+});
 
 test("pipe errors with no stdout wait for close and fail closed", async () => {
   for (const [pipe, code] of [
@@ -387,7 +462,10 @@ test("pipe errors with no stdout wait for close and fail closed", async () => {
     let child;
     const h = harness((_request, active) => {
       child = active;
-      child[pipe].emit("error", Object.assign(new Error("pipe failed"), { code }));
+      child[pipe].emit(
+        "error",
+        Object.assign(new Error("pipe failed"), { code }),
+      );
     });
     const pending = guard(h);
 
@@ -400,28 +478,28 @@ test("pipe errors with no stdout wait for close and fail closed", async () => {
   }
 });
 
-test("other process and recorder failures block with no promise catch on the handler",
-  async () => {
-    for (const [respond, options] of [
-      [(_request, child) => child.emit("close", null, "SIGSEGV"), {}],
-      [() => {}, { spawnError: new Error("spawn failed") }],
-      [answer(ALLOW), { recordError: new Error("recorder unavailable") }],
-    ]) {
-      const h = harness(respond, options);
+test("other process and recorder failures block with no promise catch on the handler", async () => {
+  for (const [respond, options] of [
+    [(_request, child) => child.emit("close", null, "SIGSEGV"), {}],
+    [() => {}, { spawnError: new Error("spawn failed") }],
+    [answer(ALLOW), { recordError: new Error("recorder unavailable") }],
+  ]) {
+    const h = harness(respond, options);
 
-      assert.deepEqual(await guard(h), block("daemon_error"));
-      assert.deepEqual(h.writes, []);
-    }
-  },
-);
+    assert.deepEqual(await guard(h), block("daemon_error"));
+    assert.deepEqual(h.writes, []);
+  }
+});
 
 test("oversized frames are bounded without recording a call", async () => {
   const h = harness((_request, child) => {
     child.stdout.emit("data", Buffer.alloc(1048577));
   });
 
-  assert.deepEqual(await guard(h, bash("git push " + "x".repeat(1048576))),
-    block("daemon_error"));
+  assert.deepEqual(
+    await guard(h, bash("git push " + "x".repeat(1048576))),
+    block("daemon_error"),
+  );
   assert.deepEqual(h.starts, []);
   assert.deepEqual(await guard(h), block("malformed_reply"));
   assert.deepEqual(h.kills, ["SIGKILL"]);

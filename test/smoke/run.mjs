@@ -74,7 +74,9 @@ function assert(condition, message) {
 function unpack() {
   mkdirSync(binDir, { recursive: true });
 
-  const result = spawnSync("tar", ["-xzf", tarball, "-C", binDir], { encoding: "utf8" });
+  const result = spawnSync("tar", ["-xzf", tarball, "-C", binDir], {
+    encoding: "utf8",
+  });
   assert(result.status === 0, "tar failed: " + result.stderr.trim());
 
   for (const name of BINARIES) {
@@ -117,7 +119,11 @@ function tackBuild(target, out, timeout) {
   );
   assert(
     result.status === 0,
-    "tack build --target " + target + " failed for " + out + ": " +
+    "tack build --target " +
+      target +
+      " failed for " +
+      out +
+      ": " +
       (result.error?.message ?? result.stderr.trim()),
   );
 }
@@ -129,9 +135,16 @@ function checkPiBuild() {
     tackBuild("pi", out, PI_BUILD_TIMEOUT_MS);
   }
 
-  const extensions = outputs.map((out) => readFileSync(path.join(out, "pi", "extension.js")));
-  const [digestA, digestB] = extensions.map((bytes) => createHash("sha256").update(bytes).digest("hex"));
-  assert(digestA === digestB, "Pi extension SHA-256 mismatch: " + digestA + " != " + digestB);
+  const extensions = outputs.map((out) =>
+    readFileSync(path.join(out, "pi", "extension.js")),
+  );
+  const [digestA, digestB] = extensions.map((bytes) =>
+    createHash("sha256").update(bytes).digest("hex"),
+  );
+  assert(
+    digestA === digestB,
+    "Pi extension SHA-256 mismatch: " + digestA + " != " + digestB,
+  );
 
   const text = extensions[0].toString("utf8");
   const lines = text.split("\n");
@@ -140,13 +153,18 @@ function checkPiBuild() {
     lines.includes("const PLUGIN_DIR = " + JSON.stringify(pluginPath) + ";"),
     "Pi extension has no PLUGIN_DIR set to " + pluginPath,
   );
-  assert(lines.includes("const BUDGET_MS = 8500;"), "Pi extension has no 8500 ms budget");
+  assert(
+    lines.includes("const BUDGET_MS = 8500;"),
+    "Pi extension has no 8500 ms budget",
+  );
   assert(
     /^export default function register\(/m.test(text),
     "Pi extension has no top-level default register export",
   );
 
-  console.log("PASS tack build --target pi produced matching extensions with the expected path, budget, and export");
+  console.log(
+    "PASS tack build --target pi produced matching extensions with the expected path, budget, and export",
+  );
 }
 
 // Each part of the Codex adapter, matched by its path under <out>/codex. A
@@ -172,7 +190,10 @@ function listFiles(dir) {
     .sort();
   assert(
     files.length <= MAX_CODEX_FILES,
-    "Codex adapter has " + files.length + " files, more than " + MAX_CODEX_FILES,
+    "Codex adapter has " +
+      files.length +
+      " files, more than " +
+      MAX_CODEX_FILES,
   );
 
   return files;
@@ -191,23 +212,34 @@ function codexDigest(out, file) {
 }
 
 function checkCodexBuild() {
-  const outputs = [path.join(home, "codex-dist-a"), path.join(home, "codex-dist-b")];
+  const outputs = [
+    path.join(home, "codex-dist-a"),
+    path.join(home, "codex-dist-b"),
+  ];
   mkdirSync(codexHome, { recursive: true, mode: 0o700 });
 
   for (const out of outputs) {
     tackBuild("codex", out, CODEX_BUILD_TIMEOUT_MS);
   }
 
-  const [filesA, filesB] = outputs.map((out) => listFiles(path.join(out, "codex")));
+  const [filesA, filesB] = outputs.map((out) =>
+    listFiles(path.join(out, "codex")),
+  );
   assert(
     JSON.stringify(filesA) === JSON.stringify(filesB),
-    "Codex adapter files differ: " + JSON.stringify(filesA) + " != " + JSON.stringify(filesB),
+    "Codex adapter files differ: " +
+      JSON.stringify(filesA) +
+      " != " +
+      JSON.stringify(filesB),
   );
 
   const found = new Set(filesA.map(codexPart));
 
   for (const part of CODEX_PARTS) {
-    assert(found.has(part.name), "Codex adapter has no " + part.name + " in " + JSON.stringify(filesA));
+    assert(
+      found.has(part.name),
+      "Codex adapter has no " + part.name + " in " + JSON.stringify(filesA),
+    );
   }
 
   for (const file of filesA) {
@@ -217,12 +249,18 @@ function checkCodexBuild() {
     const [digestA, digestB] = outputs.map((out) => codexDigest(out, file));
     assert(
       digestA === digestB,
-      "Codex adapter " + file + " SHA-256 mismatch: " + digestA + " != " + digestB,
+      "Codex adapter " +
+        file +
+        " SHA-256 mismatch: " +
+        digestA +
+        " != " +
+        digestB,
     );
   }
 
   console.log(
-    "PASS tack build --target codex produced " + filesA.length +
+    "PASS tack build --target codex produced " +
+      filesA.length +
       " matching non-empty files with the hooks config, MCP server and scripts",
   );
 }
@@ -297,7 +335,9 @@ function askDaemon() {
       else resolve(reply);
     };
 
-    client.setTimeout(REPLY_TIMEOUT_MS, () => finish(new Error("socket reply timed out")));
+    client.setTimeout(REPLY_TIMEOUT_MS, () =>
+      finish(new Error("socket reply timed out")),
+    );
     client.on("error", finish);
     client.on("connect", () => {
       client.write(requestLine());
@@ -341,13 +381,21 @@ function askHook() {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (hook.exitCode === null && hook.signalCode === null) hook.kill("SIGKILL");
+      if (hook.exitCode === null && hook.signalCode === null)
+        hook.kill("SIGKILL");
       if (error) reject(error);
       else resolve(reply);
     };
 
     const timer = setTimeout(
-      () => finish(new Error("tack-hook round trip: no reply and exit within " + REPLY_TIMEOUT_MS + "ms")),
+      () =>
+        finish(
+          new Error(
+            "tack-hook round trip: no reply and exit within " +
+              REPLY_TIMEOUT_MS +
+              "ms",
+          ),
+        ),
       REPLY_TIMEOUT_MS,
     );
 
@@ -359,26 +407,43 @@ function askHook() {
     hook.stderr.on("data", (text) => {
       hookStderr += text;
     });
-    hook.on("error", (error) => finish(new Error("tack-hook round trip: " + error.message)));
-    hook.stdin.on("error", (error) => finish(new Error("tack-hook round trip: stdin " + error.message)));
+    hook.on("error", (error) =>
+      finish(new Error("tack-hook round trip: " + error.message)),
+    );
+    hook.stdin.on("error", (error) =>
+      finish(new Error("tack-hook round trip: stdin " + error.message)),
+    );
 
     // close fires after exit and after stdout has ended, so the line is whole.
     hook.on("close", (code, signal) => {
       if (code !== 0) {
-        finish(new Error("tack-hook round trip: exited with " + (signal ?? "code " + code)));
+        finish(
+          new Error(
+            "tack-hook round trip: exited with " + (signal ?? "code " + code),
+          ),
+        );
         return;
       }
 
       const end = stdout.indexOf("\n");
       if (end < 0 || end !== stdout.length - 1) {
-        finish(new Error("tack-hook round trip: stdout was not one reply line: " + JSON.stringify(stdout)));
+        finish(
+          new Error(
+            "tack-hook round trip: stdout was not one reply line: " +
+              JSON.stringify(stdout),
+          ),
+        );
         return;
       }
 
       try {
         finish(null, JSON.parse(stdout.slice(0, end)));
       } catch (error) {
-        finish(new Error("tack-hook round trip: reply is not JSON: " + error.message));
+        finish(
+          new Error(
+            "tack-hook round trip: reply is not JSON: " + error.message,
+          ),
+        );
       }
     });
 
@@ -403,8 +468,14 @@ function checkHookReply(reply) {
   for (const field of Object.keys(want)) {
     assert(
       got[field] === want[field],
-      "tack-hook round trip: reply " + field + " was " + JSON.stringify(got[field]) +
-        ", expected " + JSON.stringify(want[field]) + " in " + JSON.stringify(reply),
+      "tack-hook round trip: reply " +
+        field +
+        " was " +
+        JSON.stringify(got[field]) +
+        ", expected " +
+        JSON.stringify(want[field]) +
+        " in " +
+        JSON.stringify(reply),
     );
   }
   console.log("PASS tack-hook relayed an allow reply with id " + reply.id);
@@ -424,7 +495,10 @@ async function stopDaemon() {
 }
 
 async function main() {
-  assert(tarball && expectedVersion && pluginDir, "usage: run.mjs <tarball> <version> <plugin-dir>");
+  assert(
+    tarball && expectedVersion && pluginDir,
+    "usage: run.mjs <tarball> <version> <plugin-dir>",
+  );
 
   unpack();
   checkVersion();
@@ -434,10 +508,16 @@ async function main() {
   await waitForSocket();
 
   const reply = await askDaemon();
-  assert(reply.id === REQUEST_ID, "reply id " + reply.id + " did not match " + REQUEST_ID);
+  assert(
+    reply.id === REQUEST_ID,
+    "reply id " + reply.id + " did not match " + REQUEST_ID,
+  );
   console.log("PASS daemon replied with matching id " + reply.id);
 
-  assert(daemon.exitCode === null, "daemon exited before the tack-hook round trip: " + daemonStderr.trim());
+  assert(
+    daemon.exitCode === null,
+    "daemon exited before the tack-hook round trip: " + daemonStderr.trim(),
+  );
   checkHookReply(await askHook());
 }
 
@@ -449,8 +529,10 @@ try {
   finished = true;
   const message = error instanceof Error ? error.message : String(error);
   console.error("FAIL " + message);
-  if (daemonStderr.trim()) console.error("daemon stderr: " + daemonStderr.trim());
-  if (hookStderr.trim()) console.error("tack-hook stderr: " + hookStderr.trim());
+  if (daemonStderr.trim())
+    console.error("daemon stderr: " + daemonStderr.trim());
+  if (hookStderr.trim())
+    console.error("tack-hook stderr: " + hookStderr.trim());
   process.exitCode = 1;
 } finally {
   clearTimeout(totalTimer);

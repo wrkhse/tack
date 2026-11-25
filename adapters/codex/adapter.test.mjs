@@ -31,7 +31,11 @@ function load(source, entry, result) {
   assert.equal(body.includes("__TACK_"), false);
 
   return new Function(
-    "spawn", "appendFileSync", "process", "setTimeout", "clearTimeout",
+    "spawn",
+    "appendFileSync",
+    "process",
+    "setTimeout",
+    "clearTimeout",
     '"use strict";\n' + body + "\nreturn " + result + ";",
   );
 }
@@ -119,9 +123,15 @@ const STATUS = { content: [{ kind: "text", text: "guard_status: daemon ok" }] };
 
 function bashEvent(command = "git push origin main") {
   return {
-    session_id: "s", turn_id: "t", cwd: "/repo", model: "m",
-    permission_mode: "default", transcript_path: null,
-    hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "u",
+    session_id: "s",
+    turn_id: "t",
+    cwd: "/repo",
+    model: "m",
+    permission_mode: "default",
+    transcript_path: null,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_use_id: "u",
     tool_input: { command },
   };
 }
@@ -133,12 +143,16 @@ function startHook(w, feed) {
   const out = [];
 
   const done = new Promise((resolve) => {
-    main(stdin, {
-      write(text, callback) {
-        out.push(text);
-        callback();
+    main(
+      stdin,
+      {
+        write(text, callback) {
+          out.push(text);
+          callback();
+        },
       },
-    }, (code) => resolve({ code, out }));
+      (code) => resolve({ code, out }),
+    );
   });
 
   feed(stdin);
@@ -153,7 +167,12 @@ function send(event) {
 }
 
 function block(reason) {
-  return { code: 0, out: [JSON.stringify({ decision: "block", reason: "tack: " + reason }) + "\n"] };
+  return {
+    code: 0,
+    out: [
+      JSON.stringify({ decision: "block", reason: "tack: " + reason }) + "\n",
+    ],
+  };
 }
 
 const ALLOWED = { code: 0, out: ["{}\n"] };
@@ -162,25 +181,41 @@ test("allow prints an empty object and records the call", async () => {
   const w = world(answer(ALLOW));
 
   assert.deepEqual(await startHook(w, send(bashEvent())), ALLOWED);
-  assert.deepEqual(w.starts, [[
-    "tack-hook", ["--plugin", "/plugins/safe-push"],
-    { stdio: ["pipe", "pipe", "ignore"] },
-  ]]);
-  assert.deepEqual(w.lines, [JSON.stringify({
-    kind: "hook", id: 1, version: 1, hook: "toolBefore",
-    call: {
-      tool: "shell", name: "Bash",
-      input: { command: "git push origin main" }, session_id: null,
-    },
-  }) + "\n"]);
+  assert.deepEqual(w.starts, [
+    [
+      "tack-hook",
+      ["--plugin", "/plugins/safe-push"],
+      { stdio: ["pipe", "pipe", "ignore"] },
+    ],
+  ]);
+  assert.deepEqual(w.lines, [
+    JSON.stringify({
+      kind: "hook",
+      id: 1,
+      version: 1,
+      hook: "toolBefore",
+      call: {
+        tool: "shell",
+        name: "Bash",
+        input: { command: "git push origin main" },
+        session_id: null,
+      },
+    }) + "\n",
+  ]);
   assert.deepEqual(w.writes, [["/recorder", '{"call":"bash","id":1}\n']]);
-  assert.deepEqual(w.timers.map(({ ms, cleared }) => [ms, cleared]), [[8000, true]]);
+  assert.deepEqual(
+    w.timers.map(({ ms, cleared }) => [ms, cleared]),
+    [[8000, true]],
+  );
 });
 
 test("deny prints the one block form with a trimmed reason", async () => {
   const w = world(answer(DENY));
 
-  assert.deepEqual(await startHook(w, send(bashEvent())), block("push blocked"));
+  assert.deepEqual(
+    await startHook(w, send(bashEvent())),
+    block("push blocked"),
+  );
   assert.deepEqual(w.writes, [["/recorder", '{"call":"bash","id":1}\n']]);
 });
 
@@ -193,14 +228,27 @@ test("every Bash command goes to tack-hook, which decides", async () => {
     const w = world(answer(body));
 
     assert.deepEqual(await startHook(w, send(bashEvent(command))), expected);
-    assert.deepEqual(w.starts, [[
-      "tack-hook", ["--plugin", "/plugins/safe-push"],
-      { stdio: ["pipe", "pipe", "ignore"] },
-    ]]);
-    assert.deepEqual(w.lines, [JSON.stringify({
-      kind: "hook", id: 1, version: 1, hook: "toolBefore",
-      call: { tool: "shell", name: "Bash", input: { command }, session_id: null },
-    }) + "\n"]);
+    assert.deepEqual(w.starts, [
+      [
+        "tack-hook",
+        ["--plugin", "/plugins/safe-push"],
+        { stdio: ["pipe", "pipe", "ignore"] },
+      ],
+    ]);
+    assert.deepEqual(w.lines, [
+      JSON.stringify({
+        kind: "hook",
+        id: 1,
+        version: 1,
+        hook: "toolBefore",
+        call: {
+          tool: "shell",
+          name: "Bash",
+          input: { command },
+          session_id: null,
+        },
+      }) + "\n",
+    ]);
     assert.deepEqual(w.writes, [["/recorder", '{"call":"bash","id":1}\n']]);
   }
 });
@@ -220,8 +268,20 @@ test("a call that is not a Bash command string skips tack-hook", async () => {
 
 test("unreadable hook input blocks before tack-hook", async () => {
   for (const [feed, reason] of [
-    [(stdin) => { stdin.emit("data", Buffer.from("not json")); stdin.emit("end"); }, "malformed"],
-    [(stdin) => { stdin.emit("data", Buffer.from([0xff])); stdin.emit("end"); }, "malformed"],
+    [
+      (stdin) => {
+        stdin.emit("data", Buffer.from("not json"));
+        stdin.emit("end");
+      },
+      "malformed",
+    ],
+    [
+      (stdin) => {
+        stdin.emit("data", Buffer.from([0xff]));
+        stdin.emit("end");
+      },
+      "malformed",
+    ],
     [(stdin) => stdin.emit("data", Buffer.alloc(1048577)), "malformed"],
     [(stdin) => stdin.emit("error", new Error("read failed")), "aborted"],
   ]) {
@@ -232,7 +292,12 @@ test("unreadable hook input blocks before tack-hook", async () => {
   }
 });
 
-for (const error of [...reasonNames, "malformed", "too_large", "unrecognized"]) {
+for (const error of [
+  ...reasonNames,
+  "malformed",
+  "too_large",
+  "unrecognized",
+]) {
   test("error envelope blocks without a record: " + error, async () => {
     const reason = reasonNames.includes(error) ? error : "daemon_error";
     const w = world(answer({ kind: "error", error, message: "test error" }));
@@ -243,22 +308,42 @@ for (const error of [...reasonNames, "malformed", "too_large", "unrecognized"]) 
 }
 
 const badReplies = [
-  ["empty output", (_request, child) => child.emit("close", 0), "malformed_reply"],
-  ["invalid JSON", (_request, child) => {
-    child.stdout.emit("data", Buffer.from("not json\n"));
-    child.emit("close", 0);
-  }, "malformed_reply"],
+  [
+    "empty output",
+    (_request, child) => child.emit("close", 0),
+    "malformed_reply",
+  ],
+  [
+    "invalid JSON",
+    (_request, child) => {
+      child.stdout.emit("data", Buffer.from("not json\n"));
+      child.emit("close", 0);
+    },
+    "malformed_reply",
+  ],
   ["wrong id", answer({ ...ALLOW, id: 2 }), "malformed_reply"],
   ["wrong version", answer({ ...ALLOW, version: 2 }), "protocol_version"],
   ["wrong kind", answer({ kind: "tool", ...STATUS }), "malformed_reply"],
-  ["blank deny", answer({ outcome: { kind: "deny", reason: " \n" } }), "malformed_reply"],
-  ["rewrite", answer({
-    outcome: { kind: "rewrite", input: { command: "git push --dry-run" } },
-  }), "malformed_reply"],
-  ["nonzero exit", (request, child) => {
-    emitLine(child, reply(request, ALLOW));
-    child.emit("close", 1);
-  }, "daemon_error"],
+  [
+    "blank deny",
+    answer({ outcome: { kind: "deny", reason: " \n" } }),
+    "malformed_reply",
+  ],
+  [
+    "rewrite",
+    answer({
+      outcome: { kind: "rewrite", input: { command: "git push --dry-run" } },
+    }),
+    "malformed_reply",
+  ],
+  [
+    "nonzero exit",
+    (request, child) => {
+      emitLine(child, reply(request, ALLOW));
+      child.emit("close", 1);
+    },
+    "daemon_error",
+  ],
 ];
 
 for (const [label, respond, reason] of badReplies) {
@@ -272,12 +357,18 @@ for (const [label, respond, reason] of badReplies) {
 
 test("a pipe error does not hide a malformed reply", async () => {
   const w = world((_request, child) => {
-    child.stdin.emit("error", Object.assign(new Error("closed"), { code: "EPIPE" }));
+    child.stdin.emit(
+      "error",
+      Object.assign(new Error("closed"), { code: "EPIPE" }),
+    );
     child.stdout.emit("data", Buffer.from("not JSON\n"));
     child.emit("close", 0);
   });
 
-  assert.deepEqual(await startHook(w, send(bashEvent())), block("malformed_reply"));
+  assert.deepEqual(
+    await startHook(w, send(bashEvent())),
+    block("malformed_reply"),
+  );
 });
 
 test("a pipe error with no stdout blocks as daemon_error", async () => {
@@ -286,7 +377,10 @@ test("a pipe error with no stdout blocks as daemon_error", async () => {
     child.emit("close", 0);
   });
 
-  assert.deepEqual(await startHook(w, send(bashEvent())), block("daemon_error"));
+  assert.deepEqual(
+    await startHook(w, send(bashEvent())),
+    block("daemon_error"),
+  );
 });
 
 test("the one 8000 ms deadline kills tack-hook and blocks", async () => {
@@ -294,7 +388,10 @@ test("the one 8000 ms deadline kills tack-hook and blocks", async () => {
   const pending = startHook(w, send(bashEvent()));
 
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(w.timers.map(({ ms }) => ms), [8000]);
+  assert.deepEqual(
+    w.timers.map(({ ms }) => ms),
+    [8000],
+  );
   w.timers[0].fn();
 
   assert.deepEqual(await pending, block("timeout"));
@@ -316,7 +413,10 @@ test("a missing tack-hook and a failing recorder both block", async () => {
   const enoent = Object.assign(new Error("not found"), { code: "ENOENT" });
 
   assert.deepEqual(
-    await startHook(world(() => {}, { spawnError: enoent }), send(bashEvent())),
+    await startHook(
+      world(() => {}, { spawnError: enoent }),
+      send(bashEvent()),
+    ),
     block("hook_missing"),
   );
   assert.deepEqual(
@@ -342,19 +442,26 @@ function startMcp(w) {
       stdin.emit("data", Buffer.from(text));
     },
     send(message) {
-      stdin.emit("data", Buffer.from(
-        (typeof message === "string" ? message : JSON.stringify(message)) + "\n",
-      ));
+      stdin.emit(
+        "data",
+        Buffer.from(
+          (typeof message === "string" ? message : JSON.stringify(message)) +
+            "\n",
+        ),
+      );
     },
   };
 }
 
 async function settle() {
-  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < 5; i += 1)
+    await new Promise((resolve) => setImmediate(resolve));
 }
 
 const INITIALIZE = {
-  jsonrpc: "2.0", id: 0, method: "initialize",
+  jsonrpc: "2.0",
+  id: 0,
+  method: "initialize",
   params: {
     protocolVersion: "2025-06-18",
     capabilities: { elicitation: {} },
@@ -373,7 +480,8 @@ test("initialize pins 2025-06-18 and lists only guard_status", async () => {
 
   assert.deepEqual(mcp.out, [
     {
-      jsonrpc: "2.0", id: 0,
+      jsonrpc: "2.0",
+      id: 0,
       result: {
         protocolVersion: "2025-06-18",
         capabilities: { tools: {} },
@@ -381,14 +489,21 @@ test("initialize pins 2025-06-18 and lists only guard_status", async () => {
       },
     },
     {
-      jsonrpc: "2.0", id: 1,
+      jsonrpc: "2.0",
+      id: 1,
       result: {
-        tools: [{
-          name: "guard_status",
-          description: "Reports whether the tack daemon is running",
-          inputSchema: { type: "object", properties: {}, additionalProperties: false },
-          annotations: { readOnlyHint: true },
-        }],
+        tools: [
+          {
+            name: "guard_status",
+            description: "Reports whether the tack daemon is running",
+            inputSchema: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
+            annotations: { readOnlyHint: true },
+          },
+        ],
       },
     },
   ]);
@@ -399,8 +514,18 @@ test("a guard_status call returns the daemon text and records once", async () =>
   const w = world(answer(STATUS));
   const mcp = startMcp(w);
 
-  mcp.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "guard_status", arguments: {} } });
-  mcp.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "guard_status" } });
+  mcp.send({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "guard_status", arguments: {} },
+  });
+  mcp.send({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "guard_status" },
+  });
   await settle();
 
   const ok = { content: [{ type: "text", text: "guard_status: daemon ok" }] };
@@ -408,9 +533,19 @@ test("a guard_status call returns the daemon text and records once", async () =>
     { jsonrpc: "2.0", id: 2, result: ok },
     { jsonrpc: "2.0", id: 3, result: ok },
   ]);
-  assert.deepEqual(w.lines, [1, 2].map((id) => JSON.stringify({
-    kind: "tool", id, version: 1, name: "guard_status", input: {},
-  }) + "\n"));
+  assert.deepEqual(
+    w.lines,
+    [1, 2].map(
+      (id) =>
+        JSON.stringify({
+          kind: "tool",
+          id,
+          version: 1,
+          name: "guard_status",
+          input: {},
+        }) + "\n",
+    ),
+  );
   assert.deepEqual(w.writes, [
     ["/recorder", '{"call":"guard_status","id":1}\n'],
     ["/recorder", '{"call":"guard_status","id":2}\n'],
@@ -421,33 +556,72 @@ test("invalid arguments fail before tack-hook", async () => {
   const w = world(answer(STATUS));
   const mcp = startMcp(w);
 
-  for (const [id, args] of [[1, null], [2, []], [3, 42], [4, { extra: true }]]) {
-    mcp.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "guard_status", arguments: args } });
+  for (const [id, args] of [
+    [1, null],
+    [2, []],
+    [3, 42],
+    [4, { extra: true }],
+  ]) {
+    mcp.send({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "guard_status", arguments: args },
+    });
   }
   await settle();
 
-  const malformed = { content: [{ type: "text", text: "tack: malformed" }], isError: true };
-  assert.deepEqual(mcp.out, [1, 2, 3, 4].map((id) => ({ jsonrpc: "2.0", id, result: malformed })));
+  const malformed = {
+    content: [{ type: "text", text: "tack: malformed" }],
+    isError: true,
+  };
+  assert.deepEqual(
+    mcp.out,
+    [1, 2, 3, 4].map((id) => ({ jsonrpc: "2.0", id, result: malformed })),
+  );
   assert.deepEqual(w.starts, []);
   assert.deepEqual(w.writes, []);
 });
 
 test("a failed call returns a named error and records nothing", async () => {
   for (const [respond, options, reason] of [
-    [answer({ kind: "error", error: "socket_missing", message: "x" }), {}, "socket_missing"],
-    [answer({ content: [{ kind: "text", text: "fake" }] }), {}, "malformed_reply"],
-    [() => {}, { spawnError: Object.assign(new Error("x"), { code: "ENOENT" }) }, "hook_missing"],
+    [
+      answer({ kind: "error", error: "socket_missing", message: "x" }),
+      {},
+      "socket_missing",
+    ],
+    [
+      answer({ content: [{ kind: "text", text: "fake" }] }),
+      {},
+      "malformed_reply",
+    ],
+    [
+      () => {},
+      { spawnError: Object.assign(new Error("x"), { code: "ENOENT" }) },
+      "hook_missing",
+    ],
   ]) {
     const w = world(respond, options);
     const mcp = startMcp(w);
 
-    mcp.send({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "guard_status", arguments: {} } });
+    mcp.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "guard_status", arguments: {} },
+    });
     await settle();
 
-    assert.deepEqual(mcp.out, [{
-      jsonrpc: "2.0", id: 7,
-      result: { content: [{ type: "text", text: "tack: " + reason }], isError: true },
-    }]);
+    assert.deepEqual(mcp.out, [
+      {
+        jsonrpc: "2.0",
+        id: 7,
+        result: {
+          content: [{ type: "text", text: "tack: " + reason }],
+          isError: true,
+        },
+      },
+    ]);
     assert.deepEqual(w.writes, []);
   }
 });
@@ -457,17 +631,34 @@ test("unknown methods, tools and lines get JSON-RPC errors", async () => {
   const mcp = startMcp(w);
 
   mcp.send({ jsonrpc: "2.0", id: 1, method: "server/discover" });
-  mcp.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "other" } });
+  mcp.send({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "other" },
+  });
   mcp.send("not json");
   mcp.send("[]");
   mcp.send({ jsonrpc: "2.0", id: 3, method: "ping" });
   await settle();
 
   assert.deepEqual(mcp.out, [
-    { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "method not found" } },
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32601, message: "method not found" },
+    },
     { jsonrpc: "2.0", id: 2, error: { code: -32602, message: "unknown tool" } },
-    { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } },
-    { jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } },
+    {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "parse error" },
+    },
+    {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "invalid request" },
+    },
     { jsonrpc: "2.0", id: 3, result: {} },
   ]);
   assert.deepEqual(w.starts, []);
@@ -495,14 +686,24 @@ test("an oversized line is dropped whole with one parse error", async () => {
   await settle();
 
   assert.deepEqual(mcp.out, [
-    { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } },
+    {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "parse error" },
+    },
     { jsonrpc: "2.0", id: 4, result: {} },
   ]);
 });
 
 test("session start appends exactly one load marker and prints nothing", () => {
   const w = world(() => {});
-  const main = loadSession(w.spawn, w.append, w.process, w.setTimer, w.clearTimer);
+  const main = loadSession(
+    w.spawn,
+    w.append,
+    w.process,
+    w.setTimer,
+    w.clearTimer,
+  );
   const stdin = new EventEmitter();
   const exits = [];
 
@@ -513,5 +714,8 @@ test("session start appends exactly one load marker and prints nothing", () => {
 
   assert.deepEqual(w.writes, [["/recorder", '{"call":"tack-loaded"}\n']]);
   assert.deepEqual(exits, [0]);
-  assert.deepEqual(w.timers.map(({ ms, cleared }) => [ms, cleared]), [[8000, true]]);
+  assert.deepEqual(
+    w.timers.map(({ ms, cleared }) => [ms, cleared]),
+    [[8000, true]],
+  );
 });

@@ -55,7 +55,10 @@ function report(label, ok, evidence) {
     console.error("FAIL " + label);
   }
 
-  const shown = evidence.length > 4000 ? evidence.slice(0, 4000) + " ... (truncated)" : evidence;
+  const shown =
+    evidence.length > 4000
+      ? evidence.slice(0, 4000) + " ... (truncated)"
+      : evidence;
   console.log("  evidence: " + shown.replace(/\n/g, " | "));
 }
 
@@ -142,7 +145,9 @@ function installModRecorder(target, recorderFile, execFile) {
 
   for (const placeholder of placeholders) {
     if (template.split(placeholder).length !== 2) {
-      throw new Error("mod-recorder must hold " + placeholder + " exactly once");
+      throw new Error(
+        "mod-recorder must hold " + placeholder + " exactly once",
+      );
     }
   }
 
@@ -299,7 +304,11 @@ function layout(base) {
   install(gitShim, path.join(tree.binDir, "git"));
   // The mod runs the plain name tack-hook, so the recorder takes that name
   // ahead of target/debug and hands each call to the real binary.
-  installModRecorder(path.join(tree.binDir, "tack-hook"), tree.modRecorder, hookBin);
+  installModRecorder(
+    path.join(tree.binDir, "tack-hook"),
+    tree.modRecorder,
+    hookBin,
+  );
 
   return tree;
 }
@@ -348,9 +357,11 @@ function initFrame(output) {
 // its exact name and source. Only a plugin that matches a pair in both is
 // left out of the loaded set; any other plugin fails it.
 const BUILT_INS = new Set(
-  ["cc-plugin-agents-md", "cc-plugin-privacy", "cc-plugin-plugin-authoring"].map(
-    (name) => name + "\u0000" + name + "@builtin",
-  ),
+  [
+    "cc-plugin-agents-md",
+    "cc-plugin-privacy",
+    "cc-plugin-plugin-authoring",
+  ].map((name) => name + "\u0000" + name + "@builtin"),
 );
 
 function isBuiltIn(plugin) {
@@ -364,7 +375,9 @@ function isBuiltIn(plugin) {
 // The tack mod comes from --plugin-dir, so a tack entry whose source says
 // built-in is not the mod under test.
 function claimsBuiltIn(plugin) {
-  return typeof plugin.source === "string" && plugin.source.endsWith("@builtin");
+  return (
+    typeof plugin.source === "string" && plugin.source.endsWith("@builtin")
+  );
 }
 
 // The system/init frame names every plugin Claude Code loaded and every one
@@ -374,7 +387,11 @@ function claimsBuiltIn(plugin) {
 function loadedSet(output) {
   const frame = initFrame(output);
   if (!frame) {
-    return { ok: false, plugins: [], evidence: "no system/init frame in the output" };
+    return {
+      ok: false,
+      plugins: [],
+      evidence: "no system/init frame in the output",
+    };
   }
 
   const plugins = Array.isArray(frame.plugins) ? frame.plugins : [];
@@ -403,25 +420,43 @@ const TACK = { name: PLUGIN_NAME, path: "/dist/claude", source: "tack@inline" };
 const REAL_BUILT_INS = [
   { name: "cc-plugin-agents-md", source: "cc-plugin-agents-md@builtin" },
   { name: "cc-plugin-privacy", source: "cc-plugin-privacy@builtin" },
-  { name: "cc-plugin-plugin-authoring", source: "cc-plugin-plugin-authoring@builtin" },
+  {
+    name: "cc-plugin-plugin-authoring",
+    source: "cc-plugin-plugin-authoring@builtin",
+  },
 ];
 
 for (const plugin of REAL_BUILT_INS) assert.equal(isBuiltIn(plugin), true);
-assert.equal(isBuiltIn({ name: "cc-plugin-privacy", source: "tack@inline" }), false);
-assert.equal(isBuiltIn({ name: "tack", source: "cc-plugin-privacy@builtin" }), false);
-assert.equal(isBuiltIn({ name: "cc-plugin-other", source: "cc-plugin-other@builtin" }), false);
+assert.equal(
+  isBuiltIn({ name: "cc-plugin-privacy", source: "tack@inline" }),
+  false,
+);
+assert.equal(
+  isBuiltIn({ name: "tack", source: "cc-plugin-privacy@builtin" }),
+  false,
+);
+assert.equal(
+  isBuiltIn({ name: "cc-plugin-other", source: "cc-plugin-other@builtin" }),
+  false,
+);
 assert.equal(isBuiltIn({ name: "cc-plugin-privacy" }), false);
 assert.equal(loadedSet(initWith([TACK, ...REAL_BUILT_INS])).ok, true);
 assert.equal(loadedSet(initWith(REAL_BUILT_INS)).ok, false);
 assert.equal(
-  loadedSet(initWith([TACK, { name: "cc-plugin-privacy", source: "tack@inline" }])).ok,
+  loadedSet(
+    initWith([TACK, { name: "cc-plugin-privacy", source: "tack@inline" }]),
+  ).ok,
   false,
 );
 assert.equal(
-  loadedSet(initWith([{ name: "tack", source: "cc-plugin-privacy@builtin" }])).ok,
+  loadedSet(initWith([{ name: "tack", source: "cc-plugin-privacy@builtin" }]))
+    .ok,
   false,
 );
-assert.equal(loadedSet(initWith([{ name: "tack", source: "tack@builtin" }])).ok, false);
+assert.equal(
+  loadedSet(initWith([{ name: "tack", source: "tack@builtin" }])).ok,
+  false,
+);
 assert.equal(loadedSet(initWith([TACK, TACK])).ok, false);
 
 // The stream-json frames, other than system/init, and the stderr lines that
@@ -451,14 +486,19 @@ function hookLines(run, name) {
 // was refused, failed to load, was unloaded, or had a hook skipped, or that
 // hooks modules are turned off for the whole process.
 function checkHookLines(run, plugins) {
-  const names = new Set([PLUGIN_NAME, ...plugins.map((plugin) => String(plugin?.name))]);
+  const names = new Set([
+    PLUGIN_NAME,
+    ...plugins.map((plugin) => String(plugin?.name)),
+  ]);
 
   for (const name of names) {
     const { fromStdout, fromStderr } = hookLines(run, name);
-    const counts = "stream-json " + fromStdout.length + ", stderr " + fromStderr.length;
+    const counts =
+      "stream-json " + fromStdout.length + ", stderr " + fromStderr.length;
 
     console.log("hooks lines for " + name + ": " + counts);
-    for (const line of [...fromStdout, ...fromStderr]) console.log("  | " + line);
+    for (const line of [...fromStdout, ...fromStderr])
+      console.log("  | " + line);
   }
 
   const own = hookLines(run, PLUGIN_NAME);
@@ -485,7 +525,10 @@ function isRecordedPush(line) {
 
 assert.equal(isRecordedPush("push origin main"), true);
 assert.equal(isRecordedPush("push"), true);
-assert.equal(isRecordedPush("call --plugin /work/tack/fixtures/safe-push"), false);
+assert.equal(
+  isRecordedPush("call --plugin /work/tack/fixtures/safe-push"),
+  false,
+);
 assert.equal(isRecordedPush("call push"), false);
 
 function checkNoPush(tree) {
@@ -513,7 +556,11 @@ function check(tree, run) {
 
   // A row about the mod's hook or tool proves nothing unless the mod loaded.
   if (!loaded.ok) {
-    report("hook and tool rows", false, "not counted: the tack mod did not load");
+    report(
+      "hook and tool rows",
+      false,
+      "not counted: the tack mod did not load",
+    );
     return;
   }
 
@@ -522,12 +569,28 @@ function check(tree, run) {
 
 function checkRows(tree, run) {
   const daemonLog = readOptional(path.join(tree.stateDir, "daemon.log"));
-  report("daemon denied the push", daemonLog.includes(DAEMON_DENY), "daemon.log: " + daemonLog);
-  report("daemon ran guard_status", daemonLog.includes(DAEMON_TOOL), "daemon.log: " + daemonLog);
+  report(
+    "daemon denied the push",
+    daemonLog.includes(DAEMON_DENY),
+    "daemon.log: " + daemonLog,
+  );
+  report(
+    "daemon ran guard_status",
+    daemonLog.includes(DAEMON_TOOL),
+    "daemon.log: " + daemonLog,
+  );
 
   const context = run.output + " [run exit=" + run.code + "]";
-  report("deny reason reached the session", context.includes(DENY_REASON), context);
-  report("tool result reached the session", context.includes(TOOL_RESULT), context);
+  report(
+    "deny reason reached the session",
+    context.includes(DENY_REASON),
+    context,
+  );
+  report(
+    "tool result reached the session",
+    context.includes(TOOL_RESULT),
+    context,
+  );
 
   const modCalls = lines(tree.modRecorder);
   report(
@@ -573,13 +636,18 @@ async function main() {
   try {
     model = await startModel(tree.requestLog);
 
-    const run = await runClaude(claudeEnv(tree, model.port), tree.projectDir, (child) => {
-      claude = child;
-    });
+    const run = await runClaude(
+      claudeEnv(tree, model.port),
+      tree.projectDir,
+      (child) => {
+        claude = child;
+      },
+    );
     writeFileSync(tree.output, run.stdout);
     writeFileSync(tree.stderr, run.stderr);
 
-    if (run.timedOut) report("claude finished within 90s", false, "run was killed at 90s");
+    if (run.timedOut)
+      report("claude finished within 90s", false, "run was killed at 90s");
 
     check(tree, run);
   } catch (error) {

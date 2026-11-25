@@ -24,7 +24,8 @@ function readReply(request, chunks, size) {
 
   try {
     const text = new TextDecoder("utf-8", { fatal: true })
-      .decode(Buffer.concat(chunks, size)).trimEnd();
+      .decode(Buffer.concat(chunks, size))
+      .trimEnd();
     const line = text.slice(text.lastIndexOf("\n") + 1);
     reply = JSON.parse(line);
   } catch {
@@ -119,9 +120,10 @@ function forward(request) {
       child.once("close", (code) => {
         if (settled) return;
 
-        const result = code !== 0 || (pipeError && size === 0)
-          ? refuse("daemon_error")
-          : readReply(request, chunks, size);
+        const result =
+          code !== 0 || (pipeError && size === 0)
+            ? refuse("daemon_error")
+            : readReply(request, chunks, size);
         finish(result);
       });
       child.stdin.end(line);
@@ -172,7 +174,12 @@ export default function register(pi) {
         id,
         version: PROTOCOL_VERSION,
         hook: "toolBefore",
-        call: { tool: "shell", name: "Bash", input: { command }, session_id: null },
+        call: {
+          tool: "shell",
+          name: "Bash",
+          input: { command },
+          session_id: null,
+        },
       });
 
       if (!result.ok) return block(result.reason);
@@ -196,8 +203,12 @@ export default function register(pi) {
 
   async function guardStatus(_toolCallId, params) {
     try {
-      if (!params || typeof params !== "object" || Array.isArray(params) ||
-          Object.keys(params).length !== 0) {
+      if (
+        !params ||
+        typeof params !== "object" ||
+        Array.isArray(params) ||
+        Object.keys(params).length !== 0
+      ) {
         return toolError("malformed");
       }
 
@@ -213,9 +224,8 @@ export default function register(pi) {
       if (!result.ok) return toolError(result.reason);
 
       const content = result.reply.content;
-      const item = Array.isArray(content) && content.length === 1
-        ? content[0]
-        : null;
+      const item =
+        Array.isArray(content) && content.length === 1 ? content[0] : null;
 
       if (item?.kind !== "text" || item.text !== STATUS) {
         return toolError("malformed_reply");

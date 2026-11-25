@@ -26,7 +26,12 @@ if (process.env.TACK_STATE_DIR) {
 } else if (process.env.XDG_STATE_HOME) {
   state = path.join(process.env.XDG_STATE_HOME, "tack");
 } else {
-  state = path.join(process.env.HOME || os.homedir(), ".local", "state", "tack");
+  state = path.join(
+    process.env.HOME || os.homedir(),
+    ".local",
+    "state",
+    "tack",
+  );
 }
 const STATE = state;
 const SOCKET = process.env.TACK_SOCKET || path.join(STATE, "tack.sock");
@@ -103,8 +108,9 @@ function startDaemon() {
       const ready = () => {
         if (!fs.existsSync(SOCKET)) return false;
         const current = socketIdentity();
-        return current !== undefined &&
-          (stale === undefined || current !== stale);
+        return (
+          current !== undefined && (stale === undefined || current !== stale)
+        );
       };
 
       timer = setTimeout(() => finish(), START_TIMEOUT_MS);
@@ -114,10 +120,14 @@ function startDaemon() {
         // a second start here must never remove a live daemon's socket.
         fs.mkdirSync(STATE, { recursive: true });
         const log = fs.openSync(DAEMON_LOG, "a");
-        child = spawn(daemonBin(), ["--socket", SOCKET, "--plugin", PLUGIN_DIR], {
-          detached: true,
-          stdio: ["ignore", log, log],
-        });
+        child = spawn(
+          daemonBin(),
+          ["--socket", SOCKET, "--plugin", PLUGIN_DIR],
+          {
+            detached: true,
+            stdio: ["ignore", log, log],
+          },
+        );
         child.on("error", () => finish());
         child.on("exit", () => finish());
         child.unref();
@@ -192,8 +202,12 @@ function forward(request, signal) {
           deny("malformed_reply");
           return;
         }
-        if (!reply || typeof reply !== "object" || reply.id !== request.id ||
-            !KINDS.has(reply.kind)) {
+        if (
+          !reply ||
+          typeof reply !== "object" ||
+          reply.id !== request.id ||
+          !KINDS.has(reply.kind)
+        ) {
           deny("malformed_reply");
           return;
         }
@@ -280,7 +294,9 @@ async function before(event) {
   }
   if (outcome.kind === "rewrite") {
     const rewritten = outcome.input;
-    const plain = rewritten !== null && typeof rewritten === "object" &&
+    const plain =
+      rewritten !== null &&
+      typeof rewritten === "object" &&
       !Array.isArray(rewritten);
     if (!plain) throw new Error("tack: " + denyName("malformed_reply"));
     event.input = rewritten;
@@ -311,13 +327,16 @@ async function setup(ctx) {
           input: definition.input,
           options: { codemode: false },
           async execute(args, context) {
-            const result = await forward({
-              id: nextId(),
-              kind: "tool",
-              name: definition.name,
-              input: args,
-              version: PROTOCOL_VERSION,
-            }, context && context.signal);
+            const result = await forward(
+              {
+                id: nextId(),
+                kind: "tool",
+                name: definition.name,
+                input: args,
+                version: PROTOCOL_VERSION,
+              },
+              context && context.signal,
+            );
             if (!result.ok) throw new Error("tack: " + result.reason);
             if (result.reply.kind !== "tool") {
               throw new Error("tack: " + denyName("malformed_reply"));

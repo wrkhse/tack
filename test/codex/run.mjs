@@ -69,26 +69,94 @@ const VERDICT_LINES = {
 // Codex runs it, with no model. detect: a broken install the trust and load
 // assertions must catch. allow: the Bash command tack lets run.
 const cases = [
-  { name: "normal", kind: "session", model: "normal", hook: "real", rebuild: true,
-    bash: "tack: push blocked", status: "ok" },
-  { name: "harmless", kind: "session", model: "harmless", hook: "real", allow: HARMLESS },
-  { name: "missing-hook", kind: "session", model: "bash", hook: "missing",
-    bash: "tack: hook_missing" },
-  { name: "daemon-crash", kind: "session", model: "bash", hook: "real", crash: true,
-    bash: "tack: socket_closed" },
-  { name: "timeout", kind: "session", model: "bash", hook: "sleep", bash: "tack: timeout" },
-  { name: "invalid-reply", kind: "session", model: "bash", hook: "garbage",
-    bash: "tack: malformed_reply" },
-  { name: "invalid-guard-status", kind: "session", model: "invalid-tool", hook: "real",
-    status: "invalid" },
-  { name: "mcp-start-failure", kind: "session", model: "bash", hook: "real", mcpBroken: true,
-    bash: "tack: push blocked" },
-  { name: "node-missing", kind: "direct", node: "missing", hook: "real",
-    reason: "tack: node_missing" },
-  { name: "node-crash", kind: "direct", node: "crash", hook: "real",
-    reason: "tack: node_failed" },
-  { name: "stale-trust", kind: "detect", model: "bash", hook: "real", tamper: "stale" },
-  { name: "config-parse-error", kind: "detect", model: "bash", hook: "real", tamper: "parse" },
+  {
+    name: "normal",
+    kind: "session",
+    model: "normal",
+    hook: "real",
+    rebuild: true,
+    bash: "tack: push blocked",
+    status: "ok",
+  },
+  {
+    name: "harmless",
+    kind: "session",
+    model: "harmless",
+    hook: "real",
+    allow: HARMLESS,
+  },
+  {
+    name: "missing-hook",
+    kind: "session",
+    model: "bash",
+    hook: "missing",
+    bash: "tack: hook_missing",
+  },
+  {
+    name: "daemon-crash",
+    kind: "session",
+    model: "bash",
+    hook: "real",
+    crash: true,
+    bash: "tack: socket_closed",
+  },
+  {
+    name: "timeout",
+    kind: "session",
+    model: "bash",
+    hook: "sleep",
+    bash: "tack: timeout",
+  },
+  {
+    name: "invalid-reply",
+    kind: "session",
+    model: "bash",
+    hook: "garbage",
+    bash: "tack: malformed_reply",
+  },
+  {
+    name: "invalid-guard-status",
+    kind: "session",
+    model: "invalid-tool",
+    hook: "real",
+    status: "invalid",
+  },
+  {
+    name: "mcp-start-failure",
+    kind: "session",
+    model: "bash",
+    hook: "real",
+    mcpBroken: true,
+    bash: "tack: push blocked",
+  },
+  {
+    name: "node-missing",
+    kind: "direct",
+    node: "missing",
+    hook: "real",
+    reason: "tack: node_missing",
+  },
+  {
+    name: "node-crash",
+    kind: "direct",
+    node: "crash",
+    hook: "real",
+    reason: "tack: node_failed",
+  },
+  {
+    name: "stale-trust",
+    kind: "detect",
+    model: "bash",
+    hook: "real",
+    tamper: "stale",
+  },
+  {
+    name: "config-parse-error",
+    kind: "detect",
+    model: "bash",
+    hook: "real",
+    tamper: "parse",
+  },
 ];
 
 const EVENT_LABELS = new Map([
@@ -229,7 +297,11 @@ function sessionFlags(port) {
 function initProject(tree, env) {
   function git(...args) {
     const result = spawnSync(env.TACK_REAL_GIT, args, {
-      cwd: tree.project, env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL",
+      cwd: tree.project,
+      env,
+      encoding: "utf8",
+      timeout: 5_000,
+      killSignal: "SIGKILL",
     });
 
     if (result.error) throw result.error;
@@ -241,8 +313,17 @@ function initProject(tree, env) {
 
   const origin = path.join(tree.base, "origin.git");
   git("init", "--initial-branch=main");
-  git("-c", "user.name=Codex conformance", "-c", "user.email=codex@example.invalid",
-    "commit", "--allow-empty", "--no-gpg-sign", "-m", "Fixture");
+  git(
+    "-c",
+    "user.name=Codex conformance",
+    "-c",
+    "user.email=codex@example.invalid",
+    "commit",
+    "--allow-empty",
+    "--no-gpg-sign",
+    "-m",
+    "Fixture",
+  );
   git("clone", "--bare", ".", origin);
   git("remote", "add", "origin", origin);
   git("fetch", "origin", "refs/heads/main:refs/remotes/origin/main");
@@ -315,7 +396,12 @@ function recorderSource(attempts, calls) {
     "const CALLS = " + JSON.stringify(calls) + ";",
   ];
 
-  return ["#!" + process.execPath, '"use strict";', ...values, RECORDER_BODY].join("\n");
+  return [
+    "#!" + process.execPath,
+    '"use strict";',
+    ...values,
+    RECORDER_BODY,
+  ].join("\n");
 }
 
 const hookShims = new Map([
@@ -328,7 +414,9 @@ function installHook(tree, env, mode) {
 
   if (mode === "real") {
     accessSync(hookBin, constants.X_OK);
-    writeFileSync(hook, recorderSource(tree.hookAttempts, tree.hookCalls), { mode: 0o755 });
+    writeFileSync(hook, recorderSource(tree.hookAttempts, tree.hookCalls), {
+      mode: 0o755,
+    });
     return;
   }
 
@@ -336,7 +424,8 @@ function installHook(tree, env, mode) {
     // The isolated PATH omits target/debug; a dangling link exercises ENOENT,
     // not a binary that started and returned a failing exit code.
     symlinkSync(path.join(tree.bin, "absent"), hook);
-    if (findExecutable("tack-hook", env.PATH)) throw new Error("tack-hook is not absent");
+    if (findExecutable("tack-hook", env.PATH))
+      throw new Error("tack-hook is not absent");
 
     return;
   }
@@ -344,15 +433,21 @@ function installHook(tree, env, mode) {
   const script = hookShims.get(mode);
   if (!script) throw new Error("no shim for " + mode);
 
-  writeFileSync(hook, '#!/bin/sh\nprintf "%s\\n" invoked >> "$TACK_TEST_HOOK_ATTEMPTS"\n' +
-    script + "\n", { mode: 0o755 });
+  writeFileSync(
+    hook,
+    '#!/bin/sh\nprintf "%s\\n" invoked >> "$TACK_TEST_HOOK_ATTEMPTS"\n' +
+      script +
+      "\n",
+    { mode: 0o755 },
+  );
 }
 
 function installNode(tree, env, mode) {
   const node = path.join(tree.bin, "node");
 
   if (mode === "missing") {
-    if (findExecutable("node", env.PATH)) throw new Error("node is on the isolated PATH");
+    if (findExecutable("node", env.PATH))
+      throw new Error("node is on the isolated PATH");
 
     return;
   }
@@ -384,14 +479,29 @@ function installGit(tree, expected) {
   copyFileSync(gitShim, tree.gitShim);
   chmodSync(tree.gitShim, 0o755);
   writeFileSync(tree.gitRuns, "");
-  writeFileSync(git, "#!/bin/sh\n" + shellQuote(tree.gitShim) + ' "$@"\nstatus=$?\n' +
-    "printf '%s %s\\n' \"$status\" \"$*\" >> " + shellQuote(tree.gitRuns) +
-    '\nexit "$status"\n', { mode: 0o755 });
+  writeFileSync(
+    git,
+    "#!/bin/sh\n" +
+      shellQuote(tree.gitShim) +
+      ' "$@"\nstatus=$?\n' +
+      'printf \'%s %s\\n\' "$status" "$*" >> ' +
+      shellQuote(tree.gitRuns) +
+      '\nexit "$status"\n',
+    { mode: 0o755 },
+  );
 }
 
 function prepare(tree, env, expected) {
-  for (const dir of [tree.home, tree.codexHome, tree.config, tree.data, tree.cache,
-    tree.tmp, tree.bin, tree.project]) {
+  for (const dir of [
+    tree.home,
+    tree.codexHome,
+    tree.config,
+    tree.data,
+    tree.cache,
+    tree.tmp,
+    tree.bin,
+    tree.project,
+  ]) {
     mkdirSync(dir, { mode: 0o700 });
   }
 
@@ -405,17 +515,22 @@ function prepare(tree, env, expected) {
   installNode(tree, env, expected.node);
   installHook(tree, env, expected.hook);
   initProject(tree, env);
-  if (expected.allow) writeFileSync(path.join(tree.project, UNTRACKED), "untracked\n");
+  if (expected.allow)
+    writeFileSync(path.join(tree.project, UNTRACKED), "untracked\n");
 }
 
 function tackBuild(tack, tree, out) {
-  const result = spawnSync(tack, ["build", pluginDir, "--out", out, "--target", "codex"], {
-    cwd: repoRoot,
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...xdgEnv(tree) },
-    encoding: "utf8",
-    timeout: BUILD_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-  });
+  const result = spawnSync(
+    tack,
+    ["build", pluginDir, "--out", out, "--target", "codex"],
+    {
+      cwd: repoRoot,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...xdgEnv(tree) },
+      encoding: "utf8",
+      timeout: BUILD_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    },
+  );
 
   return {
     ok: result.status === 0 && !result.error,
@@ -430,12 +545,18 @@ function tackBuild(tack, tree, out) {
 // trailing slash, bounded so a runaway build cannot make the walk unbounded.
 function entries(dir) {
   const found = readdirSync(dir, { recursive: true, withFileTypes: true });
-  if (found.length > MAX_TREE_ENTRIES) throw new Error(dir + " holds over " + MAX_TREE_ENTRIES);
+  if (found.length > MAX_TREE_ENTRIES)
+    throw new Error(dir + " holds over " + MAX_TREE_ENTRIES);
 
-  return found.map((entry) => {
-    const relative = path.relative(dir, path.join(entry.parentPath, entry.name));
-    return entry.isDirectory() ? relative + "/" : relative;
-  }).sort();
+  return found
+    .map((entry) => {
+      const relative = path.relative(
+        dir,
+        path.join(entry.parentPath, entry.name),
+      );
+      return entry.isDirectory() ? relative + "/" : relative;
+    })
+    .sort();
 }
 
 // Before any Codex process runs, the throwaway folders hold only what tack
@@ -446,13 +567,23 @@ function checkPristine(tree, check) {
     codexHome: entries(tree.codexHome),
     xdg: [tree.config, tree.data, tree.cache].flatMap(entries),
   };
-  const codexOk = found.codexHome.includes("config.toml") &&
-    found.codexHome.every((file) => ["config.toml", "hooks.json"].includes(file));
+  const codexOk =
+    found.codexHome.includes("config.toml") &&
+    found.codexHome.every((file) =>
+      ["config.toml", "hooks.json"].includes(file),
+    );
 
-  check("throwaway folders hold only tack's generated config and state",
-    codexOk && found.xdg.length === 0 &&
-      isDeepStrictEqual(found.home, [".local/", ".local/state/", ".local/state/tack/"]),
-    found);
+  check(
+    "throwaway folders hold only tack's generated config and state",
+    codexOk &&
+      found.xdg.length === 0 &&
+      isDeepStrictEqual(found.home, [
+        ".local/",
+        ".local/state/",
+        ".local/state/tack/",
+      ]),
+    found,
+  );
 }
 
 // The user step tack's build leaves: its generated config.toml fragment goes
@@ -469,17 +600,27 @@ function installFragment(tree, out, previous, check) {
   }
 
   const analytics = lines.indexOf("[analytics]");
-  check("generated config turns analytics and update checks off",
-    lines.includes("check_for_update_on_startup = false") && analytics !== -1 &&
-      lines[analytics + 1] === "enabled = false" && lines.includes("[mcp_servers.tack]"),
-    fragment);
-  writeFileSync(configPath, fragment + "\n" + config.slice(previous?.length ?? 0));
+  check(
+    "generated config turns analytics and update checks off",
+    lines.includes("check_for_update_on_startup = false") &&
+      analytics !== -1 &&
+      lines[analytics + 1] === "enabled = false" &&
+      lines.includes("[mcp_servers.tack]"),
+    fragment,
+  );
+  writeFileSync(
+    configPath,
+    fragment + "\n" + config.slice(previous?.length ?? 0),
+  );
 
   return fragment + "\n";
 }
 
 function startChild(bin, args, options, onStdout) {
-  const child = spawn(bin, args, { ...options, stdio: [options.stdin ?? "ignore", "pipe", "pipe"] });
+  const child = spawn(bin, args, {
+    ...options,
+    stdio: [options.stdin ?? "ignore", "pipe", "pipe"],
+  });
   const output = { stdout: "", stderr: "", outputLimit: false };
   let closed = false;
   let spawnError;
@@ -524,7 +665,9 @@ function startChild(bin, args, options, onStdout) {
   }
 
   child.stdin?.on("error", () => {});
-  child.once("error", (error) => { spawnError = error.message; });
+  child.once("error", (error) => {
+    spawnError = error.message;
+  });
   const done = new Promise((resolve) => {
     child.once("close", (code, signal) => {
       closed = true;
@@ -541,7 +684,11 @@ function lineReader(onLine) {
 
   return {
     collect(stdout) {
-      for (let end = stdout.indexOf("\n", offset); end !== -1; end = stdout.indexOf("\n", offset)) {
+      for (
+        let end = stdout.indexOf("\n", offset);
+        end !== -1;
+        end = stdout.indexOf("\n", offset)
+      ) {
         const line = stdout.slice(offset, end);
         offset = end + 1;
         onLine(line);
@@ -565,21 +712,36 @@ async function listHooks(codexJs, tree, env) {
       messages.push({ invalid: line });
     }
   });
-  const child = startChild(process.execPath, [codexJs, ...sessionFlags(), "app-server"],
-    { cwd: tree.project, env, detached: true, stdin: "pipe" }, reader.collect);
+  const child = startChild(
+    process.execPath,
+    [codexJs, ...sessionFlags(), "app-server"],
+    { cwd: tree.project, env, detached: true, stdin: "pipe" },
+    reader.collect,
+  );
   const send = (message) => child.stdin.write(JSON.stringify(message) + "\n");
   const timer = setTimeout(() => resolve({ timeout: true }), LIST_TIMEOUT_MS);
 
   try {
-    send({ id: 1, method: "initialize",
-      params: { clientInfo: { name: "tack_conformance", title: null, version: "0.0.0" } } });
+    send({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "tack_conformance", title: null, version: "0.0.0" },
+      },
+    });
     send({ method: "initialized" });
     send({ id: 2, method: "hooks/list", params: { cwds: [tree.project] } });
 
-    const exited = child.done.then((run) => ({ exited: run.code, stderr: run.stderr }));
+    const exited = child.done.then((run) => ({
+      exited: run.code,
+      stderr: run.stderr,
+    }));
     const reply = await Promise.race([promise, exited]);
-    writeFileSync(path.join(tree.base, "hooks-list.jsonl"), JSON.stringify(reply) + "\n",
-      { flag: "a" });
+    writeFileSync(
+      path.join(tree.base, "hooks-list.jsonl"),
+      JSON.stringify(reply) + "\n",
+      { flag: "a" },
+    );
 
     return { reply, messages };
   } finally {
@@ -587,7 +749,9 @@ async function listHooks(codexJs, tree, env) {
     child.stop();
     const run = await child.done;
     child.reap();
-    writeFileSync(path.join(tree.base, "app-server-stderr.log"), run.stderr, { flag: "a" });
+    writeFileSync(path.join(tree.base, "app-server-stderr.log"), run.stderr, {
+      flag: "a",
+    });
   }
 }
 
@@ -595,20 +759,32 @@ function sortKeys(value) {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value === null || typeof value !== "object") return value;
 
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortKeys(value[key])]));
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, sortKeys(value[key])]),
+  );
 }
 
 // Codex's trust hash of one command handler: the normalized identity as TOML
 // would hold it (no null fields), as sorted compact JSON, under SHA-256.
 function hookHash(hook) {
-  const handler = { type: "command", command: hook.command, timeout: hook.timeoutSec,
-    async: hook.async ?? false };
+  const handler = {
+    type: "command",
+    command: hook.command,
+    timeout: hook.timeoutSec,
+    async: hook.async ?? false,
+  };
   if (hook.statusMessage != null) handler.statusMessage = hook.statusMessage;
 
   const limit = hook.additionalContextLimit;
-  if (limit != null && limit !== DEFAULT_CONTEXT_LIMIT) handler.additionalContextLimit = limit;
+  if (limit != null && limit !== DEFAULT_CONTEXT_LIMIT)
+    handler.additionalContextLimit = limit;
 
-  const identity = { event_name: EVENT_LABELS.get(hook.eventName), hooks: [handler] };
+  const identity = {
+    event_name: EVENT_LABELS.get(hook.eventName),
+    hooks: [handler],
+  };
   if (hook.matcher != null) identity.matcher = hook.matcher;
 
   const json = JSON.stringify(sortKeys(identity));
@@ -629,16 +805,26 @@ function hookProblems(hook, home, outs) {
   const label = EVENT_LABELS.get(hook.eventName);
   const prefix = hook.sourcePath + ":" + label + ":";
   const problems = [];
-  const keyTail = hook.key?.startsWith(prefix) ? hook.key.slice(prefix.length) : undefined;
+  const keyTail = hook.key?.startsWith(prefix)
+    ? hook.key.slice(prefix.length)
+    : undefined;
 
   if (!keyTail || !/^\d+:\d+$/.test(keyTail)) problems.push("key " + hook.key);
-  if (hook.source !== "user" || hook.isManaged !== false) problems.push("source " + hook.source);
-  if (path.dirname(hook.sourcePath) !== home) problems.push("source path " + hook.sourcePath);
-  if (hook.handlerType !== "command" || !outs.some((out) => hook.command?.includes(out))) {
-    problems.push("handler " + JSON.stringify(hook.command ?? hook.handlerType));
+  if (hook.source !== "user" || hook.isManaged !== false)
+    problems.push("source " + hook.source);
+  if (path.dirname(hook.sourcePath) !== home)
+    problems.push("source path " + hook.sourcePath);
+  if (
+    hook.handlerType !== "command" ||
+    !outs.some((out) => hook.command?.includes(out))
+  ) {
+    problems.push(
+      "handler " + JSON.stringify(hook.command ?? hook.handlerType),
+    );
   }
   if (hook.enabled !== true) problems.push("disabled");
-  if (hook.trustStatus !== "trusted") problems.push("trust " + hook.trustStatus);
+  if (hook.trustStatus !== "trusted")
+    problems.push("trust " + hook.trustStatus);
   if (hook.handlerType === "command" && hook.currentHash !== hookHash(hook)) {
     problems.push("hash " + hook.currentHash + " != " + hookHash(hook));
   }
@@ -660,13 +846,19 @@ function trustProblems(listing, tree, out) {
   const outs = [out, realpathSync(out)];
   const problems = hooks.flatMap((hook) => hookProblems(hook, home, outs));
   const keys = hooks.map((hook) => hook.key);
-  const guards = hooks.filter((hook) => hook.eventName === "preToolUse" && matchesBash(hook.matcher));
+  const guards = hooks.filter(
+    (hook) => hook.eventName === "preToolUse" && matchesBash(hook.matcher),
+  );
   const starts = hooks.filter((hook) => hook.eventName === "sessionStart");
 
-  if (warnings.length > 0 || errors.length > 0) problems.push("warnings " + JSON.stringify({ warnings, errors }));
-  if (new Set(keys).size !== keys.length) problems.push("duplicate keys " + JSON.stringify(keys));
-  if (guards.length !== 1) problems.push(guards.length + " PreToolUse handlers match Bash");
-  if (starts.length !== 1) problems.push(starts.length + " SessionStart handlers");
+  if (warnings.length > 0 || errors.length > 0)
+    problems.push("warnings " + JSON.stringify({ warnings, errors }));
+  if (new Set(keys).size !== keys.length)
+    problems.push("duplicate keys " + JSON.stringify(keys));
+  if (guards.length !== 1)
+    problems.push(guards.length + " PreToolUse handlers match Bash");
+  if (starts.length !== 1)
+    problems.push(starts.length + " SessionStart handlers");
 
   return problems;
 }
@@ -677,24 +869,33 @@ function hooksOf(listing) {
 
 async function startModel(tree, env, script) {
   const { promise, resolve } = Promise.withResolvers();
-  const model = startChild(process.execPath,
+  const model = startChild(
+    process.execPath,
     [path.join(here, "model.mjs"), script, tree.requests],
-    { cwd: tree.project, env }, (stdout) => {
+    { cwd: tree.project, env },
+    (stdout) => {
       const end = stdout.indexOf("\n");
       if (end !== -1) resolve(stdout.slice(0, end));
-    });
+    },
+  );
   let timer;
   const deadline = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error("model did not report its port")), MODEL_START_MS);
+    timer = setTimeout(
+      () => reject(new Error("model did not report its port")),
+      MODEL_START_MS,
+    );
   });
   const exit = model.done.then((run) => {
-    throw new Error("model exited before ready: " + (run.spawnError ?? run.stderr));
+    throw new Error(
+      "model exited before ready: " + (run.spawnError ?? run.stderr),
+    );
   });
 
   try {
     const line = await Promise.race([promise, deadline, exit]);
     const port = Number(line);
-    if (!/^[1-9]\d{0,4}$/.test(line) || port > 65535) throw new Error("invalid port: " + line);
+    if (!/^[1-9]\d{0,4}$/.test(line) || port > 65535)
+      throw new Error("invalid port: " + line);
 
     return { model, port };
   } catch (error) {
@@ -711,17 +912,31 @@ async function runCodex(codexJs, tree, env, port) {
   const reader = lineReader((line) => {
     try {
       const event = JSON.parse(line);
-      if (typeof event?.type !== "string") throw new Error("missing event type");
+      if (typeof event?.type !== "string")
+        throw new Error("missing event type");
 
       events.push(event);
     } catch {
       invalid.push(line);
     }
   });
-  const args = [codexJs, ...sessionFlags(port), "exec", "--json",
-    "--sandbox", "danger-full-access", "-m", "scripted", "push my branch"];
-  const child = startChild(process.execPath, args,
-    { cwd: tree.project, env, detached: true }, reader.collect);
+  const args = [
+    codexJs,
+    ...sessionFlags(port),
+    "exec",
+    "--json",
+    "--sandbox",
+    "danger-full-access",
+    "-m",
+    "scripted",
+    "push my branch",
+  ];
+  const child = startChild(
+    process.execPath,
+    args,
+    { cwd: tree.project, env, detached: true },
+    reader.collect,
+  );
   const timer = setTimeout(child.stop, RUN_TIMEOUT_MS);
 
   try {
@@ -729,7 +944,11 @@ async function runCodex(codexJs, tree, env, port) {
     writeFileSync(path.join(tree.base, "codex-output.jsonl"), run.stdout);
     writeFileSync(path.join(tree.base, "codex-stderr.log"), run.stderr);
 
-    return { ...run, events, validJsonl: invalid.length === 0 && reader.complete(run.stdout) };
+    return {
+      ...run,
+      events,
+      validJsonl: invalid.length === 0 && reader.complete(run.stdout),
+    };
   } finally {
     clearTimeout(timer);
     child.reap();
@@ -754,17 +973,22 @@ function hookConnected(socket) {
   const rows = readFileSync("/proc/net/unix", "utf8").split("\n");
 
   return rows.some((row) => {
-    const entry = row.match(/^\S+\s+\S+\s+\S+\s+00000000\s+0001\s+02\s+0 (.*)$/);
+    const entry = row.match(
+      /^\S+\s+\S+\s+\S+\s+00000000\s+0001\s+02\s+0 (.*)$/,
+    );
     return entry?.[1] === socket;
   });
 }
 
 async function crashAfterConnect(daemon, socket) {
-  await waitFor("tack-hook connection", RUN_TIMEOUT_MS, () => hookConnected(socket));
+  await waitFor("tack-hook connection", RUN_TIMEOUT_MS, () =>
+    hookConnected(socket),
+  );
   daemon.stop();
 
   const { signal } = await daemon.done;
-  if (signal !== "SIGKILL") throw new Error("tack-daemon did not exit via SIGKILL");
+  if (signal !== "SIGKILL")
+    throw new Error("tack-daemon did not exit via SIGKILL");
 }
 
 async function runCrash(codexJs, tree, env, port, daemon, socket) {
@@ -776,8 +1000,9 @@ async function runCrash(codexJs, tree, env, port, daemon, socket) {
   // Pause the real daemon before Codex starts so it cannot reply before the kill.
   daemon.sendSignal("SIGSTOP");
   const status = "/proc/" + daemon.pid + "/status";
-  await waitFor("stopped daemon", DAEMON_START_MS,
-    () => /^State:\s+T\b/m.test(readOptional(status) ?? ""));
+  await waitFor("stopped daemon", DAEMON_START_MS, () =>
+    /^State:\s+T\b/m.test(readOptional(status) ?? ""),
+  );
 
   const [session, crash] = await Promise.allSettled([
     runCodex(codexJs, tree, env, port),
@@ -796,7 +1021,8 @@ function ownProcess(pidFile, prefix) {
   if (!text || !/^[1-9]\d{0,9}$/.test(text)) return undefined;
 
   const cmdline = readOptional("/proc/" + text + "/cmdline")?.split("\0");
-  if (!isDeepStrictEqual(cmdline?.slice(0, prefix.length), prefix)) return undefined;
+  if (!isDeepStrictEqual(cmdline?.slice(0, prefix.length), prefix))
+    return undefined;
 
   return Number(text);
 }
@@ -853,7 +1079,10 @@ function tamper(sourcePath, mode) {
   const text = readFileSync(sourcePath, "utf8");
 
   if (mode === "parse") {
-    writeFileSync(sourcePath, text + (sourcePath.endsWith(".json") ? "\n{\n" : "\n[[[\n"));
+    writeFileSync(
+      sourcePath,
+      text + (sourcePath.endsWith(".json") ? "\n{\n" : "\n[[[\n"),
+    );
     return;
   }
 
@@ -870,15 +1099,21 @@ function tamper(sourcePath, mode) {
   if (at === -1) throw new Error("no " + header + " in " + sourcePath);
 
   const end = at + header.length;
-  writeFileSync(sourcePath, text.slice(0, end) + '\nstatusMessage = "tampered"' + text.slice(end));
+  writeFileSync(
+    sourcePath,
+    text.slice(0, end) + '\nstatusMessage = "tampered"' + text.slice(end),
+  );
 }
 
 // Routes through any interface but loopback, from this process's own network
 // namespace. /proc/net follows the namespace; /sys/class/net does not.
 function outboundRoutes() {
-  const ipv4 = (readOptional("/proc/net/route") ?? "").split("\n").slice(1)
+  const ipv4 = (readOptional("/proc/net/route") ?? "")
+    .split("\n")
+    .slice(1)
     .map((row) => row.trim().split(/\s+/)[0]);
-  const ipv6 = (readOptional("/proc/net/ipv6_route") ?? "").split("\n")
+  const ipv6 = (readOptional("/proc/net/ipv6_route") ?? "")
+    .split("\n")
     .map((row) => row.trim().split(/\s+/).at(-1));
 
   return [...ipv4, ...ipv6].filter((iface) => iface && iface !== "lo");
@@ -890,67 +1125,112 @@ async function checkOffline(check) {
   const interfaces = Object.keys(networkInterfaces()).sort();
   const routes = outboundRoutes();
   const refused = await new Promise((resolve) => {
-    const socket = net.connect({ host: "192.0.2.1", port: 443, timeout: 2_000 });
-    socket.once("connect", () => { socket.destroy(); resolve(false); });
-    socket.once("timeout", () => { socket.destroy(); resolve(false); });
+    const socket = net.connect({
+      host: "192.0.2.1",
+      port: 443,
+      timeout: 2_000,
+    });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
     socket.once("error", (error) => resolve(error.code));
   });
 
-  check("only loopback, no route off it, and outbound connections refused",
-    process.env.TACK_CODEX_OFFLINE === "1" && isDeepStrictEqual(interfaces, ["lo"]) &&
-      routes.length === 0 && typeof refused === "string",
-    { interfaces, routes, refused, flag: process.env.TACK_CODEX_OFFLINE });
+  check(
+    "only loopback, no route off it, and outbound connections refused",
+    process.env.TACK_CODEX_OFFLINE === "1" &&
+      isDeepStrictEqual(interfaces, ["lo"]) &&
+      routes.length === 0 &&
+      typeof refused === "string",
+    { interfaces, routes, refused, flag: process.env.TACK_CODEX_OFFLINE },
+  );
 }
 
 function readRequests(tree) {
   const text = readOptional(tree.requests) ?? "";
 
-  return text.split("\n").filter(Boolean).map((line) => {
-    try {
-      return JSON.parse(line);
-    } catch {
-      return { invalid: line };
-    }
-  });
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { invalid: line };
+      }
+    });
 }
 
 function responsesRequests(requests) {
-  return requests.filter((request) => request.path === "/v1/responses" && !request.error);
+  return requests.filter(
+    (request) => request.path === "/v1/responses" && !request.error,
+  );
 }
 
 // The reason Codex gave the model for a blocked Bash call, from the output
 // the next Responses request carries.
 function blockReason(requests) {
-  const output = requests.map((request) => request.outputs?.call_bash)
+  const output = requests
+    .map((request) => request.outputs?.call_bash)
     .find((text) => typeof text === "string");
-  const match = /blocked by PreToolUse hook: (.*)\. (?:Command|Tool): /s.exec(output ?? "");
+  const match = /blocked by PreToolUse hook: (.*)\. (?:Command|Tool): /s.exec(
+    output ?? "",
+  );
 
   return { output, reason: match?.[1] };
 }
 
 function statusCalls(events) {
-  return events.filter((event) => event.type === "item.completed" &&
-    event.item?.type === "mcp_tool_call" && event.item.tool === "guard_status")
+  return events
+    .filter(
+      (event) =>
+        event.type === "item.completed" &&
+        event.item?.type === "mcp_tool_call" &&
+        event.item.tool === "guard_status",
+    )
     .map((event) => event.item);
 }
 
 function itemText(item) {
   if (typeof item?.error?.message === "string") return item.error.message;
 
-  return (item?.result?.content ?? []).map((part) => part?.text ?? "").join("\n");
+  return (item?.result?.content ?? [])
+    .map((part) => part?.text ?? "")
+    .join("\n");
 }
 
 function checkSession(run, check) {
   const events = run.events;
-  const failures = events.filter((event) => event.type === "turn.failed" || event.type === "error");
-  const messages = events.filter((event) => event.type === "item.completed" &&
-    event.item?.type === "agent_message");
+  const failures = events.filter(
+    (event) => event.type === "turn.failed" || event.type === "error",
+  );
+  const messages = events.filter(
+    (event) =>
+      event.type === "item.completed" && event.item?.type === "agent_message",
+  );
 
-  check("Codex completed with valid JSONL and the final text done",
-    run.code === 0 && run.validJsonl && !run.outputLimit && failures.length === 0 &&
-      messages.at(-1)?.item.text === "done" && events.at(-1)?.type === "turn.completed",
-    { exit: run.code, signal: run.signal, error: run.spawnError, failures,
-      last: events.at(-1), stderr: run.stderr.split("\n").slice(-20) });
+  check(
+    "Codex completed with valid JSONL and the final text done",
+    run.code === 0 &&
+      run.validJsonl &&
+      !run.outputLimit &&
+      failures.length === 0 &&
+      messages.at(-1)?.item.text === "done" &&
+      events.at(-1)?.type === "turn.completed",
+    {
+      exit: run.code,
+      signal: run.signal,
+      error: run.spawnError,
+      failures,
+      last: events.at(-1),
+      stderr: run.stderr.split("\n").slice(-20),
+    },
+  );
 }
 
 function checkStatus(calls, expected, check) {
@@ -958,13 +1238,25 @@ function checkStatus(calls, expected, check) {
   const text = itemText(call);
 
   if (expected === "ok") {
-    check("guard_status: daemon ok", calls.length === 1 && call.server === "tack" &&
-      call.status === "completed" && isDeepStrictEqual(call.arguments, {}) &&
-      text === "guard_status: daemon ok", calls);
+    check(
+      "guard_status: daemon ok",
+      calls.length === 1 &&
+        call.server === "tack" &&
+        call.status === "completed" &&
+        isDeepStrictEqual(call.arguments, {}) &&
+        text === "guard_status: daemon ok",
+      calls,
+    );
   } else {
-    check("invalid guard_status fails with tack: malformed", calls.length === 1 &&
-      call.server === "tack" && call.status === "failed" &&
-      isDeepStrictEqual(call.arguments, { unexpected: true }) && text === "tack: malformed", calls);
+    check(
+      "invalid guard_status fails with tack: malformed",
+      calls.length === 1 &&
+        call.server === "tack" &&
+        call.status === "failed" &&
+        isDeepStrictEqual(call.arguments, { unexpected: true }) &&
+        text === "tack: malformed",
+      calls,
+    );
   }
 }
 
@@ -972,21 +1264,44 @@ function checkStatus(calls, expected, check) {
 // run on without it. Either way it names the failure and nothing is pushed;
 // a run that goes on blocks the push and never offers guard_status.
 function checkMcpFailure(run, requests, outcome, check) {
-  const text = [run.stderr, ...run.events.map((event) => JSON.stringify(event))].join("\n");
-  const named = text.split("\n").filter((line) => /mcp/i.test(line) && /\btack\b/.test(line));
-  const offered = requests.flatMap((request) => request.tools ?? [])
+  const text = [
+    run.stderr,
+    ...run.events.map((event) => JSON.stringify(event)),
+  ].join("\n");
+  const named = text
+    .split("\n")
+    .filter((line) => /mcp/i.test(line) && /\btack\b/.test(line));
+  const offered = requests
+    .flatMap((request) => request.tools ?? [])
     .filter((name) => /guard_status/.test(name));
-  const messages = run.events.filter((event) => event.type === "item.completed" &&
-    event.item?.type === "agent_message");
-  const stopped = run.code !== 0 && !run.outputLimit && outcome.calls.length === 0;
-  const ranOn = run.code === 0 && run.validJsonl && outcome.reason === "tack: push blocked" &&
-    offered.length === 0 && outcome.calls.length === 0 && messages.at(-1)?.item.text === "done";
+  const messages = run.events.filter(
+    (event) =>
+      event.type === "item.completed" && event.item?.type === "agent_message",
+  );
+  const stopped =
+    run.code !== 0 && !run.outputLimit && outcome.calls.length === 0;
+  const ranOn =
+    run.code === 0 &&
+    run.validJsonl &&
+    outcome.reason === "tack: push blocked" &&
+    offered.length === 0 &&
+    outcome.calls.length === 0 &&
+    messages.at(-1)?.item.text === "done";
 
-  check("Codex names the tack MCP server's start failure", named.length > 0,
-    { exit: run.code, stderr: run.stderr.split("\n").slice(-20) });
-  check("Codex stopped, or ran on with the push blocked and no guard_status",
+  check("Codex names the tack MCP server's start failure", named.length > 0, {
+    exit: run.code,
+    stderr: run.stderr.split("\n").slice(-20),
+  });
+  check(
+    "Codex stopped, or ran on with the push blocked and no guard_status",
     stopped || ranOn,
-    { exit: run.code, reason: outcome.reason, offered, calls: outcome.calls.length });
+    {
+      exit: run.code,
+      reason: outcome.reason,
+      offered,
+      calls: outcome.calls.length,
+    },
+  );
 
   return stopped;
 }
@@ -1004,31 +1319,60 @@ function checkRecorders(tree, observed, stopped, check) {
   const verdicts = (readOptional(tree.hookCalls) ?? "").split("\n");
   verdicts.pop();
 
-  check("git shim recorded zero pushes", terminated && pushes.length === 0, pushes);
+  check(
+    "git shim recorded zero pushes",
+    terminated && pushes.length === 0,
+    pushes,
+  );
   // A Codex that stopped at startup may stop before SessionStart runs.
-  check("exactly one SessionStart marker from tack's handlers",
-    markers.length === 1 || (stopped && markers.length === 0), adapter);
-  check("adapter recorder lines match the successful calls one for one",
-    isDeepStrictEqual(calls, observed.map((call) => ADAPTER_LINES[call])), adapter);
-  check("tack-hook verdict lines match the successful calls one for one",
-    isDeepStrictEqual(verdicts, observed.map((call) => VERDICT_LINES[call])), verdicts);
+  check(
+    "exactly one SessionStart marker from tack's handlers",
+    markers.length === 1 || (stopped && markers.length === 0),
+    adapter,
+  );
+  check(
+    "adapter recorder lines match the successful calls one for one",
+    isDeepStrictEqual(
+      calls,
+      observed.map((call) => ADAPTER_LINES[call]),
+    ),
+    adapter,
+  );
+  check(
+    "tack-hook verdict lines match the successful calls one for one",
+    isDeepStrictEqual(
+      verdicts,
+      observed.map((call) => VERDICT_LINES[call]),
+    ),
+    verdicts,
+  );
 }
 
 function checkTimeout(requests, check) {
   const index = requests.findIndex((request) => request.reply === "call_bash");
-  const next = requests.slice(index + 1).find((request) => "call_bash" in (request.outputs ?? {}));
-  const elapsed = index === -1 || !next ? undefined : next.at - requests[index].at;
+  const next = requests
+    .slice(index + 1)
+    .find((request) => "call_bash" in (request.outputs ?? {}));
+  const elapsed =
+    index === -1 || !next ? undefined : next.at - requests[index].at;
 
   // The relay names the timeout before the 15 s shim exits.
-  check("timeout returned before the stalled tack-hook exited", elapsed < 14_000, elapsed);
+  check(
+    "timeout returned before the stalled tack-hook exited",
+    elapsed < 14_000,
+    elapsed,
+  );
 }
 
 function checkCase(tree, run, expected, check) {
   const requests = responsesRequests(readRequests(tree));
   const { output, reason } = blockReason(requests);
   const calls = statusCalls(run.events);
-  const statusOk = expected.status === "ok" && calls.length === 1 &&
-    itemText(calls[0]) === "guard_status: daemon ok" && calls[0].status === "completed";
+  const statusOk =
+    expected.status === "ok" &&
+    calls.length === 1 &&
+    itemText(calls[0]) === "guard_status: daemon ok" &&
+    calls[0].status === "completed";
 
   let stopped = false;
 
@@ -1038,7 +1382,10 @@ function checkCase(tree, run, expected, check) {
     checkSession(run, check);
   }
 
-  if (expected.bash && !expected.mcpBroken) check("bash denied: " + expected.bash, reason === expected.bash, { output });
+  if (expected.bash && !expected.mcpBroken)
+    check("bash denied: " + expected.bash, reason === expected.bash, {
+      output,
+    });
   if (expected.name === "timeout") checkTimeout(requests, check);
 
   if (expected.status) {
@@ -1049,20 +1396,32 @@ function checkCase(tree, run, expected, check) {
 
   if (expected.allow) checkAllowed(tree, output, reason, check);
 
-  checkRecorders(tree, [
-    ...(reason === "tack: push blocked" ? ["bash"] : []),
-    ...(expected.allow ? ["allow"] : []),
-    ...(statusOk ? ["status"] : []),
-  ], stopped, check);
+  checkRecorders(
+    tree,
+    [
+      ...(reason === "tack: push blocked" ? ["bash"] : []),
+      ...(expected.allow ? ["allow"] : []),
+      ...(statusOk ? ["status"] : []),
+    ],
+    stopped,
+    check,
+  );
   checkAttempts(tree, expected, check);
 
   if (expected.name === "normal") {
-    const lines = readOptional(path.join(tree.state, "daemon.log"))?.split("\n");
+    const lines = readOptional(path.join(tree.state, "daemon.log"))?.split(
+      "\n",
+    );
     const terminated = lines?.pop() === "";
-    check("exact daemon log lines", terminated && isDeepStrictEqual(lines, [
-      "tack-daemon: hook toolBefore deny push blocked",
-      "tack-daemon: tool guard_status ok",
-    ]), lines);
+    check(
+      "exact daemon log lines",
+      terminated &&
+        isDeepStrictEqual(lines, [
+          "tack-daemon: hook toolBefore deny push blocked",
+          "tack-daemon: tool guard_status ok",
+        ]),
+      lines,
+    );
   }
 }
 
@@ -1072,30 +1431,49 @@ function checkCase(tree, run, expected, check) {
 // git for itself; only calls with the command's own arguments count.
 function checkAllowed(tree, output, reason, check) {
   const args = HARMLESS.slice("git ".length);
-  const runs = (readOptional(tree.gitRuns) ?? "").split("\n")
+  const runs = (readOptional(tree.gitRuns) ?? "")
+    .split("\n")
     .filter((line) => line.slice(line.indexOf(" ") + 1) === args);
   const lines = readOptional(path.join(tree.state, "daemon.log"))?.split("\n");
   const terminated = lines?.pop() === "";
 
   // Codex frames the command's output, so the untracked file's line is a
   // substring of what it returned to the model.
-  check("bash allowed: " + HARMLESS + " ran with no block reason",
-    reason === undefined && typeof output === "string" &&
-      output.includes("?? " + UNTRACKED) && !output.includes("blocked by PreToolUse hook"),
-    { output });
-  check("git shim recorded " + HARMLESS + " executing once with exit status 0",
-    isDeepStrictEqual(runs, ["0 " + args]), readOptional(tree.gitRuns));
-  check("exact daemon log line: hook toolBefore allow", terminated &&
-    isDeepStrictEqual(lines, ["tack-daemon: hook toolBefore allow"]), lines);
-  check("tack-hook invoked once", readOptional(tree.hookAttempts) === "invoked\n",
-    readOptional(tree.hookAttempts));
+  check(
+    "bash allowed: " + HARMLESS + " ran with no block reason",
+    reason === undefined &&
+      typeof output === "string" &&
+      output.includes("?? " + UNTRACKED) &&
+      !output.includes("blocked by PreToolUse hook"),
+    { output },
+  );
+  check(
+    "git shim recorded " + HARMLESS + " executing once with exit status 0",
+    isDeepStrictEqual(runs, ["0 " + args]),
+    readOptional(tree.gitRuns),
+  );
+  check(
+    "exact daemon log line: hook toolBefore allow",
+    terminated &&
+      isDeepStrictEqual(lines, ["tack-daemon: hook toolBefore allow"]),
+    lines,
+  );
+  check(
+    "tack-hook invoked once",
+    readOptional(tree.hookAttempts) === "invoked\n",
+    readOptional(tree.hookAttempts),
+  );
 }
 
 function checkAttempts(tree, expected, check) {
   const attempts = readOptional(tree.hookAttempts);
 
   if (expected.name === "invalid-guard-status") {
-    check("invalid guard_status did not invoke tack-hook", attempts === "", attempts);
+    check(
+      "invalid guard_status did not invoke tack-hook",
+      attempts === "",
+      attempts,
+    );
   } else if (hookShims.has(expected.hook)) {
     check("failure shim invoked once", attempts === "invoked\n", attempts);
   }
@@ -1105,8 +1483,11 @@ async function checkRebuild(env, first, check) {
   const { tack, codexJs, tree } = env;
   const before = hooksOf(first);
   const firstProblems = trustProblems(first, tree, tree.distA);
-  check("first build: exactly tack's handlers are enabled and trusted",
-    firstProblems.length === 0, { problems: firstProblems, hooks: before });
+  check(
+    "first build: exactly tack's handlers are enabled and trusted",
+    firstProblems.length === 0,
+    { problems: firstProblems, hooks: before },
+  );
 
   const again = tackBuild(tack, tree, tree.distB);
   check("rebuild into a second folder succeeds", again.ok, again);
@@ -1115,13 +1496,18 @@ async function checkRebuild(env, first, check) {
   const second = await listHooks(codexJs, tree, env.codex);
   const after = hooksOf(second);
   const keys = (hooks) => hooks.map((hook) => hook.key).sort();
-  const guard = (hooks) => hooks.find((hook) => hook.eventName === "preToolUse");
+  const guard = (hooks) =>
+    hooks.find((hook) => hook.eventName === "preToolUse");
 
-  check("rebuild keeps the handler IDs and rewrites the PreToolUse trust hash",
-    before.length > 0 && isDeepStrictEqual(keys(before), keys(after)) &&
-      guard(before) !== undefined && guard(after) !== undefined &&
+  check(
+    "rebuild keeps the handler IDs and rewrites the PreToolUse trust hash",
+    before.length > 0 &&
+      isDeepStrictEqual(keys(before), keys(after)) &&
+      guard(before) !== undefined &&
+      guard(after) !== undefined &&
       guard(before).currentHash !== guard(after).currentHash,
-    { before: keys(before), after: keys(after) });
+    { before: keys(before), after: keys(after) },
+  );
 
   return second;
 }
@@ -1129,27 +1515,42 @@ async function checkRebuild(env, first, check) {
 async function runDetect(env, expected, listing, check) {
   const { codexJs, tree } = env;
   const baseline = trustProblems(listing, tree, tree.distA);
-  const guard = hooksOf(listing).find((hook) => hook.eventName === "preToolUse");
-  check("before the break, tack's handlers are enabled and trusted",
-    baseline.length === 0 && guard !== undefined, baseline);
+  const guard = hooksOf(listing).find(
+    (hook) => hook.eventName === "preToolUse",
+  );
+  check(
+    "before the break, tack's handlers are enabled and trusted",
+    baseline.length === 0 && guard !== undefined,
+    baseline,
+  );
   if (!guard) return;
 
   tamper(guard.sourcePath, expected.tamper);
   const after = await listHooks(codexJs, tree, env.codex);
   const problems = trustProblems(after, tree, tree.distA);
-  const stale = hooksOf(after).some((hook) => hook.key === guard.key &&
-    hook.trustStatus === "modified");
-  check(expected.tamper === "stale" ? "trust assertion detects the stale PreToolUse hash"
-    : "trust assertion detects the unparsable hooks config",
-    problems.length > 0 && (expected.tamper !== "stale" || stale), problems);
+  const stale = hooksOf(after).some(
+    (hook) => hook.key === guard.key && hook.trustStatus === "modified",
+  );
+  check(
+    expected.tamper === "stale"
+      ? "trust assertion detects the stale PreToolUse hash"
+      : "trust assertion detects the unparsable hooks config",
+    problems.length > 0 && (expected.tamper !== "stale" || stale),
+    problems,
+  );
 
   const { model, port } = await startModel(tree, env.codex, expected.model);
 
   try {
     const run = await runCodex(codexJs, tree, env.codex, port);
-    const { output, reason } = blockReason(responsesRequests(readRequests(tree)));
-    check("load assertion detects the push no handler blocked",
-      reason !== "tack: push blocked", { exit: run.code, output });
+    const { output, reason } = blockReason(
+      responsesRequests(readRequests(tree)),
+    );
+    check(
+      "load assertion detects the push no handler blocked",
+      reason !== "tack: push blocked",
+      { exit: run.code, output },
+    );
   } finally {
     model.stop();
     await model.done;
@@ -1159,24 +1560,51 @@ async function runDetect(env, expected, listing, check) {
 function checkDirect(env, expected, listing, check) {
   const { tree } = env;
   const problems = trustProblems(listing, tree, tree.distA);
-  const guard = hooksOf(listing).find((hook) => hook.eventName === "preToolUse" &&
-    matchesBash(hook.matcher));
-  check("exactly tack's handlers are enabled and trusted", problems.length === 0, problems);
+  const guard = hooksOf(listing).find(
+    (hook) => hook.eventName === "preToolUse" && matchesBash(hook.matcher),
+  );
+  check(
+    "exactly tack's handlers are enabled and trusted",
+    problems.length === 0,
+    problems,
+  );
   if (!guard) return;
 
   const result = runPreToolUse(guard.command, tree, env.codex);
-  check("node " + expected.node + ": wrapper exits 2 with " + expected.reason + " on stderr",
-    result.status === 2 && result.stdout === "" && result.stderr.trim() === expected.reason,
-    { status: result.status, signal: result.signal, error: result.error?.message,
-      stdout: result.stdout, stderr: result.stderr });
-  check("no tack-hook call without a working node", readOptional(tree.hookAttempts) === "",
-    readOptional(tree.hookAttempts));
+  check(
+    "node " +
+      expected.node +
+      ": wrapper exits 2 with " +
+      expected.reason +
+      " on stderr",
+    result.status === 2 &&
+      result.stdout === "" &&
+      result.stderr.trim() === expected.reason,
+    {
+      status: result.status,
+      signal: result.signal,
+      error: result.error?.message,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    },
+  );
+  check(
+    "no tack-hook call without a working node",
+    readOptional(tree.hookAttempts) === "",
+    readOptional(tree.hookAttempts),
+  );
 }
 
 function breakMcp(out, check) {
   const dir = path.join(out, "codex");
-  const servers = entries(dir).filter((file) => !file.endsWith("/") && /mcp/i.test(file));
-  check("one generated MCP server file to remove", servers.length === 1, servers);
+  const servers = entries(dir).filter(
+    (file) => !file.endsWith("/") && /mcp/i.test(file),
+  );
+  check(
+    "one generated MCP server file to remove",
+    servers.length === 1,
+    servers,
+  );
 
   for (const file of servers) rmSync(path.join(dir, file));
 }
@@ -1193,8 +1621,10 @@ async function exerciseCase(env, expected, check) {
   checkPristine(tree, check);
   env.fragment = installFragment(tree, tree.distA, undefined, check);
   let listing = await listHooks(codexJs, tree, env.codex);
-  if (expected.kind === "detect") return runDetect(env, expected, listing, check);
-  if (expected.kind === "direct") return checkDirect(env, expected, listing, check);
+  if (expected.kind === "detect")
+    return runDetect(env, expected, listing, check);
+  if (expected.kind === "direct")
+    return checkDirect(env, expected, listing, check);
 
   let out = tree.distA;
 
@@ -1204,9 +1634,13 @@ async function exerciseCase(env, expected, check) {
   }
 
   const problems = trustProblems(listing, tree, out);
-  check(expected.rebuild ? "rebuild keeps exactly tack's handlers enabled and trusted"
-    : "exactly tack's handlers are enabled and trusted", problems.length === 0,
-    { problems, hooks: hooksOf(listing) });
+  check(
+    expected.rebuild
+      ? "rebuild keeps exactly tack's handlers enabled and trusted"
+      : "exactly tack's handlers are enabled and trusted",
+    problems.length === 0,
+    { problems, hooks: hooksOf(listing) },
+  );
   if (expected.mcpBroken) breakMcp(out, check);
 
   return runSession(env, expected);
@@ -1217,17 +1651,26 @@ async function runSession(env, expected) {
   const { model, port } = await startModel(tree, env.codex, expected.model);
 
   try {
-    if (!expected.crash) return { run: await runCodex(codexJs, tree, env.codex, port) };
+    if (!expected.crash)
+      return { run: await runCodex(codexJs, tree, env.codex, port) };
 
-    const daemon = startChild(daemonBin, env.daemonArgs, { cwd: tree.project, env: env.codex });
+    const daemon = startChild(daemonBin, env.daemonArgs, {
+      cwd: tree.project,
+      env: env.codex,
+    });
 
     try {
-      return { run: await runCrash(codexJs, tree, env.codex, port, daemon, env.socket) };
+      return {
+        run: await runCrash(codexJs, tree, env.codex, port, daemon, env.socket),
+      };
     } finally {
       daemon.stop();
       const result = await daemon.done;
-      writeFileSync(path.join(tree.state, "daemon.log"), result.stdout + result.stderr,
-        { flag: "a" });
+      writeFileSync(
+        path.join(tree.state, "daemon.log"),
+        result.stdout + result.stderr,
+        { flag: "a" },
+      );
     }
   } finally {
     model.stop();
@@ -1239,16 +1682,26 @@ async function runSession(env, expected) {
 function keepEvidence(tree, target) {
   mkdirSync(target, { recursive: true });
 
-  const files = [tree.requests, tree.recorder, tree.hookCalls, tree.hookAttempts,
-    path.join(tree.base, "codex-output.jsonl"), path.join(tree.base, "codex-stderr.log"),
-    path.join(tree.base, "app-server-stderr.log"), path.join(tree.base, "hooks-list.jsonl"),
-    path.join(tree.base, "model-stderr.log"), path.join(tree.state, "daemon.log"),
+  const files = [
+    tree.requests,
+    tree.recorder,
+    tree.hookCalls,
+    tree.hookAttempts,
+    path.join(tree.base, "codex-output.jsonl"),
+    path.join(tree.base, "codex-stderr.log"),
+    path.join(tree.base, "app-server-stderr.log"),
+    path.join(tree.base, "hooks-list.jsonl"),
+    path.join(tree.base, "model-stderr.log"),
+    path.join(tree.state, "daemon.log"),
     tree.gitRuns,
-    path.join(tree.codexHome, "config.toml"), path.join(tree.codexHome, "hooks.json")];
+    path.join(tree.codexHome, "config.toml"),
+    path.join(tree.codexHome, "hooks.json"),
+  ];
 
   for (const file of files) {
     try {
-      const name = file.startsWith(tree.codexHome) ? "codex-home-" + path.basename(file)
+      const name = file.startsWith(tree.codexHome)
+        ? "codex-home-" + path.basename(file)
         : path.basename(file);
       copyFileSync(file, path.join(target, name));
     } catch (error) {
@@ -1260,8 +1713,13 @@ function keepEvidence(tree, target) {
 async function runCase(bins, expected, root, target, check) {
   const tree = layout(mkdtempSync(path.join(root, "tack-codex-")));
   const socket = path.join(tree.state, "tack.sock");
-  const env = { ...bins, tree, socket, codex: codexEnv(tree),
-    daemonArgs: ["--socket", socket, "--plugin", pluginDir] };
+  const env = {
+    ...bins,
+    tree,
+    socket,
+    codex: codexEnv(tree),
+    daemonArgs: ["--socket", socket, "--plugin", pluginDir],
+  };
 
   try {
     const result = await exerciseCase(env, expected, check);
@@ -1273,7 +1731,11 @@ async function runCase(bins, expected, root, target, check) {
     check("conformance case ran", false, String(error.stack ?? error));
   } finally {
     try {
-      await stopOwned(path.join(tree.state, "tack.lock"), [daemonBin, "--socket", socket]);
+      await stopOwned(path.join(tree.state, "tack.lock"), [
+        daemonBin,
+        "--socket",
+        socket,
+      ]);
       await stopOwned(tree.sleepPid, ["/bin/sleep", "15"]);
     } finally {
       try {
@@ -1291,7 +1753,8 @@ function checker(rows, name, own = []) {
     rows.push(row);
     own.push(row);
     console.log(row);
-    if (ok !== true) console.error("  evidence: " + JSON.stringify(evidence)?.slice(0, 4000));
+    if (ok !== true)
+      console.error("  evidence: " + JSON.stringify(evidence)?.slice(0, 4000));
   };
 }
 
@@ -1309,7 +1772,8 @@ async function main() {
   // The npm launcher runs under this Node, so no case needs node on PATH.
   const bins = { tack, codexJs: realpathSync(codex) };
   const root = process.env.RUNNER_TEMP ?? tmpdir();
-  const artifacts = process.env.TACK_CODEX_ARTIFACTS ??
+  const artifacts =
+    process.env.TACK_CODEX_ARTIFACTS ??
     path.join(repoRoot, "target", "codex-conformance");
   mkdirSync(artifacts, { recursive: true });
 
@@ -1320,18 +1784,27 @@ async function main() {
   for (const expected of cases) {
     const own = [];
     caseRows.set(expected.name, own);
-    await runCase(bins, expected, root, path.join(artifacts, expected.name),
-      checker(rows, expected.name, own));
+    await runCase(
+      bins,
+      expected,
+      root,
+      path.join(artifacts, expected.name),
+      checker(rows, expected.name, own),
+    );
   }
 
   await checkOffline(checker(rows, "network"));
 
   // Its own row: every check of the harmless case passed, and it ran some.
   const harmless = caseRows.get("harmless") ?? [];
-  const allowed = harmless.length > 0 && harmless.every((row) => row.startsWith("PASS "));
+  const allowed =
+    harmless.length > 0 && harmless.every((row) => row.startsWith("PASS "));
   const allowedRow = "harmless_allowed=" + allowed;
   console.log(allowedRow);
-  writeFileSync(path.join(artifacts, "verdict.txt"), [...rows, allowedRow].join("\n") + "\n");
+  writeFileSync(
+    path.join(artifacts, "verdict.txt"),
+    [...rows, allowedRow].join("\n") + "\n",
+  );
 
   return rows.every((row) => row.startsWith("PASS ")) && allowed ? 0 : 1;
 }

@@ -45,7 +45,12 @@ function usageLine() {
 }
 
 function textTurn(text) {
-  return chunk({ role: "assistant", content: text }) + chunk({}, "stop") + usageLine() + DONE_LINE;
+  return (
+    chunk({ role: "assistant", content: text }) +
+    chunk({}, "stop") +
+    usageLine() +
+    DONE_LINE
+  );
 }
 
 function toolCallTurn(name, input) {
@@ -61,7 +66,9 @@ function toolCallTurn(name, input) {
       ],
     }) +
     chunk({
-      tool_calls: [{ index: 0, function: { arguments: JSON.stringify(input) } }],
+      tool_calls: [
+        { index: 0, function: { arguments: JSON.stringify(input) } },
+      ],
     }) +
     chunk({}, "tool_calls") +
     usageLine() +
@@ -73,7 +80,9 @@ function toolName(request, candidates) {
   const tools = Array.isArray(request.tools) ? request.tools : [];
 
   for (const candidate of candidates) {
-    const match = tools.find((tool) => (tool?.function?.name ?? tool?.name) === candidate);
+    const match = tools.find(
+      (tool) => (tool?.function?.name ?? tool?.name) === candidate,
+    );
     if (match) return match.function?.name ?? match.name;
   }
 

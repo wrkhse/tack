@@ -62,16 +62,16 @@ pub struct BuildOptions {
 }
 ```
 
-  Tests shorten both budgets so a call denies in milliseconds. The defaults
-  are 2 s per call and 3 s for the first daemon start:
+Tests shorten both budgets so a call denies in milliseconds. The defaults
+are 2 s per call and 3 s for the first daemon start:
 
 ```rust
 impl Default for BuildOptions {}
 ```
 
-  **BuildError** names the stage that failed. `NeedMissing` carries the
-  unsupported need; `Manifest` wraps a JSON decoding error. The remaining
-  variants wrap sandbox, rendering or I/O errors:
+**BuildError** names the stage that failed. `NeedMissing` carries the
+unsupported need; `Manifest` wraps a JSON decoding error. The remaining
+variants wrap sandbox, rendering or I/O errors:
 
 ```rust
 pub enum BuildError {
@@ -105,8 +105,8 @@ pub enum Request {
 }
 ```
 
-  `Request` exposes `id` and `version` so the daemon can reject a mismatched
-  version before it runs any plugin code:
+`Request` exposes `id` and `version` so the daemon can reject a mismatched
+version before it runs any plugin code:
 
 ```rust
 impl Request {
@@ -115,8 +115,8 @@ impl Request {
 }
 ```
 
-  A hook request carries a `ToolCall`; a reply carries an outcome, tool
-  content or a machine-readable error class:
+A hook request carries a `ToolCall`; a reply carries an outcome, tool
+content or a machine-readable error class:
 
 ```rust
 pub struct ToolCall {
@@ -144,8 +144,8 @@ pub struct Content {
 }
 ```
 
-  `session_id` defaults to `None`. `ReplyError` is the class on the wire; the
-  wrapper maps each to a fail-closed deny:
+`session_id` defaults to `None`. `ReplyError` is the class on the wire; the
+wrapper maps each to a fail-closed deny:
 
 ```rust
 pub enum ReplyError {
@@ -158,9 +158,9 @@ pub enum ReplyError {
 }
 ```
 
-  A `DenyReason` is the named reason the wrapper reports when it fails closed
-  without a verdict from the daemon. `ALL` is the set handed to the generated
-  script. A reason outside that set degrades to `malformed_reply`:
+A `DenyReason` is the named reason the wrapper reports when it fails closed
+without a verdict from the daemon. `ALL` is the set handed to the generated
+script. A reason outside that set degrades to `malformed_reply`:
 
 ```rust
 pub enum DenyReason {
@@ -181,9 +181,9 @@ impl DenyReason {
 }
 ```
 
-  `WrapperConfig` carries the values the template needs. The daemon stays a
-  plain name in the generated script and is resolved from `TACK_DAEMON_BIN`
-  or `PATH` at run time:
+`WrapperConfig` carries the values the template needs. The daemon stays a
+plain name in the generated script and is resolved from `TACK_DAEMON_BIN`
+or `PATH` at run time:
 
 ```rust
 pub struct WrapperConfig<'a> {
@@ -197,9 +197,9 @@ pub struct WrapperConfig<'a> {
 }
 ```
 
-  `render` fills the seven template slots with JSON literals and returns an
-  error if a slot is missing, a value carries a `__TACK_` token or a newline,
-  or a substitution leaves a token behind:
+`render` fills the seven template slots with JSON literals and returns an
+error if a slot is missing, a value carries a `__TACK_` token or a newline,
+or a substitution leaves a token behind:
 
 ```rust
 pub fn render(config: &WrapperConfig) -> Result<String, WrapperError>;
@@ -212,8 +212,8 @@ pub enum WrapperError {
 }
 ```
 
-  `encode_line` and `read_line` frame each value as one newline-terminated
-  line under a hard size cap:
+`encode_line` and `read_line` frame each value as one newline-terminated
+line under a hard size cap:
 
 ```rust
 pub fn encode_line<T: Serialize>(value: &T) -> Result<Vec<u8>, WireError>;
@@ -249,14 +249,14 @@ impl Server {
 }
 ```
 
-  The held `Lock` keeps the kernel `flock` alive until the daemon exits;
-  `Drop for Server` removes the socket:
+The held `Lock` keeps the kernel `flock` alive until the daemon exits;
+`Drop for Server` removes the socket:
 
 ```rust
 impl Drop for Server {}
 ```
 
-  `TransportError` names each binding and serving failure:
+`TransportError` names each binding and serving failure:
 
 ```rust
 pub enum TransportError {
@@ -327,12 +327,12 @@ impl Sandbox {
 }
 ```
 
-  The daemon passes `ToolCall.input` as the invocation payload and places
-  `tool`, `name` and `session_id` in its context. The engine returns a
-  whole replacement payload for a rewrite. The daemon requires objects
-  for both inputs, overlays the rewritten fields on the original, and
-  rejects malformed rewrites. It also decodes a tool result's `content`
-  into protocol `Content` items.
+The daemon passes `ToolCall.input` as the invocation payload and places
+`tool`, `name` and `session_id` in its context. The engine returns a
+whole replacement payload for a rewrite. The daemon requires objects
+for both inputs, overlays the rewritten fields on the original, and
+rejects malformed rewrites. It also decodes a tool result's `content`
+into protocol `Content` items.
 
 ```rust
 pub struct Invocation {
@@ -349,9 +349,9 @@ pub enum Outcome {
 }
 ```
 
-  `EngineError` carries typed causes. The daemon maps limit and unknown-tool
-  errors to their own wire classes and defaults to a script error. Tack
-  adds its prefix at the caller boundary:
+`EngineError` carries typed causes. The daemon maps limit and unknown-tool
+errors to their own wire classes and defaults to a script error. Tack
+adds its prefix at the caller boundary:
 
 ```rust
 #[non_exhaustive]
@@ -380,15 +380,15 @@ pub enum EngineError {
 }
 ```
 
-  Converting an `mlua::Error` preserves typed external causes. A VM memory
-  error is a limit; remaining errors are script failures:
+Converting an `mlua::Error` preserves typed external causes. A VM memory
+error is a limit; remaining errors are script failures:
 
 ```rust
 impl From<mlua::Error> for EngineError {}
 ```
 
-  The daemon's entry points parse the socket and plugin paths, resolve the
-  state folder and dispatch each request to the sandbox:
+The daemon's entry points parse the socket and plugin paths, resolve the
+state folder and dispatch each request to the sandbox:
 
 ```rust
 struct Args {
@@ -417,12 +417,12 @@ fn reply_error(id: u64, error: &EngineError) -> Reply;
 fn version_error(id: u64, version: u32) -> Reply;
 ```
 
-  `dispatch` refuses a wrong protocol version and any hook other than
-  `toolBefore`. `state_dir_from` prefers `TACK_STATE_DIR`, then
-  `XDG_STATE_HOME/tack`, then `HOME/.local/state/tack`.
+`dispatch` refuses a wrong protocol version and any hook other than
+`toolBefore`. `state_dir_from` prefers `TACK_STATE_DIR`, then
+`XDG_STATE_HOME/tack`, then `HOME/.local/state/tack`.
 
-  **SDK.** `crates/sdk/tack.d.luau` declares the table a plugin returns and
-  the helpers Rust passes to each hook and tool call:
+**SDK.** `crates/sdk/tack.d.luau` declares the table a plugin returns and
+the helpers Rust passes to each hook and tool call:
 
 ```lua
 export type Plugin = {
@@ -476,7 +476,7 @@ return {
 }
 ```
 
-  `crates/sdk/tack.d.luau` declares that shape under `--!strict`:
+`crates/sdk/tack.d.luau` declares that shape under `--!strict`:
 
 ```lua
 export type Content = { kind: string, text: string }

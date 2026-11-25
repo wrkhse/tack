@@ -1,4 +1,3 @@
-
 // Codex runs this once per call that matches ^Bash$ and reads one JSON line
 // from stdout. An empty object lets the call run and a block stops it. Codex
 // lets the call run on a timeout, another exit code or malformed output, so
@@ -41,8 +40,9 @@ function readInput(stdin, deadline) {
     });
     stdin.on("end", () => {
       try {
-        const text = new TextDecoder("utf-8", { fatal: true })
-          .decode(Buffer.concat(chunks, size));
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(
+          Buffer.concat(chunks, size),
+        );
         finish({ ok: true, event: JSON.parse(text) });
       } catch {
         finish(refuse("malformed"));
@@ -58,13 +58,21 @@ async function decide(event, deadline) {
   const command = event.tool_input?.command;
   if (typeof command !== "string") return null;
 
-  const result = await forward({
-    kind: "hook",
-    id: HOOK_ID,
-    version: PROTOCOL_VERSION,
-    hook: "toolBefore",
-    call: { tool: "shell", name: "Bash", input: { command }, session_id: null },
-  }, deadline);
+  const result = await forward(
+    {
+      kind: "hook",
+      id: HOOK_ID,
+      version: PROTOCOL_VERSION,
+      hook: "toolBefore",
+      call: {
+        tool: "shell",
+        name: "Bash",
+        input: { command },
+        session_id: null,
+      },
+    },
+    deadline,
+  );
 
   if (!result.ok) return result.reason;
 
@@ -74,7 +82,8 @@ async function decide(event, deadline) {
     return null;
   }
 
-  const reason = typeof outcome?.reason === "string" ? outcome.reason.trim() : "";
+  const reason =
+    typeof outcome?.reason === "string" ? outcome.reason.trim() : "";
   if (outcome?.kind === "deny" && reason !== "") {
     record("bash", HOOK_ID);
     return reason;

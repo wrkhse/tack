@@ -49,7 +49,8 @@ function readReply(request, chunks, size) {
 
   try {
     const text = new TextDecoder("utf-8", { fatal: true })
-      .decode(Buffer.concat(chunks, size)).trimEnd();
+      .decode(Buffer.concat(chunks, size))
+      .trimEnd();
     const line = text.slice(text.lastIndexOf("\n") + 1);
     reply = JSON.parse(line);
   } catch {
@@ -147,9 +148,10 @@ function forward(request, deadline) {
       child.once("close", (code) => {
         if (settled) return;
 
-        const result = code !== 0 || (pipeError && size === 0)
-          ? refuse("daemon_error")
-          : readReply(request, chunks, size);
+        const result =
+          code !== 0 || (pipeError && size === 0)
+            ? refuse("daemon_error")
+            : readReply(request, chunks, size);
         finish(result);
       });
       child.stdin.end(line);
