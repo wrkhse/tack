@@ -318,3 +318,28 @@ fn the_home_resolves_as_codex_resolves_it() {
         Err(CodexError::Home(_))
     ));
 }
+
+#[test]
+fn a_rebuild_after_a_user_group_is_inserted_removes_the_stale_tack_state() {
+    let scratch = Scratch::new();
+    install(&scratch.root, &handlers("/out/codex")).expect("first install");
+
+    let hooks_path = scratch.root.join("hooks.json");
+    let mut hooks: Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).expect("hooks")).expect("JSON");
+    hooks["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .expect("list")
+        .insert(0, other_group());
+    fs::write(&hooks_path, hooks.to_string()).expect("edited hooks");
+
+    install(&scratch.root, &handlers("/new/codex")).expect("rebuild");
+    let config = fs::read_to_string(scratch.root.join("config.toml")).expect("config");
+
+    let source = hooks_path.display().to_string();
+    let stale = state_header(&format!("{source}:pre_tool_use:0:0"));
+    let current = state_header(&format!("{source}:pre_tool_use:1:0"));
+
+    assert!(!config.contains(&stale), "{config}");
+    assert!(config.contains(&current), "{config}");
+}
