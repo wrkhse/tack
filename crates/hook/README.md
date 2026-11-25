@@ -84,7 +84,8 @@ once: a missing socket denies `socket_missing` at once, a silent daemon
 ## Failing closed
 
 Every failure is a `Reply::Error` line with the request id (0 before it is
-known; a busy denial may also use id 0) and a named kind:
+known; a busy denial may use id 0 even after the request id is known) and a
+named kind:
 
 | Kind               | When                                                                       |
 | ------------------ | -------------------------------------------------------------------------- |
