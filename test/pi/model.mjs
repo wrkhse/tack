@@ -10,10 +10,13 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const LIFETIME_MS = 60_000;
 
 const BASH = { name: "bash", input: { command: "git push origin main" } };
+// The harmless command tack allows; its output comes back as the bash result.
+const HARMLESS = { name: "bash", input: { command: "git status --short" } };
 const STATUS = { name: "guard_status", input: {} };
 const scripts = new Map([
   ["normal", [BASH, STATUS]],
   ["bash", [BASH]],
+  ["harmless", [HARMLESS]],
   ["invalid-tool", [{ name: STATUS.name, input: { unexpected: true } }]],
 ]);
 
@@ -52,6 +55,14 @@ function toolCallTurn({ name, input }) {
   return start + args + chunk({}, "tool_calls");
 }
 
+// A Chat Completions tool message carries a string or an array of text parts.
+function textOf(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("");
+}
+
 function replyFor(body) {
   if (body?.model !== "scripted" || body.stream !== true || !Array.isArray(body.messages)) {
     throw new Error("expected a streaming request to the scripted model");
@@ -60,9 +71,12 @@ function replyFor(body) {
   const tools = Array.isArray(body.tools) ? body.tools.map((tool) => tool?.function?.name) : [];
   const results = body.messages.filter((message) => message?.role === "tool");
   const resultIds = results.map((result) => result.tool_call_id);
+  // What the model saw of each tool result, keyed by call id.
+  const outputs = Object.fromEntries(results.map((result) =>
+    [result.tool_call_id, textOf(result.content)]));
 
   if (requestLog) {
-    appendFileSync(requestLog, JSON.stringify({ tools, resultIds }) + "\n");
+    appendFileSync(requestLog, JSON.stringify({ tools, resultIds, outputs }) + "\n");
   }
 
   if (results.length > script.length ||

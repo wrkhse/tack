@@ -37,9 +37,14 @@ const EXPECTED_RECORDER = [
   '{"call":"bash","id":1}',
   '{"call":"guard_status","id":2}',
 ];
+// The command tack allows in the harmless case, and the untracked file whose
+// `?? ` line in its output shows the real git ran in the project.
+const HARMLESS = "git status --short";
+const UNTRACKED = "harmless.txt";
 
 const cases = [
   { name: "normal", model: "normal", bash: "tack: push blocked" },
+  { name: "harmless", model: "harmless", allow: HARMLESS },
   { name: "missing-hook", model: "bash", bash: "tack: hook_missing" },
   { name: "daemon-crash", model: "bash", bash: "tack: socket_closed" },
   { name: "timeout", model: "bash", bash: "tack: timeout" },
@@ -90,6 +95,8 @@ function layout(base) {
     recorder: path.join(base, "recorder.log"),
     hookAttempts: path.join(base, "hook-attempts.log"),
     sleepPid: path.join(base, "sleep.pid"),
+    gitShim: path.join(base, "git-shim"),
+    gitRuns: path.join(base, "git-runs.log"),
   };
 }
 
@@ -113,6 +120,8 @@ function piEnv(tree) {
     TACK_REAL_GIT: "/usr/bin/git",
     TACK_TEST_HOOK_ATTEMPTS: tree.hookAttempts,
     TACK_TEST_SLEEP_PID: tree.sleepPid,
+    TACK_TEST_GIT_SHIM: tree.gitShim,
+    TACK_TEST_GIT_RUNS: tree.gitRuns,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_ALLOW_PROTOCOL: "file",
   };
@@ -150,7 +159,7 @@ const hookShims = new Map([
 function installHook(tree, env, caseName) {
   const hook = path.join(tree.bin, "tack-hook");
 
-  if (caseName === "normal" || caseName === "daemon-crash") {
+  if (caseName === "normal" || caseName === "harmless" || caseName === "daemon-crash") {
     accessSync(hookBin, constants.X_OK);
     symlinkSync(hookBin, hook);
     return;
@@ -172,7 +181,27 @@ function installHook(tree, env, caseName) {
     script + "\n", { mode: 0o755 });
 }
 
-function prepare(tree, env, caseName) {
+// The shared git shim on PATH. A case with an allowed command wraps it in a
+// recorder that logs each call's exit status and arguments once it returns,
+// so the log shows the command ran; the shim itself stays unchanged.
+function installGit(tree, expected) {
+  const git = path.join(tree.bin, "git");
+
+  if (!expected.allow) {
+    copyFileSync(gitShim, git);
+    chmodSync(git, 0o755);
+    return;
+  }
+
+  copyFileSync(gitShim, tree.gitShim);
+  chmodSync(tree.gitShim, 0o755);
+  writeFileSync(tree.gitRuns, "");
+  writeFileSync(git, '#!/bin/sh\n"$TACK_TEST_GIT_SHIM" "$@"\nstatus=$?\n' +
+    "printf '%s %s\\n' \"$status\" \"$*\" >> \"$TACK_TEST_GIT_RUNS\"\n" +
+    'exit "$status"\n', { mode: 0o755 });
+}
+
+function prepare(tree, env, expected) {
   for (const dir of [tree.home, tree.agent, tree.config, tree.data, tree.cache,
     tree.tmp, tree.bin, tree.project]) {
     mkdirSync(dir);
@@ -183,12 +212,11 @@ function prepare(tree, env, caseName) {
   writeFileSync(tree.recorder, "");
   writeFileSync(tree.hookAttempts, "");
 
-  const git = path.join(tree.bin, "git");
-  copyFileSync(gitShim, git);
-  chmodSync(git, 0o755);
+  installGit(tree, expected);
   symlinkSync(process.execPath, path.join(tree.bin, "node"));
-  installHook(tree, env, caseName);
+  installHook(tree, env, expected.name);
   initProject(tree, env);
+  if (expected.allow) writeFileSync(path.join(tree.project, UNTRACKED), "untracked\n");
 }
 
 function writeConfig(agent, port) {
@@ -447,7 +475,7 @@ function checkSession(run, expected, check) {
   const toolEnds = events.filter(({ event }) => event.type === "tool_execution_end");
   const names = toolEnds.map(({ event }) => event.toolName);
   const expectedNames = expected.model === "normal" ? ["bash", "guard_status"] :
-    expected.model === "bash" ? ["bash"] : ["guard_status"];
+    expected.model === "bash" || expected.model === "harmless" ? ["bash"] : ["guard_status"];
   check("exact scripted tools finished", isDeepStrictEqual(names, expectedNames), names);
 }
 
@@ -481,25 +509,87 @@ function checkStatus(events, normal, check) {
   }
 }
 
-function checkRecorders(tree, normal, check) {
+// The adapter lines each case expects: both calls in the normal case, the
+// allowed Bash call in the harmless case, and none for a failure.
+function expectedRecorder(expected) {
+  if (expected.name === "normal") {
+    return ["exact bash and guard_status tack-hook recorder lines", EXPECTED_RECORDER];
+  }
+
+  if (expected.allow) return ["exact bash tack-hook recorder line", [EXPECTED_RECORDER[0]]];
+
+  return ["no tack-hook recorder lines", []];
+}
+
+function checkRecorders(tree, expected, check) {
   const recorder = readOptional(tree.recorder);
   const lines = recorder?.split("\n");
   const terminated = lines?.pop() === "";
   const pushes = lines?.filter((line) => /^push(?: |$)/.test(line));
   const calls = lines?.filter((line) => !/^push(?: |$)/.test(line));
+  const [label, want] = expectedRecorder(expected);
 
   check("git shim recorded zero pushes", terminated && pushes?.length === 0, pushes);
-  check(normal ? "exact bash and guard_status tack-hook recorder lines" : "no tack-hook recorder lines",
-    terminated && isDeepStrictEqual(calls, normal ? EXPECTED_RECORDER : []), calls);
+  check(label, terminated && isDeepStrictEqual(calls, want), calls);
+}
+
+// What the stand-in model received as each bash result, one entry per request
+// that carried one.
+function modelSaw(tree) {
+  const seen = [];
+
+  for (const line of (readOptional(tree.requests) ?? "").split("\n")) {
+    if (!line) continue;
+
+    try {
+      const outputs = JSON.parse(line).outputs;
+      if (outputs && Object.hasOwn(outputs, "call_bash")) seen.push(outputs.call_bash);
+    } catch {
+      seen.push({ invalid: line });
+    }
+  }
+
+  return seen;
+}
+
+// tack allowed the harmless command and it ran: the bash result is real git's
+// output with no denial, the stand-in model received that same text, the
+// wrapped shim logged one run with exit status 0, and the daemon logged
+// exactly one allow. Pi may run git for itself; only the command's own
+// arguments count.
+function checkAllowed(tree, events, check) {
+  const [start] = toolEvents(events, "tool_execution_start", "bash");
+  const [end] = toolEvents(events, "tool_execution_end", "bash");
+  const text = textOf(end?.event.result?.content);
+  const args = HARMLESS.slice("git ".length);
+  const runs = (readOptional(tree.gitRuns) ?? "").split("\n")
+    .filter((line) => line.slice(line.indexOf(" ") + 1) === args);
+  const lines = readOptional(path.join(tree.state, "daemon.log"))?.split("\n");
+  const terminated = lines?.pop() === "";
+  const seen = modelSaw(tree);
+
+  // Pi returns the command's combined output as the text; git ends it with LF.
+  check("bash allowed: " + HARMLESS + " ran with no denial", end?.event.isError === false &&
+    isDeepStrictEqual(text.trimEnd().split("\n"), ["?? " + UNTRACKED]) &&
+    isDeepStrictEqual(start?.event.args, { command: HARMLESS }), text);
+  check("stand-in model saw the bash output", text !== "" && isDeepStrictEqual(seen, [text]),
+    seen);
+  check("git shim recorded " + HARMLESS + " executing once with exit status 0",
+    isDeepStrictEqual(runs, ["0 " + args]), readOptional(tree.gitRuns));
+  check("exact daemon log line: hook toolBefore allow", terminated &&
+    isDeepStrictEqual(lines, ["tack-daemon: hook toolBefore allow"]), lines);
 }
 
 function checkCase(tree, run, expected, check) {
   const events = run?.events ?? [];
   const normal = expected.name === "normal";
   checkSession(run, expected, check);
-  checkRecorders(tree, normal, check);
+  checkRecorders(tree, expected, check);
   if (expected.bash) checkBash(events, expected, check);
-  if (expected.model !== "bash") checkStatus(events, normal, check);
+  if (expected.allow) checkAllowed(tree, events, check);
+  if (expected.model === "normal" || expected.model === "invalid-tool") {
+    checkStatus(events, normal, check);
+  }
 
   const attempts = readOptional(tree.hookAttempts);
   if (expected.name === "invalid-guard-status") {
@@ -521,7 +611,7 @@ function checkCase(tree, run, expected, check) {
 function keepEvidence(tree, target) {
   mkdirSync(target, { recursive: true });
 
-  for (const file of [tree.requests, tree.recorder, tree.hookAttempts,
+  for (const file of [tree.requests, tree.recorder, tree.hookAttempts, tree.gitRuns,
     path.join(tree.base, "pi-output.jsonl"), path.join(tree.base, "pi-stderr.log"),
     path.join(tree.base, "model-stderr.log"), path.join(tree.state, "daemon.log")]) {
     try {
@@ -542,7 +632,7 @@ async function runCase(pi, expected, root, target, check) {
   let run;
 
   try {
-    prepare(tree, env, expected.name);
+    prepare(tree, env, expected);
 
     const { promise, resolve } = Promise.withResolvers();
     model = startChild(process.execPath, [path.join(here, "model.mjs"), expected.model, tree.requests],
@@ -602,13 +692,17 @@ async function main() {
   mkdirSync(artifacts, { recursive: true });
 
   const rows = [];
+  const caseRows = new Map();
   let failed = false;
 
   for (const expected of cases) {
+    const own = [];
+    caseRows.set(expected.name, own);
     const check = (label, ok, evidence) => {
       failed ||= ok !== true;
       const row = (ok === true ? "PASS " : "FAIL ") + expected.name + ": " + label;
       rows.push(row);
+      own.push(row);
       console.log(row);
       if (ok !== true) console.error("  evidence: " + JSON.stringify(evidence)?.slice(0, 4000));
     };
@@ -620,8 +714,14 @@ async function main() {
     }
   }
 
-  writeFileSync(path.join(artifacts, "verdict.txt"), rows.join("\n") + "\n");
-  return failed ? 1 : 0;
+  // Its own row: every check of the harmless case passed, and it ran some.
+  const harmless = caseRows.get("harmless") ?? [];
+  const allowed = harmless.length > 0 && harmless.every((row) => row.startsWith("PASS "));
+  const allowedRow = "harmless_allowed=" + allowed;
+  console.log(allowedRow);
+  writeFileSync(path.join(artifacts, "verdict.txt"), [...rows, allowedRow].join("\n") + "\n");
+
+  return failed || !allowed ? 1 : 0;
 }
 
 process.exitCode = await main();

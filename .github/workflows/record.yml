@@ -993,6 +993,7 @@ jobs:
           termctrl save codex-rec --format png --pixel-ratio 1 --padding 0 \
             --font-family 'DejaVu Sans Mono' \
             --out frames/03-tool
+          termctrl wait codex-rec "?? harmless.txt" --timeout 60000
           termctrl wait codex-rec "PreToolUse allowed: git status --short" \
             --timeout 60000
           termctrl mark codex-rec allow

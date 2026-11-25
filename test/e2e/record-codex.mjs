@@ -4,7 +4,7 @@
 // stand-in from test/codex/model.mjs, runs the pinned Codex twice, and
 // renders each session beside daemon.log. The first session pushes and calls
 // guard_status; the second runs a harmless git status. Each step stays on
-// screen 2.5 s before the next appears, and the proof 4 s before the finish.
+// screen 2.5 s before the next appears, and the proof 3.5 s before the finish.
 
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -49,7 +49,7 @@ const SESSION_MS = 90_000;
 const PROOF_MS = 10_000;
 const PROOF_INPUT_MS = 30_000;
 const STEP_HOLD_MS = 2_500;
-const FINAL_HOLD_MS = 4_000;
+const FINAL_HOLD_MS = 3_500;
 
 // Each session is one codex exec run against one model.mjs script.
 const SESSIONS = [
@@ -58,13 +58,14 @@ const SESSIONS = [
 ];
 const HARMLESS = "git status --short";
 const UNTRACKED = "harmless.txt";
+const RAN = "?? " + UNTRACKED;
 
 const DENY = "tack: push blocked";
 const TOOL = "guard_status: daemon ok";
 const ALLOW = "PreToolUse allowed: " + HARMLESS;
 const PROOF = "NO_PUSH_REACHED_ORIGIN";
 // Strings termctrl waits for; wrapping never splits one across pane lines.
-const VISIBLE = [DENY, TOOL, ALLOW, PROOF];
+const VISIBLE = [DENY, TOOL, RAN, ALLOW, PROOF];
 const DAEMON_DENY = "tack-daemon: hook toolBefore deny push blocked";
 const DAEMON_TOOL = "tack-daemon: tool guard_status ok";
 const DAEMON_ALLOW = "tack-daemon: hook toolBefore allow";
@@ -737,7 +738,7 @@ function reportBash(output) {
     return;
   }
 
-  const ran = output.includes("?? " + UNTRACKED);
+  const ran = output.includes(RAN);
   show(ran && current.script === "harmless" ? "<- " + ALLOW : "<- bash output:");
   for (const line of lines(output)) show("   " + line);
 }
