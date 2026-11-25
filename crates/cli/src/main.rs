@@ -1,8 +1,9 @@
 //! The tack command-line entry point.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use tack_cli::{BuildError, BuildOptions, build, build_claude, build_pi};
+use tack_cli::{BuildError, BuildOptions, build, build_claude, build_codex, build_pi};
 
 const MAX_TIMEOUT_MS: u64 = 60_000;
 
@@ -17,6 +18,7 @@ enum Target {
     OpenCode,
     Claude,
     Pi,
+    Codex,
 }
 
 struct BuildArgs<'a> {
@@ -30,6 +32,7 @@ fn parse_target(value: &str) -> Result<Target, CliError> {
         "opencode" => Ok(Target::OpenCode),
         "claude" => Ok(Target::Claude),
         "pi" => Ok(Target::Pi),
+        "codex" => Ok(Target::Codex),
         _ => Err(CliError::Usage(format!("unknown target {value}"))),
     }
 }
@@ -92,7 +95,11 @@ fn parse_build_args(rest: &[String]) -> Result<BuildArgs<'_>, CliError> {
     })
 }
 
-fn run_build(plugin_dir: &Path, args: &BuildArgs) -> Result<Vec<PathBuf>, BuildError> {
+fn run_build(
+    plugin_dir: &Path,
+    args: &BuildArgs,
+    env: &impl Fn(&str) -> Option<OsString>,
+) -> Result<Vec<PathBuf>, BuildError> {
     let out = Path::new(args.out);
 
     match args.target {
@@ -102,18 +109,32 @@ fn run_build(plugin_dir: &Path, args: &BuildArgs) -> Result<Vec<PathBuf>, BuildE
         }
         Target::Claude => build_claude(plugin_dir, out),
         Target::Pi => build_pi(plugin_dir, out).map(|path| vec![path]),
+        Target::Codex => {
+            let codex_home = env("CODEX_HOME");
+            let home = env("HOME");
+            let codex_home =
+                tack_adapter_codex::resolve_home(codex_home.as_deref(), home.as_deref())
+                    .map_err(BuildError::Codex)?;
+
+            build_codex(plugin_dir, out, &codex_home)
+        }
     }
 }
 
-/// Run one command, handing each line of output to `emit` so tests can read
-/// it without a child process.
-fn dispatch(args: &[String], emit: &mut impl FnMut(&str)) -> Result<(), CliError> {
+/// Run one command, reading the environment through `env` and handing each
+/// line of output to `emit`, so tests need neither a child process nor
+/// changes to the process environment.
+fn dispatch(
+    args: &[String],
+    env: &impl Fn(&str) -> Option<OsString>,
+    emit: &mut impl FnMut(&str),
+) -> Result<(), CliError> {
     match args {
         [] => emit(&version()),
         [flag] if flag == "--version" => emit(&version()),
         [command, plugin_dir, rest @ ..] if command == "build" => {
             let args = parse_build_args(rest)?;
-            let written = run_build(Path::new(plugin_dir), &args).map_err(CliError::Build)?;
+            let written = run_build(Path::new(plugin_dir), &args, env).map_err(CliError::Build)?;
 
             for path in written {
                 emit(&path.display().to_string());
@@ -126,13 +147,15 @@ fn dispatch(args: &[String], emit: &mut impl FnMut(&str)) -> Result<(), CliError
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(error) = dispatch(&args, &mut |line| println!("{line}")) {
+    let env = |name: &str| std::env::var_os(name);
+
+    if let Err(error) = dispatch(&args, &env, &mut |line| println!("{line}")) {
         match error {
             CliError::Usage(message) => {
                 eprintln!("tack: {message}");
                 eprintln!(
                     "usage: tack [--version | build <plugin-dir> --out <dist-dir> \
-                     [--target opencode|claude|pi] \
+                     [--target opencode|claude|pi|codex] \
                      [--call-timeout-ms <n>] [--start-timeout-ms <n>]]"
                 );
                 std::process::exit(2);
@@ -193,10 +216,19 @@ mod tests {
         args.iter().map(|arg| (*arg).to_owned()).collect()
     }
 
-    /// Run `dispatch` and collect every emitted line.
+    /// Run `dispatch` with an empty environment and collect every emitted line.
     fn run(args: &[&str]) -> (Result<(), CliError>, Vec<String>) {
+        run_with_env(args, &[])
+    }
+
+    fn run_with_env(args: &[&str], vars: &[(&str, &Path)]) -> (Result<(), CliError>, Vec<String>) {
+        let env = |name: &str| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.as_os_str().to_owned())
+        };
         let mut lines = Vec::new();
-        let result = dispatch(&owned(args), &mut |line| lines.push(line.to_owned()));
+        let result = dispatch(&owned(args), &env, &mut |line| lines.push(line.to_owned()));
         (result, lines)
     }
 
@@ -317,8 +349,8 @@ mod tests {
     #[test]
     fn parse_build_args_refuses_a_bad_target_and_claude_timeouts() {
         assert_eq!(
-            usage(error_for(&["--out", "/dist", "--target", "codex"])),
-            "unknown target codex"
+            usage(error_for(&["--out", "/dist", "--target", "cursor"])),
+            "unknown target cursor"
         );
         assert_eq!(
             usage(error_for(&[
@@ -362,6 +394,78 @@ mod tests {
                 "the timeout options apply only to --target opencode"
             );
         }
+    }
+
+    #[test]
+    fn parse_build_args_reads_codex_and_refuses_its_timeouts() {
+        assert_eq!(
+            parsed_with_target(&["--out", "/dist", "--target", "codex"]).1,
+            Target::Codex
+        );
+
+        for flag in ["--call-timeout-ms", "--start-timeout-ms"] {
+            assert_eq!(
+                usage(error_for(&[
+                    "--out", "/dist", "--target", "codex", flag, "250"
+                ])),
+                "the timeout options apply only to --target opencode"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_build_emits_the_codex_paths_and_the_codex_home_files() {
+        let scratch = Scratch::new();
+        let out = scratch.root.join("dist");
+        let home = scratch.root.join("codex-home");
+        std::fs::create_dir_all(&out).expect("out");
+        std::fs::create_dir_all(&home).expect("home");
+        let out_arg = out.display().to_string();
+
+        let (result, lines) = run_with_env(
+            &["build", &fixture(), "--out", &out_arg, "--target", "codex"],
+            &[("CODEX_HOME", &home)],
+        );
+
+        let Ok(()) = result else {
+            panic!("codex build succeeds");
+        };
+        let codex = std::fs::canonicalize(&out).expect("out").join("codex");
+        let home = std::fs::canonicalize(&home).expect("home");
+        let expected: Vec<String> = [
+            codex.join("hooks.json"),
+            codex.join("pre-tool-use.js"),
+            codex.join("session-start.js"),
+            codex.join("mcp.js"),
+            codex.join("config.toml"),
+            codex.join("run-hook.sh"),
+            home.join("hooks.json"),
+            home.join("config.toml"),
+        ]
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+
+        assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn dispatch_build_codex_without_a_home_writes_nothing() {
+        let scratch = Scratch::new();
+        let out = scratch.root.join("dist");
+        let out_arg = out.display().to_string();
+
+        let (result, lines) = run(&["build", &fixture(), "--out", &out_arg, "--target", "codex"]);
+
+        let Err(CliError::Build(BuildError::Codex(error))) = result else {
+            panic!("a missing Codex home is refused");
+        };
+        assert_eq!(
+            error.to_string(),
+            "codex_home:neither CODEX_HOME nor HOME is set"
+        );
+        assert_eq!(lines, Vec::<String>::new());
+        assert!(!out.exists());
     }
 
     #[test]

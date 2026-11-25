@@ -1,14 +1,15 @@
 //! Public API for the tack build pipeline.
 //!
 //! The CLI assembles a sandbox, validates a plugin's needs, and renders the
-//! `OpenCode` wrapper, Claude Code mod, or Pi extension. No daemon, agent, or
-//! child process starts here.
+//! `OpenCode` wrapper, Claude Code mod, Pi extension, or Codex adapter. No
+//! daemon, agent, or child process starts here.
 
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use tack_adapter_claude::{ModConfig, ModError};
+use tack_adapter_codex::CodexError;
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
 use tack_adapter_pi::{EXTENSION_JS, ExtensionError};
 use tack_luau::{Capabilities, EngineError, Limits, Sandbox};
@@ -37,6 +38,7 @@ pub enum BuildError {
     Render(WrapperError),
     RenderMod(ModError),
     RenderExtension(ExtensionError),
+    Codex(CodexError),
     Io(std::io::Error),
 }
 
@@ -49,6 +51,7 @@ impl fmt::Display for BuildError {
             Self::Render(error) => write!(f, "render:{error}"),
             Self::RenderMod(error) => write!(f, "render:{error}"),
             Self::RenderExtension(error) => write!(f, "render:{error}"),
+            Self::Codex(error) => write!(f, "codex:{error}"),
             Self::Io(error) => write!(f, "io:{error}"),
         }
     }
@@ -63,6 +66,7 @@ impl Error for BuildError {
             Self::Render(error) => Some(error),
             Self::RenderMod(error) => Some(error),
             Self::RenderExtension(error) => Some(error),
+            Self::Codex(error) => Some(error),
             Self::Io(error) => Some(error),
         }
     }
@@ -222,6 +226,59 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
     std::fs::write(&extension, script).map_err(BuildError::Io)?;
 
     Ok(extension)
+}
+
+/// Read one plugin, check its needs, emit the Codex adapter into
+/// `<out>/codex`, and install its hooks and their trust into `codex_home`.
+///
+/// The emitted files are `hooks.json`, `pre-tool-use.js`,
+/// `session-start.js`, `mcp.js`, the `config.toml` fragment that
+/// registers the MCP server, and `run-hook.sh`, which each hook command runs
+/// its script through. Into the Codex home go tack's groups in
+/// `hooks.json` and `[hooks.state.<key>]` in `config.toml` for exactly
+/// tack's handlers, rewritten on every build; every other hook and its state
+/// stays as it is. The scripts are written before the home trusts them, and
+/// both home files are checked before either is written.
+///
+/// # Errors
+///
+/// Returns [`BuildError::Io`] when the plugin folder or output files cannot be
+/// read or written, [`BuildError::Sandbox`] when the plugin cannot be loaded
+/// or read, [`BuildError::Manifest`] when the manifest does not match the wire
+/// contract, [`BuildError::NeedMissing`] for an unsupported need, and
+/// [`BuildError::Codex`] when the adapter cannot be rendered or the Codex home
+/// cannot be merged.
+pub fn build_codex(
+    plugin_dir: &Path,
+    out: &Path,
+    codex_home: &Path,
+) -> Result<Vec<PathBuf>, BuildError> {
+    let (plugin_dir, _) = load(plugin_dir)?;
+    let dest = out.join("codex");
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    let dest = std::fs::canonicalize(&dest).map_err(BuildError::Io)?;
+
+    let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
+        plugin_dir: &plugin_dir,
+        codex_dir: &dest,
+        version: env!("CARGO_PKG_VERSION"),
+    })
+    .map_err(BuildError::Codex)?;
+    let mut written = Vec::with_capacity(adapter.files.len().saturating_add(2));
+
+    for file in adapter.files {
+        let path = dest.join(file.name);
+        std::fs::write(&path, file.contents).map_err(BuildError::Io)?;
+        written.push(path);
+    }
+
+    let installed =
+        tack_adapter_codex::install(codex_home, &adapter.handlers).map_err(BuildError::Codex)?;
+
+    written.push(installed.hooks);
+    written.push(installed.config);
+
+    Ok(written)
 }
 
 #[cfg(test)]
