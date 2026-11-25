@@ -1,0 +1,30 @@
+{
+  "TOOLS": [
+    {
+      "description": "Reports whether the tack daemon is running",
+      "inputSchema": { "type": "object" },
+      "isDeferred": false,
+      "name": "guard_status"
+    }
+  ],
+  "HOOK_BIN": "tack-hook",
+  "PLUGIN_DIR": "/plugins/safe-push",
+  "DENY_REASONS": [
+    "socket_missing",
+    "timeout",
+    "socket_closed",
+    "malformed_reply",
+    "protocol_version",
+    "limit",
+    "script",
+    "unknown_tool",
+    "daemon_error",
+    "aborted",
+    "unsupported_hook",
+    "socket_untrusted",
+    "hook_missing"
+  ],
+  "PROTOCOL_VERSION": 1,
+  "BUDGET_MS": 9000,
+  "TOOL_PREFIX": "mcp__tack__"
+}

@@ -4,12 +4,15 @@
 
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use tack_adapter_pi::{ExtensionError, render};
 use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 
 const TEMPLATE: &str = include_str!("../register.js");
-const FIXTURE_PLUGIN_DIR: &str = "/plugins/safe-push";
+
+fn fixture_values() -> Map<String, Value> {
+    serde_json::from_str(include_str!("../fixture-values.json")).expect("fixture values")
+}
 
 fn constant<'a>(script: &'a str, name: &str) -> &'a str {
     let prefix = format!("const {name} = ");
@@ -21,7 +24,11 @@ fn constant<'a>(script: &'a str, name: &str) -> &'a str {
         .expect("emitted constant")
 }
 
-fn assert_template_substitutions(script: &str, plugin_dir_literal: &str) {
+fn assert_template_substitutions(
+    script: &str,
+    plugin_dir_literal: &str,
+    fixture: &Map<String, Value>,
+) {
     let template_lines = TEMPLATE.split_inclusive('\n');
     let script_lines = script.split_inclusive('\n');
 
@@ -33,19 +40,13 @@ fn assert_template_substitutions(script: &str, plugin_dir_literal: &str) {
         }
     }
 
-    let expected = TEMPLATE
-        .replace("__TACK_PLUGIN_DIR__", plugin_dir_literal)
-        .replace("__TACK_PROTOCOL_VERSION__", "1")
-        .replace("__TACK_BUDGET_MS__", "8500")
-        .replace("__TACK_MAX_FRAME_BYTES__", "1048576")
-        .replace(
-            "__TACK_DENY_REASONS__",
-            concat!(
-                r#"["socket_missing","timeout","socket_closed","malformed_reply","#,
-                r#""protocol_version","limit","script","unknown_tool","daemon_error","#,
-                r#""aborted","unsupported_hook","socket_untrusted","hook_missing"]"#,
-            ),
-        );
+    let mut expected = TEMPLATE.replace("__TACK_PLUGIN_DIR__", plugin_dir_literal);
+
+    for (name, value) in fixture {
+        if name != "PLUGIN_DIR" {
+            expected = expected.replace(&format!("__TACK_{name}__"), &value.to_string());
+        }
+    }
 
     assert_eq!(script, expected);
     assert_eq!(script.find("__TACK_"), None);
@@ -53,13 +54,19 @@ fn assert_template_substitutions(script: &str, plugin_dir_literal: &str) {
 
 #[test]
 fn render_fills_only_template_placeholders() {
-    let script = render(Path::new(FIXTURE_PLUGIN_DIR)).expect("render");
-    let plugin_dir_literal = json!(FIXTURE_PLUGIN_DIR).to_string();
+    let fixture = fixture_values();
+    let plugin_dir = fixture["PLUGIN_DIR"]
+        .as_str()
+        .expect("fixture plugin directory");
+    let script = render(Path::new(plugin_dir)).expect("render");
 
-    assert_template_substitutions(&script, &plugin_dir_literal);
+    assert_template_substitutions(&script, r#""/plugins/safe-push""#, &fixture);
     assert_eq!(constant(&script, "HOOK_BIN"), r#""tack-hook""#);
-    assert_eq!(constant(&script, "PLUGIN_DIR"), plugin_dir_literal);
-    assert_eq!(constant(&script, "BUDGET_MS"), "8500");
+    assert_eq!(constant(&script, "PLUGIN_DIR"), r#""/plugins/safe-push""#);
+    assert_eq!(
+        constant(&script, "BUDGET_MS"),
+        fixture["BUDGET_MS"].to_string()
+    );
     assert_eq!(
         constant(&script, "PROTOCOL_VERSION"),
         PROTOCOL_VERSION.to_string()
@@ -70,13 +77,21 @@ fn render_fills_only_template_placeholders() {
     );
     assert_eq!(
         constant(&script, "DENY_REASONS"),
-        json!(DenyReason::ALL.map(DenyReason::as_str)).to_string()
+        fixture["DENY_REASONS"].to_string()
+    );
+    assert_eq!(
+        fixture["DENY_REASONS"],
+        json!(DenyReason::ALL.map(DenyReason::as_str))
     );
 }
 
 #[test]
 fn pi_loads_one_default_factory_with_only_node_imports() {
-    let script = render(Path::new(FIXTURE_PLUGIN_DIR)).expect("render");
+    let fixture = fixture_values();
+    let plugin_dir = fixture["PLUGIN_DIR"]
+        .as_str()
+        .expect("fixture plugin directory");
+    let script = render(Path::new(plugin_dir)).expect("render");
     let imports: Vec<_> = script
         .lines()
         .filter(|line| line.trim_start().starts_with("import "))
@@ -105,7 +120,7 @@ fn a_path_with_javascript_punctuation_is_only_a_json_string() {
     let literal = json!(path).to_string();
 
     assert_eq!(constant(&script, "PLUGIN_DIR"), literal);
-    assert_template_substitutions(&script, &literal);
+    assert_template_substitutions(&script, &literal, &fixture_values());
 }
 
 #[test]

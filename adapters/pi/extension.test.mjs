@@ -3,19 +3,15 @@ import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const reasonNames = [
-  "socket_missing", "timeout", "socket_closed", "malformed_reply",
-  "protocol_version", "limit", "script", "unknown_tool", "daemon_error",
-  "aborted", "unsupported_hook", "socket_untrusted", "hook_missing",
-];
-
+const fixturePath = new URL("./fixture-values.json", import.meta.url);
+const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
+const { DENY_REASONS: reasonNames } = fixture;
 const template = new URL("./register.js", import.meta.url);
-const source = readFileSync(template, "utf8")
-  .replaceAll("__TACK_PLUGIN_DIR__", JSON.stringify("/plugins/safe-push"))
-  .replaceAll("__TACK_PROTOCOL_VERSION__", "1")
-  .replaceAll("__TACK_BUDGET_MS__", "8500")
-  .replaceAll("__TACK_MAX_FRAME_BYTES__", "1048576")
-  .replaceAll("__TACK_DENY_REASONS__", JSON.stringify(reasonNames));
+let source = readFileSync(template, "utf8");
+
+for (const [name, value] of Object.entries(fixture)) {
+  source = source.replaceAll(`__TACK_${name}__`, () => JSON.stringify(value));
+}
 
 // Replace only the module boundary. Every call uses an injected spawn, file
 // writer and clock; the suite cannot launch tack-hook or send OS signals.

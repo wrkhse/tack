@@ -1,6 +1,6 @@
-// Fail-closed checks for the Claude Code mod rendered with the fixture from
-// tests/render.rs. It loads the hooks module under a fake `on` and `$` whose
-// process.run is scripted: no Claude Code, tack-hook or other process runs.
+// Fail-closed checks for the Claude Code mod rendered with fixture-values.json.
+// A fake `on` and `$` load the hooks module and script process.run:
+// no Claude Code, tack-hook or other process runs.
 //
 //   node adapters/claude/register.test.mjs
 
@@ -12,34 +12,10 @@ const TEMPLATE = readFileSync(
   "utf8",
 );
 
-const VALUES = {
-  TOOLS: [{
-    description: "Reports whether the tack daemon is running",
-    inputSchema: { type: "object" },
-    isDeferred: false,
-    name: "guard_status",
-  }],
-  HOOK_BIN: "tack-hook",
-  PLUGIN_DIR: "/plugins/safe-push",
-  DENY_REASONS: [
-    "socket_missing",
-    "timeout",
-    "socket_closed",
-    "malformed_reply",
-    "protocol_version",
-    "limit",
-    "script",
-    "unknown_tool",
-    "daemon_error",
-    "aborted",
-    "unsupported_hook",
-    "socket_untrusted",
-    "hook_missing",
-  ],
-  PROTOCOL_VERSION: 1,
-  BUDGET_MS: 9000,
-  TOOL_PREFIX: "mcp__tack__",
-};
+const VALUES = JSON.parse(readFileSync(
+  new URL("./fixture-values.json", import.meta.url),
+  "utf8",
+));
 
 let SOURCE = TEMPLATE;
 
