@@ -634,4 +634,40 @@ mod tests {
             (String::from("build needs --out <dist-dir>"), Vec::new())
         );
     }
+
+    #[test]
+    fn dispatch_build_codex_refuses_a_bad_home_without_writing_adapter_files() {
+        let scratch = Scratch::new();
+        let home = scratch.root.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join("config.toml"), "hooks = {}\n").expect("config");
+        std::fs::write(home.join("hooks.json"), "{}\n").expect("hooks");
+        let out = scratch.root.join("dist");
+
+        let (result, lines) = run_with_env(
+            &[
+                "build",
+                &fixture(),
+                "--out",
+                &out.display().to_string(),
+                "--target",
+                "codex",
+            ],
+            &[("CODEX_HOME", &home)],
+        );
+
+        let Err(CliError::Build(BuildError::Codex(_))) = result else {
+            panic!("a Codex home tack cannot merge into is refused");
+        };
+        assert_eq!(lines, Vec::<String>::new());
+        assert!(!out.join("codex").exists());
+        assert_eq!(
+            std::fs::read(home.join("config.toml")).expect("config"),
+            b"hooks = {}\n"
+        );
+        assert_eq!(
+            std::fs::read(home.join("hooks.json")).expect("hooks"),
+            b"{}\n"
+        );
+    }
 }
