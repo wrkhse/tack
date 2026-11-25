@@ -408,6 +408,51 @@ mod tests {
         );
     }
 
+    fn assert_pi_extension_matches_template(script: &str, plugin_dir_literal: &str) {
+        let template = include_str!("../../../adapters/pi/register.js");
+        let template_lines = template.split_inclusive('\n');
+        let script_lines = script.split_inclusive('\n');
+
+        assert_eq!(template_lines.clone().count(), script_lines.clone().count());
+
+        for (before, after) in template_lines.zip(script_lines) {
+            if !before.contains("__TACK_") {
+                assert_eq!(before, after);
+            }
+        }
+
+        let values = [
+            ("PLUGIN_DIR", plugin_dir_literal),
+            ("PROTOCOL_VERSION", "1"),
+            ("BUDGET_MS", "8500"),
+            ("MAX_FRAME_BYTES", "1048576"),
+            (
+                "DENY_REASONS",
+                concat!(
+                    r#"["socket_missing","timeout","socket_closed","malformed_reply","#,
+                    r#""protocol_version","limit","script","unknown_tool","daemon_error","#,
+                    r#""aborted","unsupported_hook","socket_untrusted","hook_missing"]"#,
+                ),
+            ),
+        ];
+        let mut expected = template.to_owned();
+
+        for (name, value) in values {
+            let prefix = format!("const {name} = ");
+            let constant = script.lines().find_map(|line| line.strip_prefix(&prefix));
+
+            assert_eq!(
+                constant.and_then(|line| line.strip_suffix(';')),
+                Some(value)
+            );
+
+            expected = expected.replace(&format!("__TACK_{name}__"), value);
+        }
+
+        assert_eq!(script, expected);
+        assert_eq!(script.find("__TACK_"), None);
+    }
+
     #[test]
     fn dispatch_build_emits_only_the_pi_extension() {
         let scratch = Scratch::new();
@@ -432,12 +477,8 @@ mod tests {
         let script = std::fs::read_to_string(extension).expect("emitted extension");
         let canonical = std::fs::canonicalize(fixture()).expect("canonical plugin");
         let literal = serde_json::json!(canonical.to_str().expect("UTF-8 path"));
-        let golden = include_str!("../../../adapters/pi/golden/register.js");
 
-        assert_eq!(
-            script,
-            golden.replace(r#""/plugins/safe-push""#, &literal.to_string())
-        );
+        assert_pi_extension_matches_template(&script, &literal.to_string());
     }
 
     #[test]

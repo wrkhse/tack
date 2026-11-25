@@ -1,17 +1,53 @@
-// Fail-closed checks for the generated Claude Code mod. It loads the golden
-// hooks module (the Rust golden test pins it to the rendered output) under a
-// fake `on` and `$` whose process.run is scripted: no Claude Code, tack-hook
-// or other process runs.
+// Fail-closed checks for the Claude Code mod rendered with the fixture from
+// tests/render.rs. It loads the hooks module under a fake `on` and `$` whose
+// process.run is scripted: no Claude Code, tack-hook or other process runs.
 //
 //   node adapters/claude/register.test.mjs
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const SOURCE = readFileSync(
-  new URL("./golden/register.js", import.meta.url),
+const TEMPLATE = readFileSync(
+  new URL("./register.js", import.meta.url),
   "utf8",
 );
+
+const VALUES = {
+  TOOLS: [{
+    description: "Reports whether the tack daemon is running",
+    inputSchema: { type: "object" },
+    isDeferred: false,
+    name: "guard_status",
+  }],
+  HOOK_BIN: "tack-hook",
+  PLUGIN_DIR: "/plugins/safe-push",
+  DENY_REASONS: [
+    "socket_missing",
+    "timeout",
+    "socket_closed",
+    "malformed_reply",
+    "protocol_version",
+    "limit",
+    "script",
+    "unknown_tool",
+    "daemon_error",
+    "aborted",
+    "unsupported_hook",
+    "socket_untrusted",
+    "hook_missing",
+  ],
+  PROTOCOL_VERSION: 1,
+  BUDGET_MS: 9000,
+  TOOL_PREFIX: "mcp__tack__",
+};
+
+let SOURCE = TEMPLATE;
+
+for (const [name, value] of Object.entries(VALUES)) {
+  SOURCE = SOURCE.replaceAll(`__TACK_${name}__`, () => JSON.stringify(value));
+}
+
+assert.equal(SOURCE.includes("__TACK_"), false);
 
 const HOOK_ARGV = ["tack-hook", "--plugin", "/plugins/safe-push"];
 const BASH = { tool: "Bash", tool_use_id: "toolu_1", command: "git push origin main" };

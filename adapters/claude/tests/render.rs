@@ -10,7 +10,7 @@ use tack_adapter_claude::{
 };
 use tack_protocol::wire::{DenyReason, PluginManifest, ToolDef};
 
-const GOLDEN: &str = include_str!("../golden/register.js");
+const TEMPLATE: &str = include_str!("../register.js");
 
 const REASONS: [&str; 13] = [
     "socket_missing",
@@ -60,7 +60,7 @@ fn register_js() -> String {
     register.contents
 }
 
-// tack build passes every protocol deny reason in this order, so the golden
+// tack build passes every protocol deny reason in this order, so the fixture
 // holds the list a real build emits.
 #[test]
 fn the_fixture_reasons_are_the_protocol_deny_reasons() {
@@ -86,11 +86,66 @@ fn render_emits_the_exact_plugin_folder() {
         }
     );
     assert_eq!(register.path, "hooks/register.js");
-    assert_eq!(register.contents, GOLDEN);
     assert_eq!(
         [PLUGIN_JSON, HOOKS_JSON, REGISTER_JS],
         [plugin.path, hooks.path, register.path]
     );
+}
+
+#[test]
+fn register_render_only_fills_the_fixture_slots() {
+    let manifest = manifest();
+    let fixture = config(&manifest);
+    let string = |value: &str| serde_json::to_string(value).expect("fixture string");
+    let values = [
+        (
+            "__TACK_TOOLS__",
+            concat!(
+                r#"[{"description":"Reports whether the tack daemon is running","#,
+                r#""inputSchema":{"type":"object"},"isDeferred":false,"name":"guard_status"}]"#,
+            )
+            .to_owned(),
+        ),
+        ("__TACK_HOOK_BIN__", string(fixture.hook_bin)),
+        ("__TACK_PLUGIN_DIR__", string(fixture.plugin_dir)),
+        (
+            "__TACK_DENY_REASONS__",
+            serde_json::to_string(fixture.deny_reasons).expect("fixture deny reasons"),
+        ),
+        (
+            "__TACK_PROTOCOL_VERSION__",
+            fixture.protocol_version.to_string(),
+        ),
+        ("__TACK_BUDGET_MS__", "9000".to_owned()),
+        ("__TACK_TOOL_PREFIX__", string("mcp__tack__")),
+    ];
+
+    let [_, _, register] = render(&fixture).expect("render");
+    let script = register.contents;
+    let template_lines = TEMPLATE.split_inclusive('\n');
+    let rendered_lines = script.split_inclusive('\n');
+    assert_eq!(
+        template_lines.clone().count(),
+        rendered_lines.clone().count()
+    );
+
+    let mut expected = String::new();
+
+    for (template, rendered) in template_lines.zip(rendered_lines) {
+        let mut line = template.to_owned();
+
+        for (token, value) in &values {
+            if template.contains(token) {
+                line = line.replace(token, value);
+            }
+        }
+
+        assert_eq!(rendered, line, "from template line {template:?}");
+        expected.push_str(&line);
+    }
+
+    assert_eq!(script, expected);
+    assert_eq!(script.find("__TACK_"), None);
 }
 
 #[test]
