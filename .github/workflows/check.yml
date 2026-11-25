@@ -5,14 +5,6 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    # Temporary: bootstraps the tidy migration and is removed before the pull
-    # request is ready. init writes tidy.json; format runs tidy up over the tree.
-    inputs:
-      tidy_mode:
-        description: "tidy bootstrap: init or format (empty skips it)"
-        required: false
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -219,65 +211,4 @@ jobs:
               exit "$status"
               ;;
           esac
-
-  # Temporary: removed with the tidy_mode input before the pull request is
-  # ready. tidy never runs on a developer's machine; it runs here.
-  tidy-bootstrap:
-    if: inputs.tidy_mode != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      TIDY_MODE: ${{ inputs.tidy_mode }}
-    steps:
-      - name: Check the mode
-        run: |
-          case "$TIDY_MODE" in
-            init | format) ;;
-            *)
-              echo "tidy_mode must be init or format, got: $TIDY_MODE" >&2
-              exit 1
-              ;;
-          esac
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install tidy
-        run: |
-          set -euo pipefail
-
-          bin="$RUNNER_TEMP/tidy-bin"
-          mkdir -p "$bin"
-          cd "$bin"
-          curl -fsSLO https://github.com/lukeed/tidy/releases/download/v2.0.0/tidy-x86_64-unknown-linux-musl.tar.gz
-          echo '4b8166b1cdde610fd783f2d59511b0fb35d15ef96069ef20642b948ab90907ea  tidy-x86_64-unknown-linux-musl.tar.gz' | sha256sum -c -
-          tar -xzf tidy-x86_64-unknown-linux-musl.tar.gz
-          chmod +x tidy
-          echo "$bin" >> "$GITHUB_PATH"
-      - name: Write tidy.json
-        if: env.TIDY_MODE == 'init'
-        run: |
-          set -euo pipefail
-
-          tidy init --json
-          test -f tidy.json
-      - if: env.TIDY_MODE == 'init'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: tidy-config
-          path: tidy.json
-          if-no-files-found: error
-      - name: Format the tree
-        if: env.TIDY_MODE == 'format'
-        run: |
-          set -euo pipefail
-
-          test -f tidy.json
-          tidy up .
-          tar --exclude=./.git -czf "$RUNNER_TEMP/tidy-formatted.tar.gz" .
-      - if: env.TIDY_MODE == 'format'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: tidy-formatted
-          path: ${{ runner.temp }}/tidy-formatted.tar.gz
-          if-no-files-found: error
 
