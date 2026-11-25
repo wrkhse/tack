@@ -348,31 +348,51 @@ async function startDaemon(t, env) {
   throw new Error("tack-daemon did not open its socket within 5 s");
 }
 
-function noPushRecorded() {
+// What the git shim recorded: true for a push, false for none, and
+// undefined while there is no recorder to read.
+function recordedPush() {
   const text = tree && readOptional(tree.recorder);
-  return text !== undefined &&
-    !text.split("\n").some((row) => row.startsWith("push"));
+  if (text === undefined) return undefined;
+
+  return text.split("\n").some((row) => row.startsWith("push"));
 }
 
+function noPushRecorded() {
+  return recordedPush() === false;
+}
+
+// The verdict, and the recorder's push for the header, from one read.
 function judgement() {
   const log = tree && readOptional(tree.daemonLog)?.split("\n");
   const hooks = tree && readOptional(tree.hookRecorder)?.split("\n");
+  const pushed = recordedPush();
 
   return {
-    push_denied: sawDeny && log?.includes(DAEMON_DENY) === true,
-    guard_status_ran: sawTool && log?.includes(DAEMON_TOOL) === true,
-    no_push_recorded: noPushRecorded(),
-    hook_called: hooks?.includes("call") === true,
-    extension_loaded: entryCount === 1 && loadedEntry,
+    pushed,
+    verdict: {
+      push_denied: sawDeny && log?.includes(DAEMON_DENY) === true,
+      guard_status_ran: sawTool && log?.includes(DAEMON_TOOL) === true,
+      no_push_recorded: pushed === false,
+      hook_called: hooks?.includes("call") === true,
+      extension_loaded: entryCount === 1 && loadedEntry,
+    },
   };
 }
 
-function printHeader(result, force) {
+// The row stays neutral until there is evidence: no git push once the push
+// was blocked and the git shim recorded none, PUSH EXECUTED only when the
+// shim recorded one.
+function noPushRow(denied, pushed) {
+  if (pushed === true) return "[4] PUSH EXECUTED";
+  return denied && pushed === false ? "[4] no git push" : "[4] no push yet";
+}
+
+function printHeader(result, pushed, force) {
   const parts = [
     result.push_denied ? "[1] git push blocked" : "[1] push pending",
     result.guard_status_ran ? "[2] guard_status ran" : "[2] guard pending",
     result.hook_called ? "[3] tack-hook called" : "[3] hook pending",
-    result.no_push_recorded ? "[4] no git push" : "[4] no-push unverified",
+    noPushRow(result.push_denied, pushed),
     result.extension_loaded ? "[5] extension loaded" : "[5] load pending",
   ];
   const header = parts.join("  ");
@@ -382,16 +402,21 @@ function printHeader(result, force) {
   process.stdout.write(header + "\n");
 }
 
+function writeVerdict(verdict) {
+  const rows = Object.entries(verdict)
+    .map(([key, value]) => key + "=" + value);
+  writeFileSync(verdictPath, rows.join("\n") + "\n");
+}
+
 // Write the verdict before showing the captions from that same judgement.
 function refresh(force = false) {
   if (verdictFinal) return;
 
-  const result = judgement();
-  const rows = Object.entries(result).map(([key, value]) => key + "=" + value);
-  writeFileSync(verdictPath, rows.join("\n") + "\n");
-  printHeader(result, force);
+  const { verdict, pushed } = judgement();
+  writeVerdict(verdict);
+  printHeader(verdict, pushed, force);
 
-  return Object.values(result).every((value) => value);
+  return Object.values(verdict).every((value) => value);
 }
 
 function enqueue(queue, text, width) {
@@ -671,7 +696,8 @@ async function main() {
 
   try {
     // Clear any verdict from a preceding recording before showing evidence.
-    refresh(true);
+    // Only the verdict: record() prints the header once, above the titles.
+    writeVerdict(judgement().verdict);
     await record();
     completed = true;
   } catch (error) {

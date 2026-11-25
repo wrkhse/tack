@@ -235,6 +235,14 @@ function pad(text, width) {
   return clean.length >= width ? clean.slice(0, width) : clean.padEnd(width);
 }
 
+// The row stays neutral until there is evidence: no git push once the push
+// was blocked and the git shim recorded none, PUSH EXECUTED only when the
+// shim recorded one. A missing recorder reads as empty, so it proves nothing.
+function noPushRow(denied, noPush) {
+  if (!noPush) return "[3] PUSH EXECUTED";
+  return denied ? "[3] no git push" : "[3] no push yet";
+}
+
 function printHeader({ denied, guarded, noPush }, force) {
   const state = denied + ":" + guarded + ":" + noPush;
   if (!force && state === headerState) return;
@@ -242,7 +250,7 @@ function printHeader({ denied, guarded, noPush }, force) {
 
   const first = denied ? "[1] git push blocked" : "[1] push pending";
   const second = guarded ? "[2] guard_status ran" : "[2] guard pending";
-  const third = noPush ? "[3] no git push" : "[3] PUSH EXECUTED";
+  const third = noPushRow(denied, noPush);
   process.stdout.write(first + "    " + second + "    " + third + "\n");
 }
 
