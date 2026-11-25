@@ -82,9 +82,12 @@ function readOptional(file) {
 }
 
 function executable(name) {
-  const candidates = name.includes(path.sep) ? [path.resolve(name)] :
-    (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)
-      .map((dir) => path.resolve(dir, name));
+  const candidates = name.includes(path.sep)
+    ? [path.resolve(name)]
+    : (process.env.PATH ?? "")
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((dir) => path.resolve(dir, name));
 
   for (const file of candidates) {
     try {
@@ -121,8 +124,9 @@ function layout(base) {
 
 function sessionEnv(t, bins) {
   return {
-    PATH: [t.bin, path.dirname(process.execPath), "/usr/bin", "/bin"]
-      .join(path.delimiter),
+    PATH: [t.bin, path.dirname(process.execPath), "/usr/bin", "/bin"].join(
+      path.delimiter,
+    ),
     HOME: t.home,
     TMPDIR: t.tmp,
     SHELL: "/bin/bash",
@@ -149,8 +153,16 @@ function quote(value) {
 }
 
 function prepare(t, bins, env) {
-  for (const dir of [t.home, t.agent, t.config, t.data, t.cache, t.tmp, t.bin,
-    t.project]) {
+  for (const dir of [
+    t.home,
+    t.agent,
+    t.config,
+    t.data,
+    t.cache,
+    t.tmp,
+    t.bin,
+    t.project,
+  ]) {
     mkdirSync(dir);
   }
 
@@ -164,8 +176,13 @@ function prepare(t, bins, env) {
   chmodSync(git, 0o755);
 
   // Keep the hook's stdin and stdout intact and record only successful calls.
-  const script = "#!/bin/sh\n" + quote(bins.hook) + ' "$@" || exit $?\n' +
-    "printf '%s\\n' call >> " + quote(t.hookRecorder) + "\n";
+  const script =
+    "#!/bin/sh\n" +
+    quote(bins.hook) +
+    ' "$@" || exit $?\n' +
+    "printf '%s\\n' call >> " +
+    quote(t.hookRecorder) +
+    "\n";
   writeFileSync(env.TACK_HOOK_BIN, script, { mode: 0o755 });
   chmodSync(env.TACK_HOOK_BIN, 0o755);
 }
@@ -174,8 +191,17 @@ function initRepo(t, env) {
   const origin = path.join(t.base, "origin.git");
   const steps = [
     ["init", "-q", "--initial-branch=main"],
-    ["-c", "user.name=Pi recording", "-c", "user.email=pi@example.invalid",
-      "commit", "--allow-empty", "--no-gpg-sign", "-qm", "Fixture"],
+    [
+      "-c",
+      "user.name=Pi recording",
+      "-c",
+      "user.email=pi@example.invalid",
+      "commit",
+      "--allow-empty",
+      "--no-gpg-sign",
+      "-qm",
+      "Fixture",
+    ],
     ["clone", "--bare", "-q", ".", origin],
     ["remote", "add", "origin", origin],
     ["fetch", "-q", "origin", "refs/heads/main:refs/remotes/origin/main"],
@@ -184,7 +210,11 @@ function initRepo(t, env) {
 
   for (const args of steps) {
     const run = spawnSync(env.TACK_REAL_GIT, args, {
-      cwd: t.project, env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL",
+      cwd: t.project,
+      env,
+      encoding: "utf8",
+      timeout: 5_000,
+      killSignal: "SIGKILL",
     });
 
     if (run.error) throw run.error;
@@ -213,11 +243,17 @@ function writeConfig(agent, port) {
   };
 
   writeFileSync(path.join(agent, "models.json"), JSON.stringify(models) + "\n");
-  writeFileSync(path.join(agent, "settings.json"), JSON.stringify(settings) + "\n");
+  writeFileSync(
+    path.join(agent, "settings.json"),
+    JSON.stringify(settings) + "\n",
+  );
 }
 
 function startChild(bin, args, options) {
-  const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], ...options });
+  const child = spawn(bin, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    ...options,
+  });
   const run = { child, error: undefined, done: undefined, kill: undefined };
 
   run.kill = () => {
@@ -231,7 +267,9 @@ function startChild(bin, args, options) {
       if (error.code !== "ESRCH") throw error;
     }
   };
-  child.once("error", (error) => { run.error = error; });
+  child.once("error", (error) => {
+    run.error = error;
+  });
   run.done = new Promise((resolve) => {
     child.once("close", (code, signal) => {
       children.delete(run);
@@ -248,7 +286,9 @@ async function bounded(promise, ms, label) {
   const timeout = delay(ms, undefined, { signal: timer.signal }).then(() => {
     throw new Error(label + " timed out after " + ms / 1000 + " s");
   });
-  const stopped = stop.promise.then(() => { throw new Error("recording stopped"); });
+  const stopped = stop.promise.then(() => {
+    throw new Error("recording stopped");
+  });
 
   try {
     return await Promise.race([promise, timeout, stopped]);
@@ -289,15 +329,21 @@ function addLines(stream, handle) {
 }
 
 async function startModel(t, env) {
-  const run = startChild(process.execPath, [modelScript, "normal", t.requests], {
-    cwd: t.project, env,
-  });
+  const run = startChild(
+    process.execPath,
+    [modelScript, "normal", t.requests],
+    {
+      cwd: t.project,
+      env,
+    },
+  );
   const ready = Promise.withResolvers();
   addLines(run.child.stdout, (line) => {
     const port = Number(line);
 
     if (/^[1-9]\d{0,4}$/.test(line) && port <= 65535) ready.resolve(port);
-    else ready.reject(new Error("invalid model port: " + line.slice(0, LEFT_W)));
+    else
+      ready.reject(new Error("invalid model port: " + line.slice(0, LEFT_W)));
   });
   addLines(run.child.stderr, (line) => enqueue(left, line, LEFT_W));
 
@@ -305,11 +351,22 @@ async function startModel(t, env) {
     throw new Error("loopback model closed: " + exitDetail(result));
   });
 
-  return await bounded(Promise.race([ready.promise, exited]), MODEL_MS, "model");
+  return await bounded(
+    Promise.race([ready.promise, exited]),
+    MODEL_MS,
+    "model",
+  );
 }
 
 async function buildMod(t, env, cli) {
-  const args = ["build", "fixtures/safe-push", "--out", t.dist, "--target", "pi"];
+  const args = [
+    "build",
+    "fixtures/safe-push",
+    "--out",
+    t.dist,
+    "--target",
+    "pi",
+  ];
   const run = startChild(cli, args, { cwd: repoRoot, env });
   run.child.stdout.resume();
   addLines(run.child.stderr, (line) => enqueue(left, line, LEFT_W));
@@ -325,7 +382,9 @@ async function startDaemon(t, env) {
 
   try {
     run = startChild(env.TACK_DAEMON_BIN, args, {
-      cwd: t.project, env, stdio: ["ignore", log, log],
+      cwd: t.project,
+      env,
+      stdio: ["ignore", log, log],
     });
   } finally {
     closeSync(log);
@@ -403,8 +462,7 @@ function printHeader(result, pushed, force) {
 }
 
 function writeVerdict(verdict) {
-  const rows = Object.entries(verdict)
-    .map(([key, value]) => key + "=" + value);
+  const rows = Object.entries(verdict).map(([key, value]) => key + "=" + value);
   writeFileSync(verdictPath, rows.join("\n") + "\n");
 }
 
@@ -476,7 +534,8 @@ function textOf(content) {
 
   return content
     .filter((item) => item?.type === "text" && typeof item.text === "string")
-    .map((item) => item.text).join("\n");
+    .map((item) => item.text)
+    .join("\n");
 }
 
 function eventLine(event) {
@@ -484,9 +543,13 @@ function eventLine(event) {
     case "entry_appended": {
       const { type, customType, data } = event.entry ?? {};
       entryCount += 1;
-      loadedEntry = type === "custom" && customType === "tack-loaded" &&
+      loadedEntry =
+        type === "custom" &&
+        customType === "tack-loaded" &&
         isDeepStrictEqual(data, {});
-      return loadedEntry ? "* extension entry: tack-loaded" : "* unexpected entry";
+      return loadedEntry
+        ? "* extension entry: tack-loaded"
+        : "* unexpected entry";
     }
     case "tool_execution_start": {
       const args = event.args?.command ?? JSON.stringify(event.args ?? {});
@@ -494,15 +557,19 @@ function eventLine(event) {
     }
     case "tool_execution_end": {
       const text = textOf(event.result?.content);
-      sawDeny ||= event.toolName === "bash" && event.isError === true &&
-        text === DENY;
-      sawTool ||= event.toolName === "guard_status" && event.isError === false &&
+      sawDeny ||=
+        event.toolName === "bash" && event.isError === true && text === DENY;
+      sawTool ||=
+        event.toolName === "guard_status" &&
+        event.isError === false &&
         text === TOOL;
       return (event.isError ? "<- error: " : "<- result: ") + text;
     }
     case "message_end": {
       const text = textOf(event.message?.content);
-      return event.message?.role === "assistant" && text ? "assistant: " + text : "";
+      return event.message?.role === "assistant" && text
+        ? "assistant: " + text
+        : "";
     }
     case "extension_error":
       validEvents = false;
@@ -519,7 +586,8 @@ function sessionLine(line) {
 
   try {
     event = JSON.parse(line);
-    if (typeof event?.type !== "string") throw new Error("missing Pi event type");
+    if (typeof event?.type !== "string")
+      throw new Error("missing Pi event type");
   } catch {
     validEvents = false;
     enqueue(left, "invalid Pi JSONL: " + line.slice(0, LEFT_W), LEFT_W);
@@ -542,10 +610,20 @@ function render() {
 async function runPi(t, env, pi) {
   const extension = path.join(t.dist, "pi", "extension.js");
   const args = [
-    "--mode", "json", "--no-extensions", "-e", extension, "push my branch",
+    "--mode",
+    "json",
+    "--no-extensions",
+    "-e",
+    extension,
+    "push my branch",
   ];
-  enqueue(left, "$ pi --mode json --no-extensions -e " +
-    path.relative(t.project, extension) + " 'push my branch'", LEFT_W);
+  enqueue(
+    left,
+    "$ pi --mode json --no-extensions -e " +
+      path.relative(t.project, extension) +
+      " 'push my branch'",
+    LEFT_W,
+  );
 
   const run = startChild(pi, args, { cwd: t.project, env, detached: true });
   addLines(run.child.stdout, sessionLine);
@@ -566,13 +644,16 @@ async function runProof(t, env) {
   enqueue(left, "$ " + command, LEFT_W);
 
   const run = startChild("/bin/sh", ["-c", command], {
-    cwd: t.project, env, detached: true,
+    cwd: t.project,
+    env,
+    detached: true,
   });
   addLines(run.child.stdout, (line) => enqueue(left, line, LEFT_W));
   addLines(run.child.stderr, (line) => enqueue(left, line, LEFT_W));
 
   const result = await bounded(run.done, PROOF_MS, "proof command");
-  if (result.code !== 0) throw new Error("proof command: " + exitDetail(result));
+  if (result.code !== 0)
+    throw new Error("proof command: " + exitDetail(result));
   if (!noPushRecorded()) throw new Error("git shim did not prove zero pushes");
 
   enqueue(left, PROOF, LEFT_W);
@@ -607,7 +688,9 @@ async function stopReplacementDaemon(t, bin) {
   if (!pid || !/^[1-9]\d{0,9}$/.test(pid)) return;
 
   const cmdline = "/proc/" + pid + "/cmdline";
-  const expected = [bin, "--socket", t.socket, "--plugin", plugin, ""].join("\0");
+  const expected = [bin, "--socket", t.socket, "--plugin", plugin, ""].join(
+    "\0",
+  );
   if (readOptional(cmdline) !== expected) return;
 
   try {
@@ -673,7 +756,8 @@ async function record() {
   process.stdout.write("Pi session".padEnd(LEFT_W) + "| daemon.log\n");
   watchTimer = setInterval(render, WATCH_MS);
   await Promise.race([
-    delay(READY_HOLD_MS, undefined, { ref: false }), stop.promise,
+    delay(READY_HOLD_MS, undefined, { ref: false }),
+    stop.promise,
   ]);
 
   if (stopping) throw new Error("recording stopped");
@@ -682,7 +766,8 @@ async function record() {
   render();
   await runProof(tree, env);
   await Promise.race([
-    delay(PROOF_HOLD_MS, undefined, { ref: false }), stop.promise,
+    delay(PROOF_HOLD_MS, undefined, { ref: false }),
+    stop.promise,
   ]);
 }
 

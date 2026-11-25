@@ -121,9 +121,12 @@ function lines(text) {
 }
 
 function executable(name) {
-  const candidates = name.includes(path.sep) ? [path.resolve(name)] :
-    (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)
-      .map((dir) => path.resolve(dir, name));
+  const candidates = name.includes(path.sep)
+    ? [path.resolve(name)]
+    : (process.env.PATH ?? "")
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((dir) => path.resolve(dir, name));
 
   for (const file of candidates) {
     try {
@@ -274,8 +277,16 @@ function record(request, reply) {
 `;
 
 function prepare(t, bins) {
-  for (const dir of [t.home, t.codexHome, t.config, t.data, t.cache, t.tmp,
-    t.bin, t.project]) {
+  for (const dir of [
+    t.home,
+    t.codexHome,
+    t.config,
+    t.data,
+    t.cache,
+    t.tmp,
+    t.bin,
+    t.project,
+  ]) {
     mkdirSync(dir, { mode: 0o700 });
   }
 
@@ -306,8 +317,17 @@ function initProject(t, env) {
   const origin = path.join(t.base, "origin.git");
   const steps = [
     ["init", "-q", "--initial-branch=main"],
-    ["-c", "user.name=Codex recording", "-c", "user.email=codex@example.invalid",
-      "commit", "--allow-empty", "--no-gpg-sign", "-qm", "Fixture"],
+    [
+      "-c",
+      "user.name=Codex recording",
+      "-c",
+      "user.email=codex@example.invalid",
+      "commit",
+      "--allow-empty",
+      "--no-gpg-sign",
+      "-qm",
+      "Fixture",
+    ],
     ["clone", "--bare", "-q", ".", origin],
     ["remote", "add", "origin", origin],
     ["fetch", "-q", "origin", "refs/heads/main:refs/remotes/origin/main"],
@@ -316,7 +336,11 @@ function initProject(t, env) {
 
   for (const args of steps) {
     const run = spawnSync(env.TACK_REAL_GIT, args, {
-      cwd: t.project, env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL",
+      cwd: t.project,
+      env,
+      encoding: "utf8",
+      timeout: 5_000,
+      killSignal: "SIGKILL",
     });
 
     if (run.error) throw run.error;
@@ -330,7 +354,10 @@ function initProject(t, env) {
 function start(bin, args, options) {
   if (finished) throw new Error("recording stopped");
 
-  const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], ...options });
+  const child = spawn(bin, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    ...options,
+  });
   const run = { child, error: undefined, done: undefined, kill: undefined };
 
   run.kill = () => {
@@ -344,7 +371,9 @@ function start(bin, args, options) {
       if (error.code !== "ESRCH") throw error;
     }
   };
-  child.once("error", (error) => { run.error = error; });
+  child.once("error", (error) => {
+    run.error = error;
+  });
   run.done = new Promise((resolve) => {
     child.once("close", (code, signal) => {
       children.delete(run);
@@ -414,7 +443,10 @@ async function buildAdapter(t, cli) {
 // The one step tack build leaves to the user: its generated fragment goes at
 // the top of Codex's config.toml, before any table there.
 function installFragment(t) {
-  const fragment = readFileSync(path.join(t.dist, "codex", "config.toml"), "utf8");
+  const fragment = readFileSync(
+    path.join(t.dist, "codex", "config.toml"),
+    "utf8",
+  );
   const configPath = path.join(t.codexHome, "config.toml");
   const config = readFileSync(configPath, "utf8");
 
@@ -427,14 +459,18 @@ async function startDaemon(t, bin) {
 
   try {
     run = start(bin, ["--socket", t.socket, "--plugin", plugin], {
-      cwd: t.project, env: sessionEnv, stdio: ["ignore", log, log],
+      cwd: t.project,
+      env: sessionEnv,
+      stdio: ["ignore", log, log],
     });
   } finally {
     closeSync(log);
   }
 
   let closed;
-  run.done.then((result) => { closed = result; });
+  run.done.then((result) => {
+    closed = result;
+  });
   const deadline = performance.now() + DAEMON_MS;
 
   while (!finished && performance.now() < deadline) {
@@ -451,13 +487,17 @@ async function startDaemon(t, bin) {
 
 async function startModel(session) {
   const args = [modelScript, session.script, session.requests];
-  const run = start(process.execPath, args, { cwd: tree.project, env: sessionEnv });
+  const run = start(process.execPath, args, {
+    cwd: tree.project,
+    env: sessionEnv,
+  });
   const ready = Promise.withResolvers();
   addLines(run.child.stdout, (line) => {
     const port = Number(line);
 
     if (/^[1-9]\d{0,4}$/.test(line) && port <= 65535) ready.resolve(port);
-    else ready.reject(new Error("invalid model port: " + line.slice(0, LEFT_W)));
+    else
+      ready.reject(new Error("invalid model port: " + line.slice(0, LEFT_W)));
   });
   addLines(run.child.stderr, (line) => show("model: " + line));
 
@@ -466,8 +506,11 @@ async function startModel(session) {
   });
 
   try {
-    const port = await bounded(Promise.race([ready.promise, exited]), MODEL_MS,
-      "model");
+    const port = await bounded(
+      Promise.race([ready.promise, exited]),
+      MODEL_MS,
+      "model",
+    );
     return { run, port };
   } catch (error) {
     run.kill();
@@ -488,7 +531,10 @@ async function setup() {
   tree = layout(mkdtempSync(path.join(root, "tack-rec-codex-")));
   tree.daemonBin = bins.daemon;
   for (const session of SESSIONS) {
-    session.requests = path.join(tree.base, "requests-" + session.script + ".jsonl");
+    session.requests = path.join(
+      tree.base,
+      "requests-" + session.script + ".jsonl",
+    );
   }
   sessionEnv = codexEnv(tree, bins);
   prepare(tree, bins);
@@ -510,8 +556,10 @@ function judgement() {
   const loaded = recorded.filter((line) => line === LOADED);
   // True for a push the git shim recorded, false for none, and undefined
   // while there is no recorder to read.
-  const pushed = recorder === undefined ? undefined :
-    recorded.some((line) => /^push(\s|$)/.test(line));
+  const pushed =
+    recorder === undefined
+      ? undefined
+      : recorded.some((line) => /^push(\s|$)/.test(line));
 
   return {
     pushed,
@@ -539,7 +587,9 @@ function printHeader(result, pushed, force) {
     result.push_denied ? "[1] git push blocked" : "[1] push pending",
     result.guard_status_ran ? "[2] guard_status ran" : "[2] guard pending",
     result.harmless_allowed ? "[3] git status allowed" : "[3] allow pending",
-    result.hook_called ? "[4] tack-hook carried every call" : "[4] hook pending",
+    result.hook_called
+      ? "[4] tack-hook carried every call"
+      : "[4] hook pending",
     result.extension_loaded ? "[5] adapter loaded" : "[5] load pending",
     noPushRow(result.push_denied, pushed),
   ];
@@ -564,13 +614,14 @@ function refresh(force = false) {
 }
 
 function writeVerdict(verdict) {
-  const rows = Object.entries(verdict)
-    .map(([key, value]) => key + "=" + value);
+  const rows = Object.entries(verdict).map(([key, value]) => key + "=" + value);
   writeFileSync(verdictPath, rows.join("\n") + "\n");
 }
 
 function pad(text, width) {
-  const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
+  const clean = String(text)
+    .replace(/[\r\t]/g, " ")
+    .trimEnd();
   return clean.length >= width ? clean.slice(0, width) : clean.padEnd(width);
 }
 
@@ -759,14 +810,18 @@ function reportBash(output) {
   }
 
   const ran = output.includes(RAN);
-  show(ran && current.script === "harmless" ? "<- " + ALLOW : "<- bash output:");
+  show(
+    ran && current.script === "harmless" ? "<- " + ALLOW : "<- bash output:",
+  );
   for (const line of lines(output)) show("   " + line);
 }
 
 function itemText(item) {
   if (typeof item?.error?.message === "string") return item.error.message;
 
-  return (item?.result?.content ?? []).map((part) => part?.text ?? "").join("\n");
+  return (item?.result?.content ?? [])
+    .map((part) => part?.text ?? "")
+    .join("\n");
 }
 
 function startedLines(item) {
@@ -787,8 +842,14 @@ function completedLines(item) {
     case "reasoning":
       return [];
     case "command_execution":
-      return ["<- shell " + item.status + ", exit " + item.exit_code + ": " +
-        String(item.aggregated_output ?? "").trim()];
+      return [
+        "<- shell " +
+          item.status +
+          ", exit " +
+          item.exit_code +
+          ": " +
+          String(item.aggregated_output ?? "").trim(),
+      ];
     case "mcp_tool_call": {
       const mark = item.status === "completed" ? "<- result: " : "<- error: ";
       return [mark + itemText(item)];
@@ -842,14 +903,28 @@ function sessionLine(line) {
 }
 
 async function runCodex(codexJs, session, port) {
-  const args = [codexJs, ...sessionFlags(port), "exec", "--json",
-    "--sandbox", "danger-full-access", "-m", "scripted", session.prompt];
-  show("$ codex exec --json --sandbox danger-full-access -m scripted '" +
-    session.prompt + "'");
+  const args = [
+    codexJs,
+    ...sessionFlags(port),
+    "exec",
+    "--json",
+    "--sandbox",
+    "danger-full-access",
+    "-m",
+    "scripted",
+    session.prompt,
+  ];
+  show(
+    "$ codex exec --json --sandbox danger-full-access -m scripted '" +
+      session.prompt +
+      "'",
+  );
   show("  model: loopback Responses on 127.0.0.1:" + port + ", no websocket");
 
   const run = start(process.execPath, args, {
-    cwd: tree.project, env: sessionEnv, detached: true,
+    cwd: tree.project,
+    env: sessionEnv,
+    detached: true,
   });
   addLines(run.child.stdout, sessionLine);
   addLines(run.child.stderr, (line) => {
@@ -905,7 +980,9 @@ function runProof(command) {
   let run;
   try {
     run = start("/bin/sh", ["-c", command], {
-      cwd: tree.project, env: sessionEnv, detached: true,
+      cwd: tree.project,
+      env: sessionEnv,
+      detached: true,
     });
   } catch (error) {
     show("proof failed: " + error.message);
@@ -954,7 +1031,9 @@ function ownDaemon(t) {
 
   const cmdline = readOptional("/proc/" + text + "/cmdline")?.split("\0");
   const prefix = [t.daemonBin, "--socket", t.socket];
-  return isDeepStrictEqual(cmdline?.slice(0, 3), prefix) ? Number(text) : undefined;
+  return isDeepStrictEqual(cmdline?.slice(0, 3), prefix)
+    ? Number(text)
+    : undefined;
 }
 
 // If the daemon this run started died, tack-hook may have started another.
@@ -978,8 +1057,11 @@ async function cleanUp() {
   try {
     for (const run of running) run.kill();
 
-    await bounded(Promise.all(running.map((run) => run.done)), DAEMON_MS,
-      "child exit").catch(() => {});
+    await bounded(
+      Promise.all(running.map((run) => run.done)),
+      DAEMON_MS,
+      "child exit",
+    ).catch(() => {});
     if (tree?.daemonBin) await stopReplacementDaemon(tree);
   } finally {
     if (tree) rmSync(tree.base, { recursive: true, force: true });
@@ -1037,7 +1119,9 @@ async function main() {
 
     refresh(true);
     printTitles();
-    show("$ tack build fixtures/safe-push --target codex: adapter in CODEX_HOME");
+    show(
+      "$ tack build fixtures/safe-push --target codex: adapter in CODEX_HOME",
+    );
     show("$ tack-daemon --socket tack.sock: daemon.log on the right");
     holdUntil = performance.now() + STEP_HOLD_MS;
     watchTimer = setInterval(() => {

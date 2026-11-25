@@ -130,7 +130,11 @@ function piEnv(tree) {
 function initProject(tree, env) {
   function git(...args) {
     const result = spawnSync(env.TACK_REAL_GIT, args, {
-      cwd: tree.project, env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL",
+      cwd: tree.project,
+      env,
+      encoding: "utf8",
+      timeout: 5_000,
+      killSignal: "SIGKILL",
     });
 
     if (result.error) throw result.error;
@@ -142,8 +146,17 @@ function initProject(tree, env) {
 
   const origin = path.join(tree.base, "origin.git");
   git("init", "--initial-branch=main");
-  git("-c", "user.name=Pi conformance", "-c", "user.email=pi@example.invalid",
-    "commit", "--allow-empty", "--no-gpg-sign", "-m", "Fixture");
+  git(
+    "-c",
+    "user.name=Pi conformance",
+    "-c",
+    "user.email=pi@example.invalid",
+    "commit",
+    "--allow-empty",
+    "--no-gpg-sign",
+    "-m",
+    "Fixture",
+  );
   git("clone", "--bare", ".", origin);
   git("remote", "add", "origin", origin);
   git("fetch", "origin", "refs/heads/main:refs/remotes/origin/main");
@@ -159,7 +172,11 @@ const hookShims = new Map([
 function installHook(tree, env, caseName) {
   const hook = path.join(tree.bin, "tack-hook");
 
-  if (caseName === "normal" || caseName === "harmless" || caseName === "daemon-crash") {
+  if (
+    caseName === "normal" ||
+    caseName === "harmless" ||
+    caseName === "daemon-crash"
+  ) {
     accessSync(hookBin, constants.X_OK);
     symlinkSync(hookBin, hook);
     return;
@@ -169,7 +186,8 @@ function installHook(tree, env, caseName) {
     // The isolated PATH omits target/debug; a dangling shim exercises ENOENT,
     // not a binary that started and returned a failing exit code.
     symlinkSync(path.join(tree.bin, "absent"), hook);
-    if (findExecutable("tack-hook", env.PATH)) throw new Error("tack-hook is not absent");
+    if (findExecutable("tack-hook", env.PATH))
+      throw new Error("tack-hook is not absent");
 
     return;
   }
@@ -177,8 +195,13 @@ function installHook(tree, env, caseName) {
   const script = hookShims.get(caseName);
   if (!script) throw new Error("no shim for " + caseName);
 
-  writeFileSync(hook, '#!/bin/sh\nprintf "%s\\n" invoked >> "$TACK_TEST_HOOK_ATTEMPTS"\n' +
-    script + "\n", { mode: 0o755 });
+  writeFileSync(
+    hook,
+    '#!/bin/sh\nprintf "%s\\n" invoked >> "$TACK_TEST_HOOK_ATTEMPTS"\n' +
+      script +
+      "\n",
+    { mode: 0o755 },
+  );
 }
 
 // The shared git shim on PATH. A case with an allowed command wraps it in a
@@ -196,14 +219,26 @@ function installGit(tree, expected) {
   copyFileSync(gitShim, tree.gitShim);
   chmodSync(tree.gitShim, 0o755);
   writeFileSync(tree.gitRuns, "");
-  writeFileSync(git, '#!/bin/sh\n"$TACK_TEST_GIT_SHIM" "$@"\nstatus=$?\n' +
-    "printf '%s %s\\n' \"$status\" \"$*\" >> \"$TACK_TEST_GIT_RUNS\"\n" +
-    'exit "$status"\n', { mode: 0o755 });
+  writeFileSync(
+    git,
+    '#!/bin/sh\n"$TACK_TEST_GIT_SHIM" "$@"\nstatus=$?\n' +
+      'printf \'%s %s\\n\' "$status" "$*" >> "$TACK_TEST_GIT_RUNS"\n' +
+      'exit "$status"\n',
+    { mode: 0o755 },
+  );
 }
 
 function prepare(tree, env, expected) {
-  for (const dir of [tree.home, tree.agent, tree.config, tree.data, tree.cache,
-    tree.tmp, tree.bin, tree.project]) {
+  for (const dir of [
+    tree.home,
+    tree.agent,
+    tree.config,
+    tree.data,
+    tree.cache,
+    tree.tmp,
+    tree.bin,
+    tree.project,
+  ]) {
     mkdirSync(dir);
   }
 
@@ -216,7 +251,8 @@ function prepare(tree, env, expected) {
   symlinkSync(process.execPath, path.join(tree.bin, "node"));
   installHook(tree, env, expected.name);
   initProject(tree, env);
-  if (expected.allow) writeFileSync(path.join(tree.project, UNTRACKED), "untracked\n");
+  if (expected.allow)
+    writeFileSync(path.join(tree.project, UNTRACKED), "untracked\n");
 }
 
 function writeConfig(agent, port) {
@@ -240,11 +276,17 @@ function writeConfig(agent, port) {
   };
 
   writeFileSync(path.join(agent, "models.json"), JSON.stringify(models) + "\n");
-  writeFileSync(path.join(agent, "settings.json"), JSON.stringify(settings) + "\n");
+  writeFileSync(
+    path.join(agent, "settings.json"),
+    JSON.stringify(settings) + "\n",
+  );
 }
 
 function startChild(bin, args, options, onStdout) {
-  const child = spawn(bin, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(bin, args, {
+    ...options,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   const output = { stdout: "", stderr: "", outputLimit: false };
   let closed = false;
   let spawnError;
@@ -276,7 +318,9 @@ function startChild(bin, args, options, onStdout) {
     });
   }
 
-  child.once("error", (error) => { spawnError = error.message; });
+  child.once("error", (error) => {
+    spawnError = error.message;
+  });
   const done = new Promise((resolve) => {
     child.once("close", (code, signal) => {
       closed = true;
@@ -290,16 +334,22 @@ function startChild(bin, args, options, onStdout) {
 async function modelPort(model, firstLine) {
   let timer;
   const deadline = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error("model did not report its port")), MODEL_START_MS);
+    timer = setTimeout(
+      () => reject(new Error("model did not report its port")),
+      MODEL_START_MS,
+    );
   });
   const exit = model.done.then((run) => {
-    throw new Error("model exited before ready: " + (run.spawnError ?? run.stderr));
+    throw new Error(
+      "model exited before ready: " + (run.spawnError ?? run.stderr),
+    );
   });
 
   try {
     const line = await Promise.race([firstLine, deadline, exit]);
     const port = Number(line);
-    if (!/^[1-9]\d{0,4}$/.test(line) || port > 65535) throw new Error("invalid port: " + line);
+    if (!/^[1-9]\d{0,4}$/.test(line) || port > 65535)
+      throw new Error("invalid port: " + line);
 
     return port;
   } finally {
@@ -314,13 +364,18 @@ function readEvents() {
 
   function collect(stdout) {
     // Pi JSONL is framed by LF only, even inside a Unicode transcript.
-    for (let end = stdout.indexOf("\n", offset); end !== -1; end = stdout.indexOf("\n", offset)) {
+    for (
+      let end = stdout.indexOf("\n", offset);
+      end !== -1;
+      end = stdout.indexOf("\n", offset)
+    ) {
       const line = stdout.slice(offset, end);
       offset = end + 1;
 
       try {
         const event = JSON.parse(line);
-        if (typeof event?.type !== "string") throw new Error("missing event type");
+        if (typeof event?.type !== "string")
+          throw new Error("missing event type");
 
         events.push({ event, at: performance.now() });
       } catch {
@@ -329,14 +384,21 @@ function readEvents() {
     }
   }
 
-  return { events, invalid, collect, complete: (stdout) => offset === stdout.length };
+  return {
+    events,
+    invalid,
+    collect,
+    complete: (stdout) => offset === stdout.length,
+  };
 }
 
 async function runPi(pi, tree, env) {
   const jsonl = readEvents();
   const child = startChild(
-    pi, ["--mode", "json", "--no-extensions", "-e", extension, "push my branch"],
-    { cwd: tree.project, env, detached: true }, jsonl.collect,
+    pi,
+    ["--mode", "json", "--no-extensions", "-e", extension, "push my branch"],
+    { cwd: tree.project, env, detached: true },
+    jsonl.collect,
   );
   const timer = setTimeout(child.stop, RUN_TIMEOUT_MS);
 
@@ -373,17 +435,22 @@ function hookConnected(socket) {
   const rows = readFileSync("/proc/net/unix", "utf8").split("\n");
 
   return rows.some((row) => {
-    const entry = row.match(/^\S+\s+\S+\s+\S+\s+00000000\s+0001\s+02\s+0 (.*)$/);
+    const entry = row.match(
+      /^\S+\s+\S+\s+\S+\s+00000000\s+0001\s+02\s+0 (.*)$/,
+    );
     return entry?.[1] === socket;
   });
 }
 
 async function crashAfterConnect(daemon, socket) {
-  await waitFor("tack-hook connection", RUN_TIMEOUT_MS, () => hookConnected(socket));
+  await waitFor("tack-hook connection", RUN_TIMEOUT_MS, () =>
+    hookConnected(socket),
+  );
   daemon.stop();
 
   const { signal } = await daemon.done;
-  if (signal !== "SIGKILL") throw new Error("tack-daemon did not exit via SIGKILL");
+  if (signal !== "SIGKILL")
+    throw new Error("tack-daemon did not exit via SIGKILL");
 }
 
 async function runCrash(pi, tree, env, daemon, socket) {
@@ -395,8 +462,9 @@ async function runCrash(pi, tree, env, daemon, socket) {
   // Pause the real daemon before invoking Pi so it cannot reply before the kill.
   daemon.sendSignal("SIGSTOP");
   const status = "/proc/" + daemon.pid + "/status";
-  await waitFor("stopped daemon", DAEMON_START_MS,
-    () => /^State:\s+T\b/m.test(readOptional(status) ?? ""));
+  await waitFor("stopped daemon", DAEMON_START_MS, () =>
+    /^State:\s+T\b/m.test(readOptional(status) ?? ""),
+  );
 
   const [session, crash] = await Promise.allSettled([
     runPi(pi, tree, env),
@@ -420,7 +488,8 @@ function ownProcess(pidFile, command) {
     if (error.code !== "ESRCH") throw error;
   }
 
-  if (!isDeepStrictEqual(cmdline?.split("\0"), [...command, ""])) return undefined;
+  if (!isDeepStrictEqual(cmdline?.split("\0"), [...command, ""]))
+    return undefined;
 
   return Number(text);
 }
@@ -447,51 +516,97 @@ async function stopOwned(pidFile, command) {
 function textOf(content) {
   if (!Array.isArray(content)) return "";
 
-  return content.filter((item) => item?.type === "text").map((item) => item.text).join("\n");
+  return content
+    .filter((item) => item?.type === "text")
+    .map((item) => item.text)
+    .join("\n");
 }
 
 function toolEvents(events, type, name) {
-  return events.filter(({ event }) => event.type === type &&
-    event.toolName === name && event.toolCallId === "call_" + name);
+  return events.filter(
+    ({ event }) =>
+      event.type === type &&
+      event.toolName === name &&
+      event.toolCallId === "call_" + name,
+  );
 }
 
 function checkSession(run, expected, check) {
   const events = run?.events ?? [];
-  const last = events.filter(({ event }) => event.type === "message_end").at(-1)?.event.message;
-  check("Pi completed with valid JSONL", run?.code === 0 && run.validJsonl &&
-    !run.outputLimit && last?.role === "assistant" && last.stopReason === "stop" &&
-    textOf(last.content) === "done", { exit: run?.code, signal: run?.signal, error: run?.spawnError });
+  const last = events.filter(({ event }) => event.type === "message_end").at(-1)
+    ?.event.message;
+  check(
+    "Pi completed with valid JSONL",
+    run?.code === 0 &&
+      run.validJsonl &&
+      !run.outputLimit &&
+      last?.role === "assistant" &&
+      last.stopReason === "stop" &&
+      textOf(last.content) === "done",
+    { exit: run?.code, signal: run?.signal, error: run?.spawnError },
+  );
 
-  const entries = events.filter(({ event }) => event.type === "entry_appended")
-    .map(({ event }) => [event.entry?.type, event.entry?.customType, event.entry?.data]);
-  const extensionErrors = events.filter(({ event }) => event.type === "extension_error");
-  const stderrErrors = run?.stderr.split("\n").filter((line) =>
-    /^(?:Extension error\b|Error:)|Failed to load extension/i.test(line));
-  check("exactly one tack-loaded entry and no extension errors",
+  const entries = events
+    .filter(({ event }) => event.type === "entry_appended")
+    .map(({ event }) => [
+      event.entry?.type,
+      event.entry?.customType,
+      event.entry?.data,
+    ]);
+  const extensionErrors = events.filter(
+    ({ event }) => event.type === "extension_error",
+  );
+  const stderrErrors = run?.stderr
+    .split("\n")
+    .filter((line) =>
+      /^(?:Extension error\b|Error:)|Failed to load extension/i.test(line),
+    );
+  check(
+    "exactly one tack-loaded entry and no extension errors",
     isDeepStrictEqual(entries, [["custom", "tack-loaded", {}]]) &&
-      extensionErrors.length === 0 && stderrErrors?.length === 0,
-    { entries, extensionErrors, stderrErrors });
+      extensionErrors.length === 0 &&
+      stderrErrors?.length === 0,
+    { entries, extensionErrors, stderrErrors },
+  );
 
-  const toolEnds = events.filter(({ event }) => event.type === "tool_execution_end");
+  const toolEnds = events.filter(
+    ({ event }) => event.type === "tool_execution_end",
+  );
   const names = toolEnds.map(({ event }) => event.toolName);
-  const expectedNames = expected.model === "normal" ? ["bash", "guard_status"] :
-    expected.model === "bash" || expected.model === "harmless" ? ["bash"] : ["guard_status"];
-  check("exact scripted tools finished", isDeepStrictEqual(names, expectedNames), names);
+  const expectedNames =
+    expected.model === "normal"
+      ? ["bash", "guard_status"]
+      : expected.model === "bash" || expected.model === "harmless"
+        ? ["bash"]
+        : ["guard_status"];
+  check(
+    "exact scripted tools finished",
+    isDeepStrictEqual(names, expectedNames),
+    names,
+  );
 }
 
 function checkBash(events, expected, check) {
   const [start] = toolEvents(events, "tool_execution_start", "bash");
   const [end] = toolEvents(events, "tool_execution_end", "bash");
   const text = textOf(end?.event.result?.content);
-  check("bash denied: " + expected.bash, end?.event.isError === true &&
-    text === expected.bash &&
-    isDeepStrictEqual(start?.event.args, { command: "git push origin main" }), text);
+  check(
+    "bash denied: " + expected.bash,
+    end?.event.isError === true &&
+      text === expected.bash &&
+      isDeepStrictEqual(start?.event.args, { command: "git push origin main" }),
+    text,
+  );
 
   if (expected.name === "timeout") {
     const elapsed = start && end ? Math.round(end.at - start.at) : undefined;
     // Pi emits start before tool_call. Allow scheduling jitter in CI but fail
     // if the extension returns early or waits for the 15 s shim to exit.
-    check("8500 ms hook deadline", elapsed >= 8_000 && elapsed <= 10_000, elapsed);
+    check(
+      "8500 ms hook deadline",
+      elapsed >= 8_000 && elapsed <= 10_000,
+      elapsed,
+    );
   }
 }
 
@@ -501,11 +616,21 @@ function checkStatus(events, normal, check) {
   const text = textOf(end?.event.result?.content);
 
   if (normal) {
-    check("guard_status: daemon ok", end?.event.isError === false &&
-      text === "guard_status: daemon ok" && isDeepStrictEqual(start?.event.args, {}), text);
+    check(
+      "guard_status: daemon ok",
+      end?.event.isError === false &&
+        text === "guard_status: daemon ok" &&
+        isDeepStrictEqual(start?.event.args, {}),
+      text,
+    );
   } else {
-    check("invalid guard_status: tack: malformed", end?.event.isError === true &&
-      text === "tack: malformed" && isDeepStrictEqual(start?.event.args, { unexpected: true }), text);
+    check(
+      "invalid guard_status: tack: malformed",
+      end?.event.isError === true &&
+        text === "tack: malformed" &&
+        isDeepStrictEqual(start?.event.args, { unexpected: true }),
+      text,
+    );
   }
 }
 
@@ -513,10 +638,14 @@ function checkStatus(events, normal, check) {
 // allowed Bash call in the harmless case, and none for a failure.
 function expectedRecorder(expected) {
   if (expected.name === "normal") {
-    return ["exact bash and guard_status tack-hook recorder lines", EXPECTED_RECORDER];
+    return [
+      "exact bash and guard_status tack-hook recorder lines",
+      EXPECTED_RECORDER,
+    ];
   }
 
-  if (expected.allow) return ["exact bash tack-hook recorder line", [EXPECTED_RECORDER[0]]];
+  if (expected.allow)
+    return ["exact bash tack-hook recorder line", [EXPECTED_RECORDER[0]]];
 
   return ["no tack-hook recorder lines", []];
 }
@@ -529,7 +658,11 @@ function checkRecorders(tree, expected, check) {
   const calls = lines?.filter((line) => !/^push(?: |$)/.test(line));
   const [label, want] = expectedRecorder(expected);
 
-  check("git shim recorded zero pushes", terminated && pushes?.length === 0, pushes);
+  check(
+    "git shim recorded zero pushes",
+    terminated && pushes?.length === 0,
+    pushes,
+  );
   check(label, terminated && isDeepStrictEqual(calls, want), calls);
 }
 
@@ -543,7 +676,8 @@ function modelSaw(tree) {
 
     try {
       const outputs = JSON.parse(line).outputs;
-      if (outputs && Object.hasOwn(outputs, "call_bash")) seen.push(outputs.call_bash);
+      if (outputs && Object.hasOwn(outputs, "call_bash"))
+        seen.push(outputs.call_bash);
     } catch {
       seen.push({ invalid: line });
     }
@@ -562,22 +696,37 @@ function checkAllowed(tree, events, check) {
   const [end] = toolEvents(events, "tool_execution_end", "bash");
   const text = textOf(end?.event.result?.content);
   const args = HARMLESS.slice("git ".length);
-  const runs = (readOptional(tree.gitRuns) ?? "").split("\n")
+  const runs = (readOptional(tree.gitRuns) ?? "")
+    .split("\n")
     .filter((line) => line.slice(line.indexOf(" ") + 1) === args);
   const lines = readOptional(path.join(tree.state, "daemon.log"))?.split("\n");
   const terminated = lines?.pop() === "";
   const seen = modelSaw(tree);
 
   // Pi returns the command's combined output as the text; git ends it with LF.
-  check("bash allowed: " + HARMLESS + " ran with no denial", end?.event.isError === false &&
-    isDeepStrictEqual(text.trimEnd().split("\n"), ["?? " + UNTRACKED]) &&
-    isDeepStrictEqual(start?.event.args, { command: HARMLESS }), text);
-  check("stand-in model saw the bash output", text !== "" && isDeepStrictEqual(seen, [text]),
-    seen);
-  check("git shim recorded " + HARMLESS + " executing once with exit status 0",
-    isDeepStrictEqual(runs, ["0 " + args]), readOptional(tree.gitRuns));
-  check("exact daemon log line: hook toolBefore allow", terminated &&
-    isDeepStrictEqual(lines, ["tack-daemon: hook toolBefore allow"]), lines);
+  check(
+    "bash allowed: " + HARMLESS + " ran with no denial",
+    end?.event.isError === false &&
+      isDeepStrictEqual(text.trimEnd().split("\n"), ["?? " + UNTRACKED]) &&
+      isDeepStrictEqual(start?.event.args, { command: HARMLESS }),
+    text,
+  );
+  check(
+    "stand-in model saw the bash output",
+    text !== "" && isDeepStrictEqual(seen, [text]),
+    seen,
+  );
+  check(
+    "git shim recorded " + HARMLESS + " executing once with exit status 0",
+    isDeepStrictEqual(runs, ["0 " + args]),
+    readOptional(tree.gitRuns),
+  );
+  check(
+    "exact daemon log line: hook toolBefore allow",
+    terminated &&
+      isDeepStrictEqual(lines, ["tack-daemon: hook toolBefore allow"]),
+    lines,
+  );
 }
 
 function checkCase(tree, run, expected, check) {
@@ -593,27 +742,45 @@ function checkCase(tree, run, expected, check) {
 
   const attempts = readOptional(tree.hookAttempts);
   if (expected.name === "invalid-guard-status") {
-    check("invalid guard_status did not invoke tack-hook", attempts === "", attempts);
+    check(
+      "invalid guard_status did not invoke tack-hook",
+      attempts === "",
+      attempts,
+    );
   } else if (hookShims.has(expected.name)) {
     check("failure shim invoked once", attempts === "invoked\n", attempts);
   }
 
   if (normal) {
-    const lines = readOptional(path.join(tree.state, "daemon.log"))?.split("\n");
+    const lines = readOptional(path.join(tree.state, "daemon.log"))?.split(
+      "\n",
+    );
     const terminated = lines?.pop() === "";
-    check("exact daemon log lines", terminated && isDeepStrictEqual(lines, [
-      "tack-daemon: hook toolBefore deny push blocked",
-      "tack-daemon: tool guard_status ok",
-    ]), lines);
+    check(
+      "exact daemon log lines",
+      terminated &&
+        isDeepStrictEqual(lines, [
+          "tack-daemon: hook toolBefore deny push blocked",
+          "tack-daemon: tool guard_status ok",
+        ]),
+      lines,
+    );
   }
 }
 
 function keepEvidence(tree, target) {
   mkdirSync(target, { recursive: true });
 
-  for (const file of [tree.requests, tree.recorder, tree.hookAttempts, tree.gitRuns,
-    path.join(tree.base, "pi-output.jsonl"), path.join(tree.base, "pi-stderr.log"),
-    path.join(tree.base, "model-stderr.log"), path.join(tree.state, "daemon.log")]) {
+  for (const file of [
+    tree.requests,
+    tree.recorder,
+    tree.hookAttempts,
+    tree.gitRuns,
+    path.join(tree.base, "pi-output.jsonl"),
+    path.join(tree.base, "pi-stderr.log"),
+    path.join(tree.base, "model-stderr.log"),
+    path.join(tree.state, "daemon.log"),
+  ]) {
     try {
       copyFileSync(file, path.join(target, path.basename(file)));
     } catch (error) {
@@ -635,11 +802,15 @@ async function runCase(pi, expected, root, target, check) {
     prepare(tree, env, expected);
 
     const { promise, resolve } = Promise.withResolvers();
-    model = startChild(process.execPath, [path.join(here, "model.mjs"), expected.model, tree.requests],
-      { cwd: tree.project, env }, (stdout) => {
+    model = startChild(
+      process.execPath,
+      [path.join(here, "model.mjs"), expected.model, tree.requests],
+      { cwd: tree.project, env },
+      (stdout) => {
         const end = stdout.indexOf("\n");
         if (end !== -1) resolve(stdout.slice(0, end));
-      });
+      },
+    );
 
     writeConfig(tree.agent, await modelPort(model, promise));
 
@@ -665,10 +836,16 @@ async function runCase(pi, expected, root, target, check) {
         if (daemon) {
           daemon.stop();
           const result = await daemon.done;
-          writeFileSync(path.join(tree.state, "daemon.log"), result.stdout + result.stderr);
+          writeFileSync(
+            path.join(tree.state, "daemon.log"),
+            result.stdout + result.stderr,
+          );
         }
 
-        await stopOwned(path.join(tree.state, "tack.lock"), [daemonBin, ...daemonArgs]);
+        await stopOwned(path.join(tree.state, "tack.lock"), [
+          daemonBin,
+          ...daemonArgs,
+        ]);
         await stopOwned(tree.sleepPid, ["/bin/sleep", "15"]);
       } finally {
         try {
@@ -682,13 +859,16 @@ async function runCase(pi, expected, root, target, check) {
 }
 
 async function main() {
-  if (process.platform !== "linux") throw new Error("Pi conformance requires disposable Linux");
+  if (process.platform !== "linux")
+    throw new Error("Pi conformance requires disposable Linux");
 
   const pi = findExecutable("pi", process.env.PATH ?? "");
   if (!pi) throw new Error("pi is not on PATH");
 
   const root = process.env.RUNNER_TEMP ?? tmpdir();
-  const artifacts = process.env.TACK_PI_ARTIFACTS ?? path.join(repoRoot, "target", "pi-conformance");
+  const artifacts =
+    process.env.TACK_PI_ARTIFACTS ??
+    path.join(repoRoot, "target", "pi-conformance");
   mkdirSync(artifacts, { recursive: true });
 
   const rows = [];
@@ -700,26 +880,44 @@ async function main() {
     caseRows.set(expected.name, own);
     const check = (label, ok, evidence) => {
       failed ||= ok !== true;
-      const row = (ok === true ? "PASS " : "FAIL ") + expected.name + ": " + label;
+      const row =
+        (ok === true ? "PASS " : "FAIL ") + expected.name + ": " + label;
       rows.push(row);
       own.push(row);
       console.log(row);
-      if (ok !== true) console.error("  evidence: " + JSON.stringify(evidence)?.slice(0, 4000));
+      if (ok !== true)
+        console.error(
+          "  evidence: " + JSON.stringify(evidence)?.slice(0, 4000),
+        );
     };
 
     try {
-      await runCase(pi, expected, root, path.join(artifacts, expected.name), check);
+      await runCase(
+        pi,
+        expected,
+        root,
+        path.join(artifacts, expected.name),
+        check,
+      );
     } catch (error) {
-      check("conformance evidence and cleanup", false, String(error.stack ?? error));
+      check(
+        "conformance evidence and cleanup",
+        false,
+        String(error.stack ?? error),
+      );
     }
   }
 
   // Its own row: every check of the harmless case passed, and it ran some.
   const harmless = caseRows.get("harmless") ?? [];
-  const allowed = harmless.length > 0 && harmless.every((row) => row.startsWith("PASS "));
+  const allowed =
+    harmless.length > 0 && harmless.every((row) => row.startsWith("PASS "));
   const allowedRow = "harmless_allowed=" + allowed;
   console.log(allowedRow);
-  writeFileSync(path.join(artifacts, "verdict.txt"), [...rows, allowedRow].join("\n") + "\n");
+  writeFileSync(
+    path.join(artifacts, "verdict.txt"),
+    [...rows, allowedRow].join("\n") + "\n",
+  );
 
   return failed || !allowed ? 1 : 0;
 }

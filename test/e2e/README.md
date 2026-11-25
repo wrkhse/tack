@@ -154,10 +154,10 @@ Each session runs a fresh test/codex/model.mjs on 127.0.0.1 as a custom
 Responses provider with `supports_websockets=false` and
 `CODEX_API_KEY=dummy`:
 
-| Session  | Prompt                 | The model calls                         |
-| -------- | ---------------------- | --------------------------------------- |
+| Session  | Prompt                 | The model calls                        |
+| -------- | ---------------------- | -------------------------------------- |
 | normal   | push my branch         | `git push origin main`, `guard_status` |
-| harmless | check the working tree | `git status --short`                    |
+| harmless | check the working tree | `git status --short`                   |
 
 The left pane, titled `Codex session`, shows the `codex exec --json`
 events and what Codex returned to the model for each Bash call, read from

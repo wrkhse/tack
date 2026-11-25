@@ -85,6 +85,67 @@ fn register_js() -> String {
     register.contents
 }
 
+/// Each `on(...)` registration as one statement, its lines joined as they
+/// read on one line: a formatter's line breaks, and the trailing comma it adds
+/// before a broken `)`, change nothing.
+fn registrations(script: &str) -> Vec<String> {
+    let mut calls = Vec::new();
+    let mut lines = script.lines().map(str::trim);
+
+    while let Some(line) = lines.next() {
+        if !line.starts_with("on(") {
+            continue;
+        }
+
+        let mut call = line.to_owned();
+
+        while !balanced(&call) || !call.ends_with(';') {
+            let next = lines.next().expect("a closed on(...) statement");
+            let opened = call.ends_with(['(', '[']);
+            let closing = next.starts_with([')', ']', '.']);
+
+            if !opened && !closing {
+                call.push(' ');
+            }
+
+            call.push_str(next);
+        }
+
+        calls.push(call.replace(",)", ")"));
+    }
+
+    calls
+}
+
+/// Whether the statement closes every parenthesis it opens, outside
+/// double-quoted strings.
+fn balanced(statement: &str) -> bool {
+    let code = unquoted(statement);
+
+    code.matches('(').count() == code.matches(')').count()
+}
+
+/// The text with each double-quoted string's contents left out.
+fn unquoted(text: &str) -> String {
+    let mut code = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+
+    for c in text.chars() {
+        if escaped {
+            escaped = false;
+        } else if quoted && c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        } else if !quoted {
+            code.push(c);
+        }
+    }
+
+    code
+}
+
 // tack build passes every protocol deny reason in this order, so the fixture
 // holds the list a real build emits.
 #[test]
@@ -227,10 +288,9 @@ fn every_timer_global_runs_on_the_mod_clock() {
 #[test]
 fn every_gating_registration_carries_a_catch() {
     let script = register_js();
-    let gating: Vec<&str> = script
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("on(\"tool.call\""))
+    let gating: Vec<String> = registrations(&script)
+        .into_iter()
+        .filter(|call| call.starts_with("on(\"tool.call\""))
         .collect();
 
     assert_eq!(
@@ -248,15 +308,11 @@ fn every_gating_registration_carries_a_catch() {
 #[test]
 fn every_hook_and_handler_is_a_top_level_function() {
     let script = register_js();
-    let calls: Vec<&str> = script
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("on("))
-        .collect();
+    let calls = registrations(&script);
 
     assert_eq!(calls.len(), 3);
 
-    for call in calls {
+    for call in &calls {
         let (registration, catch) = call.split_once(").catch(").expect("a .catch");
         let hook = registration.rsplit(", ").next().expect("a hook");
         let handler = catch.strip_suffix(");").expect("a closed .catch");

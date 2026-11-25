@@ -33,12 +33,12 @@ flowchart LR
 `POST /v1/chat/completions`. Each reply follows the script and the tool
 results already in the request:
 
-| Script       | Tool calls, in order                                              |
-| ------------ | ----------------------------------------------------------------- |
+| Script       | Tool calls, in order                                                               |
+| ------------ | ---------------------------------------------------------------------------------- |
 | normal       | `bash` with `{ "command": "git push origin main" }`, then `guard_status` with `{}` |
-| bash         | `bash` with `{ "command": "git push origin main" }`               |
-| harmless     | `bash` with `{ "command": "git status --short" }`                 |
-| invalid-tool | `guard_status` with `{ "unexpected": true }`                      |
+| bash         | `bash` with `{ "command": "git push origin main" }`                                |
+| harmless     | `bash` with `{ "command": "git status --short" }`                                  |
+| invalid-tool | `guard_status` with `{ "unexpected": true }`                                       |
 
 Once every call has a result, it replies with the text `done`. Each logged
 request holds the offered tool names, the result ids, and each result's text
@@ -53,15 +53,15 @@ model with a dummy key. Pi starts with
 `--mode json --no-extensions -e dist/pi/extension.js`, so only tack's
 extension loads.
 
-| Case                 | Passes when                                                     |
-| -------------------- | --------------------------------------------------------------- |
-| normal               | `tack: push blocked`; `guard_status: daemon ok`; the daemon log is exactly `tack-daemon: hook toolBefore deny push blocked` and `tack-daemon: tool guard_status ok` |
+| Case                 | Passes when                                                                                                                                                                                                                                                           |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| normal               | `tack: push blocked`; `guard_status: daemon ok`; the daemon log is exactly `tack-daemon: hook toolBefore deny push blocked` and `tack-daemon: tool guard_status ok`                                                                                                   |
 | harmless             | `git status --short` finishes with no error and its output is exactly `?? harmless.txt`; the stand-in received that same text as the bash result; `git-runs.log` holds exactly one `0 status --short`; the daemon log is exactly `tack-daemon: hook toolBefore allow` |
-| missing-hook         | `tack: hook_missing`                                            |
-| daemon-crash         | `tack: socket_closed`                                           |
-| timeout              | `tack: timeout`, between 8000 and 10000 ms                      |
-| invalid-reply        | `tack: malformed_reply`                                         |
-| invalid-guard-status | the call fails with `tack: malformed` and never reaches tack-hook |
+| missing-hook         | `tack: hook_missing`                                                                                                                                                                                                                                                  |
+| daemon-crash         | `tack: socket_closed`                                                                                                                                                                                                                                                 |
+| timeout              | `tack: timeout`, between 8000 and 10000 ms                                                                                                                                                                                                                            |
+| invalid-reply        | `tack: malformed_reply`                                                                                                                                                                                                                                               |
+| invalid-guard-status | the call fails with `tack: malformed` and never reaches tack-hook                                                                                                                                                                                                     |
 
 Every case also needs a clean exit with valid JSONL and the text `done`,
 exactly one `tack-loaded` entry and no extension error, exactly the scripted

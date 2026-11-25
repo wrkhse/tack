@@ -31,13 +31,17 @@ function chunk(delta, finishReason = null) {
 }
 
 function sse(fields) {
-  return "data: " + JSON.stringify({
-    id: "chatcmpl-tack-pi-" + handled,
-    object: "chat.completion.chunk",
-    created: 0,
-    model: "scripted",
-    ...fields,
-  }) + "\n\n";
+  return (
+    "data: " +
+    JSON.stringify({
+      id: "chatcmpl-tack-pi-" + handled,
+      object: "chat.completion.chunk",
+      created: 0,
+      model: "scripted",
+      ...fields,
+    }) +
+    "\n\n"
+  );
 }
 
 function toolCallTurn({ name, input }) {
@@ -45,7 +49,12 @@ function toolCallTurn({ name, input }) {
     role: "assistant",
     content: null,
     tool_calls: [
-      { index: 0, id: "call_" + name, type: "function", function: { name, arguments: "" } },
+      {
+        index: 0,
+        id: "call_" + name,
+        type: "function",
+        function: { name, arguments: "" },
+      },
     ],
   });
   const args = chunk({
@@ -60,34 +69,53 @@ function textOf(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
 
-  return content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("");
+  return content
+    .map((part) => (typeof part?.text === "string" ? part.text : ""))
+    .join("");
 }
 
 function replyFor(body) {
-  if (body?.model !== "scripted" || body.stream !== true || !Array.isArray(body.messages)) {
+  if (
+    body?.model !== "scripted" ||
+    body.stream !== true ||
+    !Array.isArray(body.messages)
+  ) {
     throw new Error("expected a streaming request to the scripted model");
   }
 
-  const tools = Array.isArray(body.tools) ? body.tools.map((tool) => tool?.function?.name) : [];
+  const tools = Array.isArray(body.tools)
+    ? body.tools.map((tool) => tool?.function?.name)
+    : [];
   const results = body.messages.filter((message) => message?.role === "tool");
   const resultIds = results.map((result) => result.tool_call_id);
   // What the model saw of each tool result, keyed by call id.
-  const outputs = Object.fromEntries(results.map((result) =>
-    [result.tool_call_id, textOf(result.content)]));
+  const outputs = Object.fromEntries(
+    results.map((result) => [result.tool_call_id, textOf(result.content)]),
+  );
 
   if (requestLog) {
-    appendFileSync(requestLog, JSON.stringify({ tools, resultIds, outputs }) + "\n");
+    appendFileSync(
+      requestLog,
+      JSON.stringify({ tools, resultIds, outputs }) + "\n",
+    );
   }
 
-  if (results.length > script.length ||
-      resultIds.some((id, index) => id !== "call_" + script[index].name)) {
-    throw new Error("unexpected tool result sequence: " + JSON.stringify(resultIds));
+  if (
+    results.length > script.length ||
+    resultIds.some((id, index) => id !== "call_" + script[index].name)
+  ) {
+    throw new Error(
+      "unexpected tool result sequence: " + JSON.stringify(resultIds),
+    );
   }
 
   const turn = script[results.length];
-  if (turn && !tools.includes(turn.name)) throw new Error("missing tool: " + turn.name);
+  if (turn && !tools.includes(turn.name))
+    throw new Error("missing tool: " + turn.name);
 
-  const reply = turn ? toolCallTurn(turn) : chunk({ role: "assistant", content: "done" }) + chunk({}, "stop");
+  const reply = turn
+    ? toolCallTurn(turn)
+    : chunk({ role: "assistant", content: "done" }) + chunk({}, "stop");
   const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 };
 
   return reply + sse({ choices: [], usage }) + "data: [DONE]\n\n";
@@ -100,7 +128,8 @@ function sendError(response, status, message) {
 
 function handle(request, response) {
   handled += 1;
-  if (handled > MAX_REQUESTS) return sendError(response, 429, "too many requests");
+  if (handled > MAX_REQUESTS)
+    return sendError(response, 429, "too many requests");
   if (request.url !== "/v1/chat/completions" || request.method !== "POST") {
     return sendError(response, 404, "not found");
   }
@@ -146,11 +175,15 @@ function handle(request, response) {
   });
 }
 
-const server = createServer({ headersTimeout: 5_000, requestTimeout: 10_000 }, handle);
+const server = createServer(
+  { headersTimeout: 5_000, requestTimeout: 10_000 },
+  handle,
+);
 
 server.listen(0, "127.0.0.1", () => {
   const address = server.address();
-  if (!address || typeof address === "string") throw new Error("model has no listening address");
+  if (!address || typeof address === "string")
+    throw new Error("model has no listening address");
 
   process.stdout.write(String(address.port) + "\n");
 });

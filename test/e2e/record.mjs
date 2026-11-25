@@ -104,11 +104,21 @@ function initRepo(dir) {
     const detail = result.stderr?.toString().trim() ?? "unknown error";
     throw new Error("git init failed: " + detail);
   }
-  spawnSync(git, [
-    "-c", "user.email=demo@tack",
-    "-c", "user.name=demo",
-    "commit", "--allow-empty", "-q", "-m", "initial",
-  ], { cwd: dir });
+  spawnSync(
+    git,
+    [
+      "-c",
+      "user.email=demo@tack",
+      "-c",
+      "user.name=demo",
+      "commit",
+      "--allow-empty",
+      "-q",
+      "-m",
+      "initial",
+    ],
+    { cwd: dir },
+  );
   spawnSync(git, ["update-ref", "refs/remotes/origin/main", "HEAD"], {
     cwd: dir,
   });
@@ -143,10 +153,12 @@ function writeConfig(configHome, pluginDir, baseUrl) {
 
 function buildPlugin(dist) {
   return new Promise((resolve, reject) => {
-    const child = track(spawn(tackCli, ["build", pluginSource, "--out", dist], {
-      cwd: repoRoot,
-      stdio: ["ignore", "pipe", "pipe"],
-    }));
+    const child = track(
+      spawn(tackCli, ["build", pluginSource, "--out", dist], {
+        cwd: repoRoot,
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
     let error = "";
     child.stdout.resume();
     child.stderr.setEncoding("utf8");
@@ -168,9 +180,11 @@ function buildPlugin(dist) {
 
 function startModel() {
   return new Promise((resolve, reject) => {
-    const child = track(spawn(process.execPath, [fakeModel], {
-      stdio: ["ignore", "pipe", "pipe"],
-    }));
+    const child = track(
+      spawn(process.execPath, [fakeModel], {
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
     let buffer = "";
     let error = "";
     let settled = false;
@@ -215,7 +229,8 @@ function startModel() {
 function judgement(daemonText, recorderText) {
   const denied = daemonText.includes("hook toolBefore deny");
   const guarded = daemonText.includes("tool guard_status ok");
-  const noPush = !recorderText.split("\n")
+  const noPush = !recorderText
+    .split("\n")
     .some((line) => line.startsWith("push"));
   return {
     denied,
@@ -231,7 +246,9 @@ function judgement(daemonText, recorderText) {
 }
 
 function pad(text, width) {
-  const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
+  const clean = String(text)
+    .replace(/[\r\t]/g, " ")
+    .trimEnd();
   return clean.length >= width ? clean.slice(0, width) : clean.padEnd(width);
 }
 
@@ -268,16 +285,13 @@ function refresh(force = false) {
 }
 
 function printTitles() {
-  process.stdout.write(
-    pad("OpenCode session", LEFT_W) + "| daemon.log\n",
-  );
+  process.stdout.write(pad("OpenCode session", LEFT_W) + "| daemon.log\n");
 }
 
 function emitRow() {
   const left = leftCursor < leftLines.length ? leftLines[leftCursor++] : "";
-  const right = rightCursor < rightLines.length
-    ? rightLines[rightCursor++]
-    : "";
+  const right =
+    rightCursor < rightLines.length ? rightLines[rightCursor++] : "";
   if (!left && !right) return;
   process.stdout.write(
     pad(left, LEFT_W) + "| " + right.slice(0, RIGHT_W) + "\n",
@@ -313,7 +327,8 @@ function collectLeft(text) {
 
 function collectRight(text) {
   pushWrapped(rightLines, text);
-  const evidence = text.includes("hook toolBefore deny") ||
+  const evidence =
+    text.includes("hook toolBefore deny") ||
     text.includes("tool guard_status ok");
   if (evidence) refresh();
   emitRow();
@@ -339,11 +354,13 @@ function finish() {
 }
 
 function runCommand(line) {
-  const child = track(spawn("sh", ["-c", line], {
-    cwd: projectDir,
-    env: sessionEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  }));
+  const child = track(
+    spawn("sh", ["-c", line], {
+      cwd: projectDir,
+      env: sessionEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  );
   addLines(child.stdout, collectLeft);
   addLines(child.stderr, collectLeft);
 
@@ -389,8 +406,15 @@ async function main() {
   daemonLog = path.join(stateDir, "daemon.log");
 
   for (const dir of [
-    home, configHome, stateDir, dataHome, cacheHome, tmpHome, binDir,
-    projectDir, dist,
+    home,
+    configHome,
+    stateDir,
+    dataHome,
+    cacheHome,
+    tmpHome,
+    binDir,
+    projectDir,
+    dist,
   ]) {
     mkdirSync(dir, { recursive: true });
   }
@@ -431,9 +455,11 @@ async function main() {
       OPENCODE_DISABLE_FILEWATCHER: "1",
     };
 
-    const tail = track(spawn("tail", ["-f", daemonLog], {
-      stdio: ["ignore", "pipe", "pipe"],
-    }));
+    const tail = track(
+      spawn("tail", ["-f", daemonLog], {
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
     addLines(tail.stdout, collectRight);
 
     refresh(true);

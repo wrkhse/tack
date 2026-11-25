@@ -186,13 +186,13 @@ the explicit generated extension loads. The runner requires:
 The five failure cases each require zero pushes and no successful-call
 recorder lines:
 
-| Case | Exact error result |
-| ---- | ------------------ |
-| `missing-hook` | `tack: hook_missing` |
-| `daemon-crash` | `tack: socket_closed` |
-| `timeout` | `tack: timeout` |
-| `invalid-reply` | `tack: malformed_reply` |
-| `invalid-guard-status` | `tack: malformed` |
+| Case                   | Exact error result      |
+| ---------------------- | ----------------------- |
+| `missing-hook`         | `tack: hook_missing`    |
+| `daemon-crash`         | `tack: socket_closed`   |
+| `timeout`              | `tack: timeout`         |
+| `invalid-reply`        | `tack: malformed_reply` |
+| `invalid-guard-status` | `tack: malformed`       |
 
 The timeout case uses a 15-second hook shim and requires a denial between
 8000 and 10000 ms. The invalid-tool case supplies `{ unexpected: true }`

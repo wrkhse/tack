@@ -1,4 +1,3 @@
-
 // Codex starts this as its "tack" MCP server over stdio, one JSON-RPC
 // message per line. It offers only guard_status and asks tack-hook for each
 // call; arguments are checked before tack-hook runs.
@@ -16,14 +15,21 @@ const TOOL = {
 };
 
 function toolError(reason) {
-  return { content: [{ type: "text", text: "tack: " + reason }], isError: true };
+  return {
+    content: [{ type: "text", text: "tack: " + reason }],
+    isError: true,
+  };
 }
 
 function emptyArguments(args) {
   if (args === undefined) return true;
 
-  return args !== null && typeof args === "object" && !Array.isArray(args) &&
-    Object.keys(args).length === 0;
+  return (
+    args !== null &&
+    typeof args === "object" &&
+    !Array.isArray(args) &&
+    Object.keys(args).length === 0
+  );
 }
 
 function createServer(write) {
@@ -49,20 +55,22 @@ function createServer(write) {
     const deadline = startDeadline(BUDGET_MS);
 
     try {
-      const result = await forward({
-        kind: "tool",
-        id,
-        version: PROTOCOL_VERSION,
-        name: "guard_status",
-        input: {},
-      }, deadline);
+      const result = await forward(
+        {
+          kind: "tool",
+          id,
+          version: PROTOCOL_VERSION,
+          name: "guard_status",
+          input: {},
+        },
+        deadline,
+      );
 
       if (!result.ok) return toolError(result.reason);
 
       const content = result.reply.content;
-      const item = Array.isArray(content) && content.length === 1
-        ? content[0]
-        : null;
+      const item =
+        Array.isArray(content) && content.length === 1 ? content[0] : null;
 
       if (item?.kind !== "text" || item.text !== STATUS) {
         return toolError("malformed_reply");
@@ -80,8 +88,11 @@ function createServer(write) {
   }
 
   async function handle(message) {
-    const valid = message !== null && typeof message === "object" &&
-      !Array.isArray(message) && message.jsonrpc === "2.0" &&
+    const valid =
+      message !== null &&
+      typeof message === "object" &&
+      !Array.isArray(message) &&
+      message.jsonrpc === "2.0" &&
       typeof message.method === "string";
 
     if (!valid) {
@@ -105,7 +116,8 @@ function createServer(write) {
     } else if (method === "tools/list") {
       reply(id, { tools: [TOOL] });
     } else if (method === "tools/call") {
-      if (params?.name === TOOL.name) reply(id, await guardStatus(params.arguments));
+      if (params?.name === TOOL.name)
+        reply(id, await guardStatus(params.arguments));
       else fail(id, -32602, "unknown tool");
     } else {
       fail(id, -32601, "method not found");
@@ -117,9 +129,12 @@ function createServer(write) {
 
 function parseLine(bytes) {
   try {
-    return { ok: true, message: JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-    ) };
+    return {
+      ok: true,
+      message: JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      ),
+    };
   } catch {
     return { ok: false };
   }
@@ -134,7 +149,11 @@ function serve(stdin, write) {
   let oversized = false;
 
   function parseError() {
-    write({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
+    write({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "parse error" },
+    });
   }
 
   function line() {

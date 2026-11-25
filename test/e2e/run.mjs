@@ -37,7 +37,10 @@ function report(label, ok, evidence) {
     failures += 1;
     console.error("FAIL " + label);
   }
-  const shown = evidence.length > 4000 ? evidence.slice(0, 4000) + " ... (truncated)" : evidence;
+  const shown =
+    evidence.length > 4000
+      ? evidence.slice(0, 4000) + " ... (truncated)"
+      : evidence;
   console.log("  evidence: " + shown.replace(/\n/g, " | "));
 }
 
@@ -165,7 +168,9 @@ function startModel() {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      reject(new Error("fake model exited with " + code + "; stderr: " + stderr));
+      reject(
+        new Error("fake model exited with " + code + "; stderr: " + stderr),
+      );
     });
   });
 }
@@ -174,7 +179,15 @@ function runOpenCode(env, projectDir, onChild) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "opencode",
-      ["run", "--standalone", "--format", "json", "-m", "fake/scripted", "push it"],
+      [
+        "run",
+        "--standalone",
+        "--format",
+        "json",
+        "-m",
+        "fake/scripted",
+        "push it",
+      ],
       { cwd: projectDir, env, stdio: ["ignore", "pipe", "pipe"] },
     );
     onChild(child);
@@ -269,7 +282,8 @@ async function main() {
     const run = await runOpenCode(env, projectDir, (child) => {
       opencode = child;
     });
-    const evidence = "exit=" + run.code + ", captured " + run.output.length + " bytes";
+    const evidence =
+      "exit=" + run.code + ", captured " + run.output.length + " bytes";
 
     const recorded = readOptional(recorder)
       .split("\n")
@@ -284,18 +298,35 @@ async function main() {
     const daemonLog = readOptional(path.join(stateDir, "daemon.log"));
     const deny = "hook toolBefore deny push blocked";
     const tool = "tool guard_status ok";
-    report("daemon denied the push", daemonLog.includes(deny), "daemon.log: " + daemonLog);
-    report("daemon ran guard_status", daemonLog.includes(tool), "daemon.log: " + daemonLog);
+    report(
+      "daemon denied the push",
+      daemonLog.includes(deny),
+      "daemon.log: " + daemonLog,
+    );
+    report(
+      "daemon ran guard_status",
+      daemonLog.includes(tool),
+      "daemon.log: " + daemonLog,
+    );
 
     const context = run.output + " [run " + evidence + "]";
-    report("deny reason reached the session", context.includes("push blocked"), context);
+    report(
+      "deny reason reached the session",
+      context.includes("push blocked"),
+      context,
+    );
     report(
       "tool result reached the session",
       context.includes("guard_status: daemon ok"),
       context,
     );
 
-    if (run.timedOut) report("opencode run finished within 90s", false, "run was killed at 90s");
+    if (run.timedOut)
+      report(
+        "opencode run finished within 90s",
+        false,
+        "run was killed at 90s",
+      );
   } finally {
     if (opencode && opencode.exitCode === null) opencode.kill("SIGKILL");
     if (model && model.child.exitCode === null) model.child.kill("SIGKILL");

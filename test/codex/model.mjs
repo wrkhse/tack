@@ -36,7 +36,9 @@ function textOf(output) {
   if (typeof output === "string") return output;
   if (!Array.isArray(output)) return "";
 
-  return output.map((part) => (typeof part?.text === "string" ? part.text : "")).join("");
+  return output
+    .map((part) => (typeof part?.text === "string" ? part.text : ""))
+    .join("");
 }
 
 // Top-level tool names, and namespace children as "<namespace>.<name>".
@@ -60,7 +62,8 @@ function toolNames(tools) {
 // guard_status as a namespace child or a top-level function, in the offered
 // tools or in a tool_search_output from an earlier turn.
 function findStatus(tools, input) {
-  const searched = input.filter((item) => item?.type === "tool_search_output")
+  const searched = input
+    .filter((item) => item?.type === "tool_search_output")
     .flatMap((item) => (Array.isArray(item.tools) ? item.tools : []));
 
   for (const tool of [...tools, ...searched]) {
@@ -69,7 +72,10 @@ function findStatus(tools, input) {
       if (child) return { namespace: tool.name, name: "guard_status" };
     }
 
-    if (tool?.type === "function" && /(^|__)guard_status$/.test(tool.name ?? "")) {
+    if (
+      tool?.type === "function" &&
+      /(^|__)guard_status$/.test(tool.name ?? "")
+    ) {
       return { name: tool.name };
     }
   }
@@ -150,7 +156,10 @@ function outputsOf(input) {
   for (const item of input) {
     if (typeof item?.call_id !== "string") continue;
 
-    if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
+    if (
+      item.type === "function_call_output" ||
+      item.type === "custom_tool_call_output"
+    ) {
       outputs[item.call_id] = textOf(item.output);
     } else if (item.type === "tool_search_output") {
       outputs[item.call_id] = JSON.stringify(item.tools ?? []);
@@ -161,7 +170,11 @@ function outputsOf(input) {
 }
 
 function sse(events) {
-  return events.map((event) => "event: " + event.type + "\ndata: " + JSON.stringify(event) + "\n\n")
+  return events
+    .map(
+      (event) =>
+        "event: " + event.type + "\ndata: " + JSON.stringify(event) + "\n\n",
+    )
     .join("");
 }
 
@@ -174,8 +187,13 @@ function replyFor(body) {
   const outputs = outputsOf(body.input);
   const item = nextItem(tools, body.input, outputs);
   const id = "resp_tack_codex_" + handled;
-  const usage = { input_tokens: 1, input_tokens_details: null, output_tokens: 1,
-    output_tokens_details: null, total_tokens: 2 };
+  const usage = {
+    input_tokens: 1,
+    input_tokens_details: null,
+    output_tokens: 1,
+    output_tokens_details: null,
+    total_tokens: 2,
+  };
 
   log({
     request: handled,
@@ -203,7 +221,8 @@ function decode(buffer, encoding) {
   if (!encoding || encoding === "identity") return buffer;
   if (encoding === "gzip") return zlib.gunzipSync(buffer);
   if (encoding === "br") return zlib.brotliDecompressSync(buffer);
-  if (encoding === "zstd" && zlib.zstdDecompressSync) return zlib.zstdDecompressSync(buffer);
+  if (encoding === "zstd" && zlib.zstdDecompressSync)
+    return zlib.zstdDecompressSync(buffer);
 
   throw new Error("unsupported content-encoding: " + encoding);
 }
@@ -212,7 +231,10 @@ function answer(request, response, chunks) {
   let reply;
 
   try {
-    const raw = decode(Buffer.concat(chunks), request.headers["content-encoding"]);
+    const raw = decode(
+      Buffer.concat(chunks),
+      request.headers["content-encoding"],
+    );
     reply = replyFor(JSON.parse(raw.toString("utf8")));
   } catch (error) {
     log({ request: handled, path: request.url, error: error.message });
@@ -220,17 +242,26 @@ function answer(request, response, chunks) {
     return;
   }
 
-  response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  response.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+  });
   response.end(reply);
 }
 
 function handle(request, response) {
   handled += 1;
-  if (handled > MAX_REQUESTS) return sendError(response, 429, "too many requests");
+  if (handled > MAX_REQUESTS)
+    return sendError(response, 429, "too many requests");
 
   const route = (request.url ?? "").split("?")[0];
   if (request.method !== "POST" || route !== "/v1/responses") {
-    log({ request: handled, method: request.method, path: request.url, status: 404 });
+    log({
+      request: handled,
+      method: request.method,
+      path: request.url,
+      status: 404,
+    });
     return sendError(response, 404, "not found");
   }
 
@@ -258,17 +289,23 @@ function handle(request, response) {
   });
 }
 
-const server = createServer({ headersTimeout: 5_000, requestTimeout: 30_000 }, handle);
+const server = createServer(
+  { headersTimeout: 5_000, requestTimeout: 30_000 },
+  handle,
+);
 
 // Codex falls back to HTTP when the Responses websocket is refused.
 server.on("upgrade", (request, socket) => {
   log({ request: handled, method: "UPGRADE", path: request.url, status: 404 });
-  socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+  socket.end(
+    "HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n",
+  );
 });
 
 server.listen(0, "127.0.0.1", () => {
   const address = server.address();
-  if (!address || typeof address === "string") throw new Error("model has no listening address");
+  if (!address || typeof address === "string")
+    throw new Error("model has no listening address");
 
   process.stdout.write(String(address.port) + "\n");
 });

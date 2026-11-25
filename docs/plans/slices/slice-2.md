@@ -248,9 +248,7 @@ tack build fixtures/safe-push --out dist --target claude
 
 ```json
 {
-  "modules": [
-    "./register.js"
-  ]
+  "modules": ["./register.js"]
 }
 ```
 
@@ -260,8 +258,9 @@ export const register = (on, options) => {
   on("tool.call", { tool: "Bash" }, guardBash).catch(refuseFailed);
 
   for (const spec of TOOLS) {
-    on("tool.call", { tool: TOOL_PREFIX + spec.name }, serveTool)
-      .catch(refuseFailed);
+    on("tool.call", { tool: TOOL_PREFIX + spec.name }, serveTool).catch(
+      refuseFailed,
+    );
   }
 };
 ```
@@ -270,16 +269,16 @@ export const register = (on, options) => {
 the model's list. The mod holds no rule logic; it maps each reply to Claude
 Code's answer:
 
-| Reply from `tack-hook`         | The mod answers                           |
-| ------------------------------ | ----------------------------------------- |
-| `allow`                        | runs the call unchanged                   |
-| `deny` with a reason           | `{ deny: "tack: <reason>" }`              |
-| `rewrite` of the Bash input    | runs the call with the fields overlaid    |
-| tool content                   | `{ result: "<text>" }`                    |
-| an error of a named kind       | `{ deny: "tack: <kind>" }`                |
-| bad JSON, wrong id or kind     | `{ deny: "tack: malformed_reply" }`       |
-| a run that cannot start        | `{ deny: "tack: daemon_error" }`          |
-| a run past the budget          | `{ deny: "tack: timeout" }`               |
+| Reply from `tack-hook`      | The mod answers                        |
+| --------------------------- | -------------------------------------- |
+| `allow`                     | runs the call unchanged                |
+| `deny` with a reason        | `{ deny: "tack: <reason>" }`           |
+| `rewrite` of the Bash input | runs the call with the fields overlaid |
+| tool content                | `{ result: "<text>" }`                 |
+| an error of a named kind    | `{ deny: "tack: <kind>" }`             |
+| bad JSON, wrong id or kind  | `{ deny: "tack: malformed_reply" }`    |
+| a run that cannot start     | `{ deny: "tack: daemon_error" }`       |
+| a run past the budget       | `{ deny: "tack: timeout" }`            |
 
 An error kind outside the deny reasons, such as `malformed`, denies
 `daemon_error`.

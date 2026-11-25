@@ -164,3 +164,55 @@ jobs:
           path: mutants.out
           if-no-files-found: ignore
 
+  # tidy runs here, never on a developer's machine. Exit 1 lists unformatted
+  # files; exit 2 is a file that would not parse or a bad option.
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The archive URL and its SHA-256 are pinned, so CI installs one immutable
+      # tidy release and never pipes a download into a shell.
+      - name: Install tidy
+        run: |
+          set -euo pipefail
+
+          bin="$RUNNER_TEMP/tidy-bin"
+          mkdir -p "$bin"
+          cd "$bin"
+          curl -fsSLO https://github.com/lukeed/tidy/releases/download/v2.0.0/tidy-x86_64-unknown-linux-musl.tar.gz
+          echo '4b8166b1cdde610fd783f2d59511b0fb35d15ef96069ef20642b948ab90907ea  tidy-x86_64-unknown-linux-musl.tar.gz' | sha256sum -c -
+          tar -xzf tidy-x86_64-unknown-linux-musl.tar.gz
+          chmod +x tidy
+          echo "$bin" >> "$GITHUB_PATH"
+      # tidy check exits 1 for unformatted files and 2 for a parse or config
+      # error; the case below reports each apart, and both fail the job.
+      - name: Check formatting
+        run: |
+          set -uo pipefail
+
+          set +e
+          tidy check .
+          status=$?
+          set -e
+
+          case "$status" in
+            0) ;;
+            1)
+              echo "::error::tidy check: the files listed above are not formatted" >&2
+              exit 1
+              ;;
+            2)
+              echo "::error::tidy check: a file would not parse, a path could not be read, or tidy.json is invalid" >&2
+              exit 2
+              ;;
+            *)
+              echo "::error::tidy check exited with unexpected status $status" >&2
+              exit "$status"
+              ;;
+          esac
+

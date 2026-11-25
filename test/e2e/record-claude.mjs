@@ -121,7 +121,9 @@ function installModRecorder(target, recorderFile, execFile) {
 
   for (const placeholder of ["@RECORDER@", "@EXEC@"]) {
     if (template.split(placeholder).length !== 2) {
-      throw new Error("mod-recorder must hold " + placeholder + " exactly once");
+      throw new Error(
+        "mod-recorder must hold " + placeholder + " exactly once",
+      );
     }
   }
 
@@ -153,8 +155,15 @@ function layout(base) {
   t.daemonLog = path.join(t.stateDir, "daemon.log");
 
   for (const dir of [
-    t.home, t.claudeConfig, t.configHome, t.dataHome, t.cacheHome,
-    t.tmpHome, t.binDir, t.projectDir, t.dist,
+    t.home,
+    t.claudeConfig,
+    t.configHome,
+    t.dataHome,
+    t.cacheHome,
+    t.tmpHome,
+    t.binDir,
+    t.projectDir,
+    t.dist,
   ]) {
     mkdirSync(dir, { recursive: true });
   }
@@ -188,11 +197,20 @@ function initRepo(t, git) {
   const env = { ...process.env, HOME: t.home, XDG_CONFIG_HOME: t.configHome };
   const steps = [
     ["init", ["init", "-q"]],
-    ["commit", [
-      "-c", "user.email=demo@tack",
-      "-c", "user.name=demo",
-      "commit", "--allow-empty", "-q", "-m", "initial",
-    ]],
+    [
+      "commit",
+      [
+        "-c",
+        "user.email=demo@tack",
+        "-c",
+        "user.name=demo",
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "initial",
+      ],
+    ],
     ["update-ref", ["update-ref", "refs/remotes/origin/main", "HEAD"]],
   ];
 
@@ -231,10 +249,12 @@ function sessionEnvFor(t, port, realGit) {
 function buildMod(dist) {
   return new Promise((resolve, reject) => {
     const args = ["build", pluginSource, "--out", dist, "--target", "claude"];
-    const child = track(spawn(tackCli, args, {
-      cwd: repoRoot,
-      stdio: ["ignore", "pipe", "pipe"],
-    }));
+    const child = track(
+      spawn(tackCli, args, {
+        cwd: repoRoot,
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
     let error = "";
 
     child.stdout.resume();
@@ -260,9 +280,11 @@ function buildMod(dist) {
 
 function startModel(requestLog) {
   return new Promise((resolve, reject) => {
-    const child = track(spawn(process.execPath, [modelScript, requestLog], {
-      stdio: ["ignore", "pipe", "pipe"],
-    }));
+    const child = track(
+      spawn(process.execPath, [modelScript, requestLog], {
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
     let buffer = "";
     let error = "";
     let settled = false;
@@ -288,7 +310,8 @@ function startModel(requestLog) {
 
       for (const line of lines) {
         const value = line.trim();
-        if (/^\d+$/.test(value) && Number(value) > 0) settle(null, Number(value));
+        if (/^\d+$/.test(value) && Number(value) > 0)
+          settle(null, Number(value));
       }
     });
 
@@ -311,7 +334,8 @@ function judgement(t, sessionDeny, sessionTool) {
 
   const denied = daemonText.includes(DAEMON_DENY) && sessionDeny;
   const guarded = daemonText.includes(DAEMON_TOOL) && sessionTool;
-  const noPush = !recorderText.split("\n")
+  const noPush = !recorderText
+    .split("\n")
     .some((line) => /^push(\s|$)/.test(line.trim()));
   const hookCalled = modText.trim().length > 0;
 
@@ -331,7 +355,9 @@ function judgement(t, sessionDeny, sessionTool) {
 }
 
 function pad(text, width) {
-  const clean = String(text).replace(/[\r\t]/g, " ").trimEnd();
+  const clean = String(text)
+    .replace(/[\r\t]/g, " ")
+    .trimEnd();
   return clean.length >= width ? clean.slice(0, width) : clean.padEnd(width);
 }
 
@@ -345,7 +371,10 @@ function noPushRow(denied, noPush) {
 
 function printHeader(result, force) {
   const state = [
-    result.denied, result.guarded, result.hookCalled, result.noPush,
+    result.denied,
+    result.guarded,
+    result.hookCalled,
+    result.noPush,
   ].join(":");
   if (!force && state === headerState) return;
   headerState = state;
@@ -443,9 +472,8 @@ function blockLines(block) {
 
   if (block?.type === "tool_use") {
     const input = block.input ?? {};
-    const shown = typeof input.command === "string"
-      ? input.command
-      : JSON.stringify(input);
+    const shown =
+      typeof input.command === "string" ? input.command : JSON.stringify(input);
     return ["-> " + block.name + ": " + shown];
   }
 
@@ -480,8 +508,9 @@ function frameLines(frame) {
 }
 
 function sessionLine(line) {
-  const latched = (!sawDeny && line.includes(DENY_REASON))
-    || (!sawTool && line.includes(TOOL_RESULT));
+  const latched =
+    (!sawDeny && line.includes(DENY_REASON)) ||
+    (!sawTool && line.includes(TOOL_RESULT));
   if (line.includes(DENY_REASON)) sawDeny = true;
   if (line.includes(TOOL_RESULT)) sawTool = true;
 
@@ -544,8 +573,15 @@ function runClaude(pluginDir) {
   if (finished) return;
 
   const args = [
-    "-p", "--plugin-dir", pluginDir, "--dangerously-skip-permissions",
-    "--model", "scripted", "--output-format", "stream-json", "--verbose",
+    "-p",
+    "--plugin-dir",
+    pluginDir,
+    "--dangerously-skip-permissions",
+    "--model",
+    "scripted",
+    "--output-format",
+    "stream-json",
+    "--verbose",
     "push my branch",
   ];
   const shown = args.map((arg) => {
@@ -553,11 +589,13 @@ function runClaude(pluginDir) {
   });
   collectLeft("$ claude " + shown.slice(0, -1).join(" ") + " 'push my branch'");
 
-  const child = track(spawn("claude", args, {
-    cwd: tree.projectDir,
-    env: sessionEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  }));
+  const child = track(
+    spawn("claude", args, {
+      cwd: tree.projectDir,
+      env: sessionEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  );
   addLines(child.stdout, sessionLine);
   addLines(child.stderr, sessionLine);
 
@@ -579,11 +617,13 @@ function runClaude(pluginDir) {
 function runCommand(line) {
   if (!sessionEnv) return;
 
-  const child = track(spawn("sh", ["-c", line], {
-    cwd: tree.projectDir,
-    env: sessionEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  }));
+  const child = track(
+    spawn("sh", ["-c", line], {
+      cwd: tree.projectDir,
+      env: sessionEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  );
   addLines(child.stdout, collectLeft);
   addLines(child.stderr, collectLeft);
 
@@ -674,7 +714,8 @@ async function main() {
   try {
     tree = layout(mkdtempSync(path.join(root, "tack-rec-claude-")));
     const realGit = findExecutable("git");
-    if (!realGit) throw new Error("git is required on PATH for the scratch repo");
+    if (!realGit)
+      throw new Error("git is required on PATH for the scratch repo");
 
     installShims(tree);
     initRepo(tree, realGit);

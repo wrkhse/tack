@@ -38,7 +38,9 @@ function toolUseReply(name, input) {
 
 function toolNames(body) {
   const tools = Array.isArray(body.tools) ? body.tools : [];
-  return tools.map((tool) => tool?.name).filter((name) => typeof name === "string");
+  return tools
+    .map((tool) => tool?.name)
+    .filter((name) => typeof name === "string");
 }
 
 function resultText(content) {
@@ -99,7 +101,9 @@ function messageHead(model) {
 }
 
 function sse(type, data) {
-  return "event: " + type + "\ndata: " + JSON.stringify({ type, ...data }) + "\n\n";
+  return (
+    "event: " + type + "\ndata: " + JSON.stringify({ type, ...data }) + "\n\n"
+  );
 }
 
 function streamBody(model, reply) {

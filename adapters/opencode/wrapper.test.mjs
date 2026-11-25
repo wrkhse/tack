@@ -4,7 +4,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
-  existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import net from "node:net";
@@ -61,11 +65,19 @@ function buildWrapper() {
   execFileSync(
     "cargo",
     [
-      "run", "--locked", "-p", "tack-cli", "--",
-      "build", path.join(repoRoot, "fixtures/safe-push"),
-      "--out", buildDir,
-      "--call-timeout-ms", String(CALL_TIMEOUT_MS),
-      "--start-timeout-ms", String(START_TIMEOUT_MS),
+      "run",
+      "--locked",
+      "-p",
+      "tack-cli",
+      "--",
+      "build",
+      path.join(repoRoot, "fixtures/safe-push"),
+      "--out",
+      buildDir,
+      "--call-timeout-ms",
+      String(CALL_TIMEOUT_MS),
+      "--start-timeout-ms",
+      String(START_TIMEOUT_MS),
     ],
     { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] },
   );
@@ -124,24 +136,36 @@ function fakeContext() {
   const ctx = {
     tool: {
       hook(name, callback) {
-        assert.equal(name, "execute.before", "hook name must be execute.before");
         assert.equal(
-          typeof callback, "function", "hook callback must be a function",
+          name,
+          "execute.before",
+          "hook name must be execute.before",
+        );
+        assert.equal(
+          typeof callback,
+          "function",
+          "hook callback must be a function",
         );
         hooks.set(name, callback);
         return register();
       },
       transform(callback) {
         assert.equal(
-          typeof callback, "function", "transform callback must be a function",
+          typeof callback,
+          "function",
+          "transform callback must be a function",
         );
         const editor = {
           add(definition) {
             assert.equal(
-              typeof definition.name, "string", "tool name must be a string",
+              typeof definition.name,
+              "string",
+              "tool name must be a string",
             );
             assert.equal(
-              typeof definition.execute, "function", "tool needs execute()",
+              typeof definition.execute,
+              "function",
+              "tool needs execute()",
             );
             added.push(definition);
             return definition;
@@ -163,7 +187,9 @@ function pickBefore(hooks, transforms) {
 
   assert.ok(before, "the wrapper registered no execute.before handler");
   assert.equal(
-    typeof before[1], "function", "the before callback is not a function",
+    typeof before[1],
+    "function",
+    "the before callback is not a function",
   );
 
   return before[1];
@@ -176,14 +202,28 @@ async function loadPlugin(env, modulePath = wrapperPath) {
 
   const plugin = require(modulePath);
   assert.equal(
-    typeof plugin.setup, "function", "the wrapper does not export setup()",
+    typeof plugin.setup,
+    "function",
+    "the wrapper does not export setup()",
   );
 
   const fake = fakeContext();
   const cleanup = await plugin.setup(fake.ctx);
-  assert.equal(typeof cleanup, "function", "setup must return a cleanup function");
-  assert.equal(fake.hooks.size, 1, "one execute.before hook must be registered");
-  assert.equal(fake.transforms.size, 1, "one tool transform must be registered");
+  assert.equal(
+    typeof cleanup,
+    "function",
+    "setup must return a cleanup function",
+  );
+  assert.equal(
+    fake.hooks.size,
+    1,
+    "one execute.before hook must be registered",
+  );
+  assert.equal(
+    fake.transforms.size,
+    1,
+    "one tool transform must be registered",
+  );
 
   return { before: pickBefore(fake.hooks, fake.transforms), cleanup, ...fake };
 }
@@ -246,7 +286,10 @@ async function expectDeny(before, reason) {
     thrown = error;
   }
 
-  assert.ok(thrown instanceof Error, "the call resolved instead of failing closed");
+  assert.ok(
+    thrown instanceof Error,
+    "the call resolved instead of failing closed",
+  );
   assert.equal(thrown.message, "tack: " + reason, "wrong fail-closed reason");
 }
 
@@ -539,7 +582,10 @@ async function allowPasses() {
 }
 
 async function denyBlocks() {
-  const error = await runOutcome({ kind: "deny", reason: "push blocked" }, CALL);
+  const error = await runOutcome(
+    { kind: "deny", reason: "push blocked" },
+    CALL,
+  );
   assert.ok(error instanceof Error, "deny must block the call");
   assert.equal(error.message, "tack: push blocked");
 }
@@ -612,8 +658,12 @@ async function setupAwaitsAsyncRegistrations() {
 
     const cleanupPromise = plugin.setup(ctx);
     cleanupPromise.then(
-      () => { settled = true; },
-      () => { settled = true; },
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
     );
 
     await Promise.resolve();
@@ -631,25 +681,40 @@ async function setupAwaitsAsyncRegistrations() {
     } catch (thrown) {
       earlyError = thrown;
     }
-    assert.ok(earlyError instanceof Error, "an early tool call must fail closed");
+    assert.ok(
+      earlyError instanceof Error,
+      "an early tool call must fail closed",
+    );
     assert.equal(
       earlyError.message,
       "tack: socket_missing",
       "an early tool call cannot reach a daemon",
     );
-    assert.equal(beforeRegistered, false, "no call ran before the hook was active");
+    assert.equal(
+      beforeRegistered,
+      false,
+      "no call ran before the hook was active",
+    );
 
     resolveHook(hookRegistration);
     const cleanup = await cleanupPromise;
 
     // setup() resolves only after the late hook registration, so no call can
     // be delivered before execute.before is active.
-    assert.equal(beforeRegistered, true, "hook must be active before setup resolves");
+    assert.equal(
+      beforeRegistered,
+      true,
+      "hook must be active before setup resolves",
+    );
     assert.equal(typeof beforeCallback, "function");
 
     await cleanup();
     assert.equal(hookDisposed, true, "cleanup disposes the resolved hook");
-    assert.equal(transformDisposed, true, "cleanup disposes the resolved transform");
+    assert.equal(
+      transformDisposed,
+      true,
+      "cleanup disposes the resolved transform",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -670,9 +735,12 @@ async function toolExecuteHonorsAbortSignal() {
     server = await listen(env.TACK_SOCKET, () => {});
 
     const controller = new AbortController();
-    const pending = tool.execute({ verbose: true }, {
-      signal: controller.signal,
-    });
+    const pending = tool.execute(
+      { verbose: true },
+      {
+        signal: controller.signal,
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort();
@@ -722,9 +790,11 @@ async function toolForwarding() {
         const newline = buffer.indexOf("\n");
         if (newline < 0) return;
         request = JSON.parse(buffer.slice(0, newline));
-        conn.write(reply("tool", {
-          content: [{ kind: "text", text: "guard_status: daemon ok" }],
-        }) + "\n");
+        conn.write(
+          reply("tool", {
+            content: [{ kind: "text", text: "guard_status: daemon ok" }],
+          }) + "\n",
+        );
       });
     });
 
@@ -829,8 +899,16 @@ async function restartAfterDaemonDeath() {
 
     await before(ALLOW_CALL);
     lines = readFileSync(marker, "utf8").trim().split("\n");
-    assert.equal(lines.length, 2, "a second daemon started after the first died");
-    assert.notEqual(JSON.parse(lines[1]).pid, firstPid, "the daemon was restarted");
+    assert.equal(
+      lines.length,
+      2,
+      "a second daemon started after the first died",
+    );
+    assert.notEqual(
+      JSON.parse(lines[1]).pid,
+      firstPid,
+      "the daemon was restarted",
+    );
   } finally {
     await stopDaemons(marker);
     rmSync(dir, { recursive: true, force: true });
@@ -853,7 +931,9 @@ async function staleSocketRestarts() {
     await before(ALLOW_CALL);
 
     assert.ok(existsSync(marker), "a refused socket did not trigger a start");
-    const started = JSON.parse(readFileSync(marker, "utf8").trim().split("\n")[0]);
+    const started = JSON.parse(
+      readFileSync(marker, "utf8").trim().split("\n")[0],
+    );
     assert.equal(started.socket, socket);
   } finally {
     await stopDaemons(marker);
@@ -875,11 +955,9 @@ function instrumentedWrapper(dir) {
 
 // A daemon that exits without binding: a start that cannot claim a fresh
 // socket, so forward must prove reachability with a real connect.
-const EXITING_DAEMON = [
-  "#!/usr/bin/env node",
-  "process.exit(0);",
-  "",
-].join("\n");
+const EXITING_DAEMON = ["#!/usr/bin/env node", "process.exit(0);", ""].join(
+  "\n",
+);
 
 // An instrumented copy whose socket stat and connect calls the test can
 // drive. The shipped wrapper is untouched.
@@ -1010,7 +1088,9 @@ async function competingBindBeforeStatUsesLiveSocket() {
       error = thrown;
     }
     assert.equal(
-      error, undefined, "the live socket must be used, not a named deny",
+      error,
+      undefined,
+      "the live socket must be used, not a named deny",
     );
   } finally {
     delete globalThis.__tackNet;
@@ -1108,7 +1188,10 @@ function twoToolWrapper(dir) {
     "]}";
   writeFileSync(
     target,
-    source.replace(/^const MANIFEST = .*;$/m, "const MANIFEST = " + manifest + ";"),
+    source.replace(
+      /^const MANIFEST = .*;$/m,
+      "const MANIFEST = " + manifest + ";",
+    ),
   );
   return target;
 }
@@ -1156,7 +1239,10 @@ async function setupRollsBackOnFailedRegistration() {
       error = thrown;
     }
 
-    assert.ok(error instanceof Error, "setup must reject on a failed registration");
+    assert.ok(
+      error instanceof Error,
+      "setup must reject on a failed registration",
+    );
     assert.equal(
       error.message,
       "tack: registration failed",
@@ -1244,32 +1330,46 @@ await check(
   toolForwarding,
 );
 for (const [error, reason] of ERROR_REASONS) {
-  await check(
-    "reply error " + error + " denies " + reason,
-    () => denyFromReply(reply("error", { error, message: "from daemon" }), reason),
+  await check("reply error " + error + " denies " + reason, () =>
+    denyFromReply(reply("error", { error, message: "from daemon" }), reason),
   );
 }
 await check("TACK_STATE_DIR is used as-is", () =>
-  stateDirRule((dir, marker) => ({
-    TACK_STATE_DIR: path.join(dir, "explicit"),
-    TACK_STUB_MARKER: marker,
-  }), (dir) => path.join(dir, "explicit")));
+  stateDirRule(
+    (dir, marker) => ({
+      TACK_STATE_DIR: path.join(dir, "explicit"),
+      TACK_STUB_MARKER: marker,
+    }),
+    (dir) => path.join(dir, "explicit"),
+  ),
+);
 await check("XDG_STATE_HOME gains a tack suffix", () =>
-  stateDirRule((dir, marker) => ({
-    XDG_STATE_HOME: path.join(dir, "xdg"),
-    TACK_STUB_MARKER: marker,
-  }), (dir) => path.join(dir, "xdg", "tack")));
+  stateDirRule(
+    (dir, marker) => ({
+      XDG_STATE_HOME: path.join(dir, "xdg"),
+      TACK_STUB_MARKER: marker,
+    }),
+    (dir) => path.join(dir, "xdg", "tack"),
+  ),
+);
 await check("HOME fallback is .local/state/tack", () =>
-  stateDirRule((dir, marker) => ({
-    HOME: path.join(dir, "home"),
-    TACK_STUB_MARKER: marker,
-  }), (dir) => path.join(dir, "home", ".local", "state", "tack")));
+  stateDirRule(
+    (dir, marker) => ({
+      HOME: path.join(dir, "home"),
+      TACK_STUB_MARKER: marker,
+    }),
+    (dir) => path.join(dir, "home", ".local", "state", "tack"),
+  ),
+);
 await check("cold start launches the daemon and succeeds", coldStartSuccess);
 await check(
   "slow start denies socket_missing, not timeout",
   slowStartFailsWithSocketMissing,
 );
-await check("a later call restarts a daemon that died", restartAfterDaemonDeath);
+await check(
+  "a later call restarts a daemon that died",
+  restartAfterDaemonDeath,
+);
 await check(
   "ECONNREFUSED on a stale socket restarts the daemon",
   staleSocketRestarts,
