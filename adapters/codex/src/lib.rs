@@ -15,7 +15,7 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 
-pub use home::{CONFIG_FILE, HOOKS_FILE, Installed, install, resolve_home};
+pub use home::{CONFIG_FILE, HOOKS_FILE, Installed, Planned, install, plan_home, resolve_home};
 pub use trust::{Event, HOOK_TIMEOUT_SEC, Handler, fingerprint, hook_key};
 
 const CLIENT: &str = include_str!("../client.js");
