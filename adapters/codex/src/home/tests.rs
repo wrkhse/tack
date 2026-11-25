@@ -156,7 +156,7 @@ fn state_merge_keeps_other_tables_and_rewrites_only_tack_keys() {
         trusted_hash = \"sha256:old\"\n\n\
         [projects.\"/repo\"]\ntrust_level = \"trusted\"\n";
 
-    let merged = merge_state(existing, &trust).expect("merge");
+    let merged = merge_state(existing, &trust, "/h/hooks.json", &HashSet::new()).expect("merge");
 
     assert_eq!(
         merged,
@@ -166,7 +166,52 @@ fn state_merge_keeps_other_tables_and_rewrites_only_tack_keys() {
          [hooks.state.\"/h/hooks.json:pre_tool_use:1:0\"]\nenabled = true\n\
          trusted_hash = \"sha256:new\"\n"
     );
-    assert_eq!(merge_state(&merged, &trust).expect("again"), merged);
+    assert_eq!(
+        merge_state(&merged, &trust, "/h/hooks.json", &HashSet::new()).expect("again"),
+        merged
+    );
+}
+
+#[test]
+fn state_merge_drops_only_tables_holding_an_old_tack_hash() {
+    let trust = [(
+        "/h/hooks.json:pre_tool_use:4:0".to_owned(),
+        "sha256:tack".to_owned(),
+    )];
+    let stale = HashSet::from(["sha256:old".to_owned()]);
+
+    // 0:0 holds tack's old hash, 1:0 a user's hash, 2:0 no hash, 4:0 is a
+    // current tack key, and another hooks file's table holds the old hash too.
+    let existing = "model = \"o3\"\n\n\
+        [hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"]\nenabled = true\n\
+        trusted_hash = \"sha256:old\"\n\n\
+        [hooks.state.\"/h/hooks.json:pre_tool_use:1:0\"]\nenabled = true\n\
+        trusted_hash = \"sha256:user\"\n\n\
+        [hooks.state.\"/h/hooks.json:pre_tool_use:2:0\"]\nenabled = false\n\n\
+        [hooks.state.\"/h/hooks.json:pre_tool_use:4:0\"]\nenabled = true\n\
+        trusted_hash = \"sha256:previous\"\n\n\
+        [hooks.state.\"/p/hooks.json:pre_tool_use:0:0\"]\nenabled = true\n\
+        trusted_hash = \"sha256:old\"\n\n\
+        [projects.\"/repo\"]\ntrust_level = \"trusted\"\n";
+
+    let merged = merge_state(existing, &trust, "/h/hooks.json", &stale).expect("merge");
+
+    assert_eq!(
+        merged,
+        "model = \"o3\"\n\n\
+         [hooks.state.\"/h/hooks.json:pre_tool_use:1:0\"]\nenabled = true\n\
+         trusted_hash = \"sha256:user\"\n\n\
+         [hooks.state.\"/h/hooks.json:pre_tool_use:2:0\"]\nenabled = false\n\n\
+         [hooks.state.\"/p/hooks.json:pre_tool_use:0:0\"]\nenabled = true\n\
+         trusted_hash = \"sha256:old\"\n\n\
+         [projects.\"/repo\"]\ntrust_level = \"trusted\"\n\n\
+         [hooks.state.\"/h/hooks.json:pre_tool_use:4:0\"]\nenabled = true\n\
+         trusted_hash = \"sha256:tack\"\n"
+    );
+    assert_eq!(
+        merge_state(&merged, &trust, "/h/hooks.json", &stale).expect("again"),
+        merged
+    );
 }
 
 #[test]
@@ -197,7 +242,7 @@ fn state_merge_refuses_what_it_cannot_place() {
         ),
     ] {
         assert_eq!(
-            merge_state(text, &trust),
+            merge_state(text, &trust, "/h/hooks.json", &HashSet::new()),
             Err(CodexError::Config(expected.to_owned())),
             "{text}"
         );
@@ -277,7 +322,8 @@ fn a_state_key_outside_hooks_or_another_key_inside_it_is_kept() {
     )];
     let existing = "[tui]\nstate = \"compact\"\n\n[hooks]\ndescription = \"mine\"\n";
 
-    let merged = merge_state(existing, &trust).expect("both lines are kept");
+    let merged = merge_state(existing, &trust, "/h/hooks.json", &HashSet::new())
+        .expect("both lines are kept");
 
     assert_eq!(
         merged,
@@ -317,4 +363,29 @@ fn the_home_resolves_as_codex_resolves_it() {
         resolve_home(Some(OsStr::new("")), Some(OsStr::new("relative"))),
         Err(CodexError::Home(_))
     ));
+}
+
+#[test]
+fn a_rebuild_after_a_user_group_is_inserted_removes_the_stale_tack_state() {
+    let scratch = Scratch::new();
+    install(&scratch.root, &handlers("/out/codex")).expect("first install");
+
+    let hooks_path = scratch.root.join("hooks.json");
+    let mut hooks: Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).expect("hooks")).expect("JSON");
+    hooks["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .expect("list")
+        .insert(0, other_group());
+    fs::write(&hooks_path, hooks.to_string()).expect("edited hooks");
+
+    install(&scratch.root, &handlers("/new/codex")).expect("rebuild");
+    let config = fs::read_to_string(scratch.root.join("config.toml")).expect("config");
+
+    let source = hooks_path.display().to_string();
+    let stale = state_header(&format!("{source}:pre_tool_use:0:0"));
+    let current = state_header(&format!("{source}:pre_tool_use:1:0"));
+
+    assert!(!config.contains(&stale), "{config}");
+    assert!(config.contains(&current), "{config}");
 }

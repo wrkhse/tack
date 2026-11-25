@@ -5,6 +5,7 @@
 //! table is copied unchanged. Both files are computed before either is
 //! written, and each is replaced by an atomic rename.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write as _;
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::trust::{Event, Handler, hook_key};
+use crate::trust::{Event, Handler, handler_hash, hook_key};
 use crate::{CodexError, toml_string};
 
 /// The hooks file Codex reads from its home.
@@ -83,6 +84,12 @@ pub fn install(home: &Path, handlers: &[Handler]) -> Result<Installed, CodexErro
 
     let hooks_text = read_optional(&hooks_path)?;
     let (hooks, groups) = merge_hooks(hooks_text.as_deref(), handlers)?;
+    let stale = match hooks_text.as_deref() {
+        Some(text) => tack_hashes(
+            &serde_json::from_str(text).map_err(|error| CodexError::Hooks(error.to_string()))?,
+        ),
+        None => HashSet::new(),
+    };
     let trust: Vec<(String, String)> = handlers
         .iter()
         .zip(groups)
@@ -95,7 +102,7 @@ pub fn install(home: &Path, handlers: &[Handler]) -> Result<Installed, CodexErro
         .collect();
 
     let config_text = read_optional(&config_path)?;
-    let config = merge_state(config_text.as_deref().unwrap_or(""), &trust)?;
+    let config = merge_state(config_text.as_deref().unwrap_or(""), &trust, source, &stale)?;
 
     // Trust first: a rebuilt hook whose state is missing would be skipped.
     write_atomic(&config_path, &config)?;
@@ -213,6 +220,50 @@ fn merge_hooks(
     Ok((text, indices))
 }
 
+/// The hashes Codex trusts tack's own generated groups under in `hooks`, the
+/// hooks file as it was before this build. Only a group `is_tack_group`
+/// names is hashed; a user's hook is never hashed or judged.
+fn tack_hashes(hooks: &Value) -> HashSet<String> {
+    let mut hashes = HashSet::new();
+
+    for event in [Event::PreToolUse, Event::SessionStart] {
+        let groups = hooks
+            .get("hooks")
+            .and_then(|events| events.get(event.name()))
+            .and_then(Value::as_array);
+
+        for group in groups.into_iter().flatten() {
+            if !is_tack_group(group, event) {
+                continue;
+            }
+
+            let handler = group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .and_then(|handlers| handlers.first());
+
+            if let Some(hash) = handler.and_then(|handler| handler_hash(event, group, handler)) {
+                hashes.insert(hash);
+            }
+        }
+    }
+
+    hashes
+}
+
+/// Whether `line` sets `trusted_hash` to a plain basic string in `hashes`.
+/// Any other spelling, such as a literal string or a trailing comment, reads
+/// as no, so its table stays.
+fn trusted_hash_in(line: &str, hashes: &HashSet<String>) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+
+    compact
+        .strip_prefix("trusted_hash=")
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.strip_suffix('"'))
+        .is_some_and(|hash| !hash.contains(['"', '\\', '#']) && hashes.contains(hash))
+}
+
 fn state_header(key: &str) -> String {
     format!("[hooks.state.{}]", toml_string(key))
 }
@@ -250,20 +301,41 @@ fn check_line(table: &str, line: &str, keys: &[&str]) -> Result<(), CodexError> 
     Ok(())
 }
 
-/// Drop the state tables of `trust`'s keys, keep every other line as it is,
-/// and append one table per key.
-fn merge_state(existing: &str, trust: &[(String, String)]) -> Result<String, CodexError> {
+/// Drop the state tables of `trust`'s keys, and every state table of `source`
+/// whose `trusted_hash` is in `stale`: the hashes tack's own groups had
+/// before this build, so such a table is tack's, left behind under a key
+/// that may now name another hook. Keep every other line as it is, and append
+/// one table per key of `trust`.
+fn merge_state(
+    existing: &str,
+    trust: &[(String, String)],
+    source: &str,
+    stale: &HashSet<String>,
+) -> Result<String, CodexError> {
     let headers: Vec<String> = trust.iter().map(|(key, _)| state_header(key)).collect();
     let keys: Vec<&str> = trust.iter().map(|(key, _)| key.as_str()).collect();
+    let source_header = state_header(&format!("{source}:"));
+    let source_prefix = source_header.strip_suffix("\"]").unwrap_or(&source_header);
     let mut kept = String::with_capacity(existing.len());
+    let mut pending = String::new();
     let mut table = String::new();
     let mut skipping = false;
+    let mut judged = false;
+    let mut dropped = false;
 
     for line in existing.split_inclusive('\n') {
         let trimmed = line.trim();
 
+        // A table is kept or dropped whole, once its last line is known.
         if trimmed.starts_with('[') {
+            if !dropped {
+                kept.push_str(&pending);
+            }
+
+            pending.clear();
             skipping = headers.iter().any(|header| header == trimmed);
+            judged = trimmed.starts_with(source_prefix);
+            dropped = false;
             table = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
         }
 
@@ -272,7 +344,16 @@ fn merge_state(existing: &str, trust: &[(String, String)]) -> Result<String, Cod
         }
 
         check_line(&table, line, &keys)?;
-        kept.push_str(line);
+
+        if judged && trusted_hash_in(line, stale) {
+            dropped = true;
+        }
+
+        pending.push_str(line);
+    }
+
+    if !dropped {
+        kept.push_str(&pending);
     }
 
     let mut output = kept.trim_end().to_owned();
