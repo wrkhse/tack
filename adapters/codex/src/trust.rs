@@ -17,6 +17,10 @@ use sha2::{Digest, Sha256};
 /// Codex's hook timeout for each generated handler, in seconds.
 pub const HOOK_TIMEOUT_SEC: u64 = 10;
 
+/// The timeout Codex fills in for a `PreToolUse` or `SessionStart` command hook
+/// that names none, in seconds (`normalize_command_hook`).
+const CODEX_DEFAULT_TIMEOUT_SEC: u64 = 600;
+
 /// A Codex hook event tack registers a handler for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -53,15 +57,11 @@ pub struct Handler {
 }
 
 impl Handler {
-    fn command_object(&self, normalized: bool) -> Value {
+    fn command_object(&self) -> Value {
         let mut handler = Map::new();
         handler.insert("type".into(), Value::from("command"));
         handler.insert("command".into(), Value::from(self.command.as_str()));
         handler.insert("timeout".into(), Value::from(HOOK_TIMEOUT_SEC));
-
-        if normalized {
-            handler.insert("async".into(), Value::Bool(false));
-        }
 
         Value::Object(handler)
     }
@@ -75,10 +75,7 @@ impl Handler {
             group.insert("matcher".into(), Value::from(matcher));
         }
 
-        group.insert(
-            "hooks".into(),
-            Value::Array(vec![self.command_object(false)]),
-        );
+        group.insert("hooks".into(), Value::Array(vec![self.command_object()]));
 
         Value::Object(group)
     }
@@ -87,20 +84,71 @@ impl Handler {
     /// must equal for Codex to run it.
     #[must_use]
     pub fn trusted_hash(&self) -> String {
-        let mut identity = Map::new();
-        identity.insert("event_name".into(), Value::from(self.event.key_label()));
-
-        if let Some(matcher) = self.matcher {
-            identity.insert("matcher".into(), Value::from(matcher));
-        }
-
-        identity.insert(
-            "hooks".into(),
-            Value::Array(vec![self.command_object(true)]),
-        );
-
-        fingerprint(Value::Object(identity))
+        identity_hash(self.event, self.matcher, &self.command, HOOK_TIMEOUT_SEC)
     }
+}
+
+/// The hash Codex computes for `handler` in `group` of `event`, when this
+/// crate can reproduce it exactly: a group of only `matcher` and `hooks`, and
+/// a handler of only `"type": "command"`, a non-blank `command`, a positive
+/// `timeout` (Codex fills in 600) and `"async": false`. Any other shape, such
+/// as a status message or another handler type, gives `None`, so a caller
+/// never judges trust it cannot verify.
+#[must_use]
+pub fn handler_hash(event: Event, group: &Value, handler: &Value) -> Option<String> {
+    let group = group.as_object()?;
+    let handler = handler.as_object()?;
+
+    if group.keys().any(|key| key != "matcher" && key != "hooks") {
+        return None;
+    }
+
+    let known = |key: &String| matches!(key.as_str(), "type" | "command" | "timeout" | "async");
+
+    if !handler.keys().all(known) || handler.get("type")? != "command" {
+        return None;
+    }
+
+    if handler.get("async").is_some_and(|value| value != false) {
+        return None;
+    }
+
+    let matcher = match group.get("matcher") {
+        Some(matcher) => Some(matcher.as_str()?),
+        None => None,
+    };
+    let command = handler
+        .get("command")?
+        .as_str()
+        .filter(|command| !command.trim().is_empty())?;
+    let timeout = match handler.get("timeout") {
+        Some(timeout) => timeout.as_u64().filter(|seconds| *seconds > 0)?,
+        None => CODEX_DEFAULT_TIMEOUT_SEC,
+    };
+
+    Some(identity_hash(event, matcher, command, timeout))
+}
+
+/// Codex's `hook_hash` identity for one command handler: the event label,
+/// the matcher when there is one, and the handler with its timeout filled in
+/// and `async` explicit.
+fn identity_hash(event: Event, matcher: Option<&str>, command: &str, timeout: u64) -> String {
+    let mut handler = Map::new();
+    handler.insert("type".into(), Value::from("command"));
+    handler.insert("command".into(), Value::from(command));
+    handler.insert("timeout".into(), Value::from(timeout));
+    handler.insert("async".into(), Value::Bool(false));
+
+    let mut identity = Map::new();
+    identity.insert("event_name".into(), Value::from(event.key_label()));
+
+    if let Some(matcher) = matcher {
+        identity.insert("matcher".into(), Value::from(matcher));
+    }
+
+    identity.insert("hooks".into(), Value::Array(vec![Value::Object(handler)]));
+
+    fingerprint(Value::Object(identity))
 }
 
 /// Codex's `version_for_toml` over a JSON value: sorted objects, compact
@@ -198,6 +246,112 @@ mod tests {
 
         assert_eq!(handler.trusted_hash(), fingerprint(identity));
         assert_eq!(handler.group().get("matcher"), None);
+    }
+
+    #[test]
+    fn handler_hash_fills_in_codex_default_timeout() {
+        let handler = json!({ "type": "command", "command": "./lint.sh" });
+        let group = json!({ "matcher": "^Write$", "hooks": [handler] });
+        let identity = json!({
+            "event_name": "pre_tool_use",
+            "matcher": "^Write$",
+            "hooks": [{
+                "type": "command",
+                "command": "./lint.sh",
+                "timeout": 600,
+                "async": false
+            }]
+        });
+
+        assert_eq!(
+            handler_hash(Event::PreToolUse, &group, &handler),
+            Some(fingerprint(identity))
+        );
+    }
+
+    #[test]
+    fn handler_hash_keeps_an_explicit_timeout_and_async_false() {
+        let handler = json!({
+            "type": "command",
+            "command": "./start.sh",
+            "timeout": 30,
+            "async": false
+        });
+        let group = json!({ "hooks": [handler] });
+        let identity = json!({
+            "event_name": "session_start",
+            "hooks": [{
+                "type": "command",
+                "command": "./start.sh",
+                "timeout": 30,
+                "async": false
+            }]
+        });
+
+        assert_eq!(
+            handler_hash(Event::SessionStart, &group, &handler),
+            Some(fingerprint(identity))
+        );
+    }
+
+    #[test]
+    fn handler_hash_refuses_a_shape_it_cannot_reproduce() {
+        let plain = json!({ "type": "command", "command": "./lint.sh" });
+        let group = json!({ "hooks": [plain] });
+
+        for handler in [
+            json!({ "type": "command", "command": "./lint.sh", "statusMessage": "x" }),
+            json!({ "type": "command", "command": "./lint.sh", "async": true }),
+            json!({ "type": "command", "command": "./lint.sh", "timeout": 0 }),
+            json!({ "type": "command", "command": "  " }),
+            json!({ "type": "prompt", "command": "./lint.sh" }),
+            json!({ "command": "./lint.sh" }),
+        ] {
+            assert_eq!(
+                handler_hash(Event::PreToolUse, &group, &handler),
+                None,
+                "{handler}"
+            );
+        }
+
+        for group in [
+            json!({ "hooks": [plain], "description": "x" }),
+            json!({ "matcher": 1, "hooks": [plain] }),
+        ] {
+            assert_eq!(
+                handler_hash(Event::PreToolUse, &group, &plain),
+                None,
+                "{group}"
+            );
+        }
+    }
+
+    #[test]
+    fn handler_hash_agrees_with_a_generated_handler() {
+        for handler in [
+            Handler {
+                event: Event::PreToolUse,
+                matcher: Some("^Bash$"),
+                command: "node '/out/codex/pre-tool-use.js'".into(),
+            },
+            Handler {
+                event: Event::SessionStart,
+                matcher: None,
+                command: "node '/out/codex/session-start.js'".into(),
+            },
+        ] {
+            let group = handler.group();
+            let generated = group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .and_then(|hooks| hooks.first())
+                .expect("one generated handler");
+
+            assert_eq!(
+                handler_hash(handler.event, &group, generated),
+                Some(handler.trusted_hash())
+            );
+        }
     }
 
     #[test]
