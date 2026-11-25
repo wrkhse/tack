@@ -152,6 +152,17 @@ fn client(plugin_dir: &str) -> Result<String, CodexError> {
     )
 }
 
+/// A script that runs on the shared client: the client, one blank line, then
+/// the script's own body. Each template is formatted on its own, so neither
+/// side carries the separator.
+fn with_client(client: &str, body: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        client.trim_end_matches('\n'),
+        body.trim_start_matches('\n')
+    )
+}
+
 fn hooks_json(handlers: &[Handler; 2]) -> String {
     let mut events = Map::new();
 
@@ -250,7 +261,7 @@ pub fn render(config: &Config) -> Result<Adapter, CodexError> {
         },
         AdapterFile {
             name: PRE_TOOL_USE_JS,
-            contents: client.clone() + &fill(PRE_TOOL_USE, &[])?,
+            contents: with_client(&client, &fill(PRE_TOOL_USE, &[])?),
         },
         AdapterFile {
             name: SESSION_START_JS,
@@ -261,7 +272,7 @@ pub fn render(config: &Config) -> Result<Adapter, CodexError> {
         },
         AdapterFile {
             name: MCP_JS,
-            contents: client + &mcp,
+            contents: with_client(&client, &mcp),
         },
         AdapterFile {
             name: CONFIG_TOML,

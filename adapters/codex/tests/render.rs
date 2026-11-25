@@ -58,6 +58,12 @@ fn filled(template: &str, plugin_dir_literal: &str) -> String {
     expected
 }
 
+/// A script's template as the build emits it: the shared client, one blank
+/// line, then the script's own body.
+fn on_client(body: &str) -> String {
+    format!("{CLIENT}\n{body}")
+}
+
 fn assert_only_slots_differ(template: &str, script: &str, plugin_dir_literal: &str) {
     let before = template.split_inclusive('\n');
     let after = script.split_inclusive('\n');
@@ -82,15 +88,11 @@ fn every_script_is_its_template_with_the_fixture_values() {
     let literal = json!(plugin_dir).to_string();
 
     assert_only_slots_differ(
-        &(CLIENT.to_owned() + PRE_TOOL_USE),
+        &on_client(PRE_TOOL_USE),
         file(&adapter, "pre-tool-use.js"),
         &literal,
     );
-    assert_only_slots_differ(
-        &(CLIENT.to_owned() + MCP),
-        file(&adapter, "mcp.js"),
-        &literal,
-    );
+    assert_only_slots_differ(&on_client(MCP), file(&adapter, "mcp.js"), &literal);
     assert_only_slots_differ(SESSION_START, file(&adapter, "session-start.js"), &literal);
     assert_eq!(file(&adapter, "run-hook.sh"), RUN_HOOK);
 }
@@ -238,7 +240,7 @@ fn a_path_with_javascript_punctuation_is_only_a_json_string() {
     let literal = json!(path).to_string();
 
     assert_only_slots_differ(
-        &(CLIENT.to_owned() + PRE_TOOL_USE),
+        &on_client(PRE_TOOL_USE),
         file(&adapter, "pre-tool-use.js"),
         &literal,
     );
