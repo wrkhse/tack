@@ -724,4 +724,65 @@ mod tests {
 
         task.abort();
     }
+
+    #[tokio::test]
+    async fn a_full_connection_budget_does_not_starve_new_requests() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+        let allow = Reply::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            outcome: Outcome::Allow,
+        };
+
+        let mut control = UnixStream::connect(&socket).await.unwrap();
+        control.write_all(&line).await.unwrap();
+        control.flush().await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(2), read_reply(control))
+            .await
+            .expect("idle server replies");
+        assert_eq!(reply, allow);
+
+        let mut held = Vec::with_capacity(MAX_PENDING);
+
+        for _ in 0..MAX_PENDING {
+            let mut peer = UnixStream::connect(&socket).await.unwrap();
+            peer.write_all(b"partial").await.unwrap();
+            peer.flush().await.unwrap();
+            held.push(peer);
+        }
+
+        // Let the accept loop take every held peer before the new client.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        client.write_all(&line).await.unwrap();
+        client.flush().await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(2), read_reply(client))
+            .await
+            .expect("a new request must be served while 16 peers hold partial frames");
+        assert_eq!(reply, allow);
+
+        drop(held);
+        task.abort();
+    }
 }
