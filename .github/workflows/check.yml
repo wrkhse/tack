@@ -189,6 +189,8 @@ jobs:
           tar -xzf tidy-x86_64-unknown-linux-musl.tar.gz
           chmod +x tidy
           echo "$bin" >> "$GITHUB_PATH"
+      # tidy check exits 1 for unformatted files and 2 for a parse or config
+      # error; the case below reports each apart, and both fail the job.
       - name: Check formatting
         run: |
           set -uo pipefail
