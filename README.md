@@ -52,7 +52,7 @@ the tarball for your target, verify it, unpack it, and put its three binaries
 on your `PATH`:
 
 ```bash
-TAG=v0.1.0-rc.4
+TAG=v0.1.0-rc.5
 TARGET=x86_64-apple-darwin
 base="https://github.com/wrkhse/tack/releases/download/$TAG"
 
