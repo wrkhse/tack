@@ -6,6 +6,8 @@
   **Implemented (v0.1.0-rc.3)**.
 - [Slice 3: one plugin, Pi, native hook client](slices/slice-3.md) —
   **Implemented (v0.1.0-rc.4)**.
+- [Slice 4: one tack plugin as a Codex adapter](slices/slice-4.md) —
+  **Implemented (v0.1.0-rc.5)**.
 
 [Release: v0.1.0-rc.2](https://github.com/wrkhse/tack/releases/tag/v0.1.0-rc.2).
 
@@ -22,3 +24,5 @@
 [Slice 2 issue: tack#47](https://github.com/wrkhse/tack/issues/47).
 
 [Slice 3 issue: tack#54](https://github.com/wrkhse/tack/issues/54).
+
+[Slice 4 issue: tack#60](https://github.com/wrkhse/tack/issues/60).

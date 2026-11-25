@@ -116,4 +116,6 @@ Build the example plugin with
   Implemented (v0.1.0-rc.3).
 - [Slice 3: one plugin, Pi, native hook client](docs/plans/slices/slice-3.md) —
   Implemented (v0.1.0-rc.4).
+- [Slice 4: one tack plugin as a Codex adapter](docs/plans/slices/slice-4.md) —
+  Implemented (v0.1.0-rc.5).
 - More harnesses and MCP support — Planned.
