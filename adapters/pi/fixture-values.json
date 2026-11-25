@@ -16,6 +16,7 @@
     "aborted",
     "unsupported_hook",
     "socket_untrusted",
-    "hook_missing"
+    "hook_missing",
+    "busy"
   ]
 }

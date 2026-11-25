@@ -189,8 +189,8 @@ impl Failure {
 }
 ```
 
-The daemon sends the first seven `ReplyError` classes; the hook writes the
-transport kinds itself. `DenyReason::ALL` lists the thirteen reasons a client
+The daemon sends the first eight `ReplyError` classes; the hook writes the
+transport kinds itself. `DenyReason::ALL` lists the fourteen reasons a client
 may deny with:
 
 ```rust
@@ -202,6 +202,7 @@ pub enum ReplyError {
     UnsupportedHook,
     UnknownTool,
     ProtocolVersion,
+    Busy,
     SocketMissing,
     Timeout,
     SocketClosed,
@@ -213,16 +214,16 @@ pub enum ReplyError {
 }
 ```
 
-**Verification.** `crates/hook/tests/forward.rs` drives `forward` against
-stub daemons bound in a temporary folder, with no child process. Hook, tool
-and daemon error replies pass through unchanged; a cold start runs once and
-the one retry reaches it; a 0750 folder, a 0622 socket, and a file or symlink
-in place of the socket each deny `socket_untrusted` with no start and no
-connect. A closed socket, a silent daemon, a reply that is not JSON, over
-1 MiB, or of another id, kind or version each deny by name. A daemon that
-binds after 2 s and never replies denies `timeout` between 8500 and 9000 ms.
-Unit tests in `trust.rs` judge type, then owner, then mode; tests in
-`main.rs` run whole hook runs in-process.
+**Verification.** `crates/hook/tests/forward.rs` drives `forward` against stub
+daemons bound in a temporary folder, with no child process. Hook, tool and
+daemon error replies pass through unchanged; a cold start runs once and the one
+retry reaches it; a 0750 folder, a 0622 socket, and a file or symlink in place
+of the socket each deny `socket_untrusted` with no start and no connect. A
+closed socket, a silent daemon, a reply that is not JSON, over 1 MiB, or of
+another id, kind or version each deny by name; a `busy` error with id 0 passes.
+A daemon that binds after 2 s and never replies denies `timeout` between 8500
+and 9000 ms. Unit tests in `trust.rs` judge type, then owner, then mode; tests
+in `main.rs` run whole hook runs in-process.
 
 ### Generated mod
 

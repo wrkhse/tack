@@ -16,7 +16,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The machine-readable class carried by an error reply.
 ///
-/// The daemon sends the first seven. The remaining kinds name client
+/// The daemon sends the first eight. The remaining kinds name client
 /// failures that occur without a verdict from the daemon.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +28,7 @@ pub enum ReplyError {
     UnsupportedHook,
     UnknownTool,
     ProtocolVersion,
+    Busy,
     SocketMissing,
     Timeout,
     SocketClosed,
@@ -148,10 +149,11 @@ pub enum DenyReason {
     UnsupportedHook,
     SocketUntrusted,
     HookMissing,
+    Busy,
 }
 
 impl DenyReason {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::SocketMissing,
         Self::Timeout,
         Self::SocketClosed,
@@ -165,6 +167,7 @@ impl DenyReason {
         Self::UnsupportedHook,
         Self::SocketUntrusted,
         Self::HookMissing,
+        Self::Busy,
     ];
 
     #[must_use]
@@ -183,6 +186,7 @@ impl DenyReason {
             Self::UnsupportedHook => "unsupported_hook",
             Self::SocketUntrusted => "socket_untrusted",
             Self::HookMissing => "hook_missing",
+            Self::Busy => "busy",
         }
     }
 }
@@ -401,6 +405,7 @@ mod tests {
             (ReplyError::Aborted, "aborted"),
             (ReplyError::SocketUntrusted, "socket_untrusted"),
             (ReplyError::HookMissing, "hook_missing"),
+            (ReplyError::Busy, "busy"),
         ] {
             assert_eq!(
                 serde_json::to_value(error).unwrap(),
@@ -514,6 +519,7 @@ mod tests {
             (DenyReason::UnsupportedHook, "unsupported_hook"),
             (DenyReason::SocketUntrusted, "socket_untrusted"),
             (DenyReason::HookMissing, "hook_missing"),
+            (DenyReason::Busy, "busy"),
         ] {
             assert_eq!(reason.as_str(), expected);
             assert_eq!(

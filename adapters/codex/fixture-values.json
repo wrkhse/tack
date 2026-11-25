@@ -16,7 +16,8 @@
     "aborted",
     "unsupported_hook",
     "socket_untrusted",
-    "hook_missing"
+    "hook_missing",
+    "busy"
   ],
   "MCP_PROTOCOL_VERSION": "2025-06-18",
   "VERSION": "0.0.0-test"

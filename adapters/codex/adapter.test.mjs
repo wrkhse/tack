@@ -6,7 +6,7 @@ import { test } from "node:test";
 const fixture = JSON.parse(
   readFileSync(new URL("./fixture-values.json", import.meta.url), "utf8"),
 );
-const { DENY_REASONS: reasonNames } = fixture;
+const { DENY_REASONS: reasonNames, PROTOCOL_VERSION } = fixture;
 
 function template(name) {
   return readFileSync(new URL("./" + name, import.meta.url), "utf8");
@@ -306,6 +306,20 @@ for (const error of [
     assert.deepEqual(w.writes, []);
   });
 }
+
+test("an id-0 busy reply blocks as busy", async () => {
+  const w = world(
+    answer({
+      id: 0,
+      version: PROTOCOL_VERSION,
+      kind: "error",
+      error: "busy",
+      message: "tack: busy",
+    }),
+  );
+
+  assert.deepEqual(await startHook(w, send(bashEvent())), block("busy"));
+});
 
 const badReplies = [
   [

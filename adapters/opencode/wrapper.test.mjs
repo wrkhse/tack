@@ -22,6 +22,7 @@ const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const CALL_TIMEOUT_MS = 150;
 const START_TIMEOUT_MS = 300;
 const HARD_TIMEOUT_MS = 10_000;
+const PROTOCOL_VERSION = 1;
 
 const ENV_KEYS = [
   "TACK_STATE_DIR",
@@ -52,6 +53,7 @@ const ERROR_REASONS = [
   ["limit", "limit"],
   ["script", "script"],
   ["unknown_tool", "unknown_tool"],
+  ["busy", "busy"],
   ["malformed", "daemon_error"],
   ["too_large", "daemon_error"],
   ["unsupported_hook", "daemon_error"],
@@ -294,7 +296,7 @@ async function expectDeny(before, reason) {
 }
 
 function reply(kind, extra = {}) {
-  return JSON.stringify({ kind, id: 1, version: 1, ...extra });
+  return JSON.stringify({ kind, id: 1, version: PROTOCOL_VERSION, ...extra });
 }
 
 async function denyFromReply(replyText, reason) {
@@ -1334,6 +1336,12 @@ for (const [error, reason] of ERROR_REASONS) {
     denyFromReply(reply("error", { error, message: "from daemon" }), reason),
   );
 }
+await check("an id-0 busy reply denies busy", () =>
+  denyFromReply(
+    reply("error", { id: 0, error: "busy", message: "tack: busy" }),
+    "busy",
+  ),
+);
 await check("TACK_STATE_DIR is used as-is", () =>
   stateDirRule(
     (dir, marker) => ({

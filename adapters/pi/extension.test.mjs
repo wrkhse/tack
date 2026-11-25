@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 const fixturePath = new URL("./fixture-values.json", import.meta.url);
 const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
-const { DENY_REASONS: reasonNames } = fixture;
+const { DENY_REASONS: reasonNames, PROTOCOL_VERSION } = fixture;
 const template = new URL("./register.js", import.meta.url);
 let source = readFileSync(template, "utf8");
 
@@ -299,6 +299,20 @@ for (const error of [
     },
   );
 }
+
+test("an id-0 busy reply blocks as busy", async () => {
+  const h = harness(
+    answer({
+      id: 0,
+      version: PROTOCOL_VERSION,
+      kind: "error",
+      error: "busy",
+      message: "tack: busy",
+    }),
+  );
+
+  assert.deepEqual(await guard(h), block("busy"));
+});
 
 const badReplies = [
   [

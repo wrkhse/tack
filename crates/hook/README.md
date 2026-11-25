@@ -84,20 +84,20 @@ once: a missing socket denies `socket_missing` at once, a silent daemon
 ## Failing closed
 
 Every failure is a `Reply::Error` line with the request id (0 before it is
-known) and a named kind:
+known, and for a busy denial) and a named kind:
 
-| Kind               | When                                              |
-| ------------------ | ------------------------------------------------- |
-| `socket_missing`   | No socket, or no state folder                     |
-| `socket_closed`    | Refused, or closed before a whole reply line      |
-| `timeout`          | No request or reply by the total deadline         |
-| `malformed_reply`  | Not a reply, over 1 MiB, another id or kind       |
-| `protocol_version` | A reply of another protocol version               |
-| `socket_untrusted` | The state folder or socket is not this user's own |
-| `daemon_error`     | The daemon could not be found or started          |
-| `aborted`          | Reading stdin failed                              |
-| `malformed`        | Stdin or the arguments are not a request          |
-| `too_large`        | The request line is over 1 MiB                    |
+| Kind               | When                                                                       |
+| ------------------ | -------------------------------------------------------------------------- |
+| `socket_missing`   | No socket, or no state folder                                              |
+| `socket_closed`    | Refused, or closed before a whole reply line                               |
+| `timeout`          | No request or reply by the total deadline                                  |
+| `malformed_reply`  | Not a reply, over 1 MiB, another id or kind (a `busy` error may have id 0) |
+| `protocol_version` | A reply of another protocol version                                        |
+| `socket_untrusted` | The state folder or socket is not this user's own                          |
+| `daemon_error`     | The daemon could not be found or started                                   |
+| `aborted`          | Reading stdin failed                                                       |
+| `malformed`        | Stdin or the arguments are not a request                                   |
+| `too_large`        | The request line is over 1 MiB                                             |
 
 A daemon's own error reply, such as `script` or `limit`, passes through
 unchanged.

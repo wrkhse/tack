@@ -32,7 +32,11 @@ function readReply(request, chunks, size) {
     return malformed;
   }
 
-  if (!reply || reply.id !== request.id) return malformed;
+  // An overflow reply may arrive before the daemon knows the request id.
+  const overflow =
+    reply?.id === 0 && reply.kind === "error" && reply.error === "busy";
+
+  if (!reply || (!overflow && reply.id !== request.id)) return malformed;
   if (reply.version !== PROTOCOL_VERSION) return refuse("protocol_version");
 
   if (reply.kind === "error") {
