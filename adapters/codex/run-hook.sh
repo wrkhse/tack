@@ -11,13 +11,18 @@ if ! command -v node >/dev/null 2>&1; then
   exit 2
 fi
 
-if output=$(node "$script" 2>/dev/null); then
-  if [ -n "$output" ]; then
-    printf '%s\n' "$output"
-  fi
+# The inner subshell runs node; the redirection outside it also swallows a
+# shell's own notice of a node killed by a signal, so stderr stays exact.
+output=$( (node "$script") 2>/dev/null )
+status=$?
 
-  exit 0
+if [ "$status" -ne 0 ]; then
+  echo 'tack: node_failed' >&2
+  exit 2
 fi
 
-echo 'tack: node_missing' >&2
-exit 2
+if [ -n "$output" ]; then
+  printf '%s\n' "$output"
+fi
+
+exit 0

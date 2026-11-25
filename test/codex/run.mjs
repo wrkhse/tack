@@ -22,7 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -76,8 +76,10 @@ const cases = [
     status: "invalid" },
   { name: "mcp-start-failure", kind: "session", model: "bash", hook: "real", mcpBroken: true,
     bash: "tack: push blocked" },
-  { name: "node-missing", kind: "direct", node: "missing", hook: "real" },
-  { name: "node-crash", kind: "direct", node: "crash", hook: "real" },
+  { name: "node-missing", kind: "direct", node: "missing", hook: "real",
+    reason: "tack: node_missing" },
+  { name: "node-crash", kind: "direct", node: "crash", hook: "real",
+    reason: "tack: node_failed" },
   { name: "stale-trust", kind: "detect", model: "bash", hook: "real", tamper: "stale" },
   { name: "config-parse-error", kind: "detect", model: "bash", hook: "real", tamper: "parse" },
 ];
@@ -189,7 +191,10 @@ function codexEnv(tree) {
 
 // Session flags, not user config: feedback and metrics stay off and an
 // optional MCP server is waited for, not skipped. Analytics and update checks
-// are off in tack's generated config.
+// are off in tack's generated config. The model is a custom Responses
+// provider on the loopback stand-in, over plain HTTP: the built-in openai
+// provider uses the Responses websocket, and a custom one does only when
+// supports_websockets is set.
 function sessionFlags(port) {
   const flags = [
     "feedback.enabled=false",
@@ -198,7 +203,16 @@ function sessionFlags(port) {
     'web_search="disabled"',
   ];
 
-  if (port !== undefined) flags.push('openai_base_url="http://127.0.0.1:' + port + '/v1"');
+  if (port !== undefined) {
+    flags.push(
+      'model_provider="loopback"',
+      'model_providers.loopback.name="loopback"',
+      'model_providers.loopback.base_url="http://127.0.0.1:' + port + '/v1"',
+      'model_providers.loopback.env_key="CODEX_API_KEY"',
+      'model_providers.loopback.wire_api="responses"',
+      "model_providers.loopback.supports_websockets=false",
+    );
+  }
 
   return flags.flatMap((flag) => ["-c", flag]);
 }
@@ -827,9 +841,22 @@ function tamper(sourcePath, mode) {
   writeFileSync(sourcePath, text.slice(0, end) + '\nstatusMessage = "tampered"' + text.slice(end));
 }
 
-// Inside the CI namespace only loopback exists, so no request can leave.
+// Routes through any interface but loopback, from this process's own network
+// namespace. /proc/net follows the namespace; /sys/class/net does not.
+function outboundRoutes() {
+  const ipv4 = (readOptional("/proc/net/route") ?? "").split("\n").slice(1)
+    .map((row) => row.trim().split(/\s+/)[0]);
+  const ipv6 = (readOptional("/proc/net/ipv6_route") ?? "").split("\n")
+    .map((row) => row.trim().split(/\s+/).at(-1));
+
+  return [...ipv4, ...ipv6].filter((iface) => iface && iface !== "lo");
+}
+
+// Inside the CI namespace this process sees only loopback, no route leaves it,
+// and an outbound connect fails at once.
 async function checkOffline(check) {
-  const interfaces = readdirSync("/sys/class/net").sort();
+  const interfaces = Object.keys(networkInterfaces()).sort();
+  const routes = outboundRoutes();
   const refused = await new Promise((resolve) => {
     const socket = net.connect({ host: "192.0.2.1", port: 443, timeout: 2_000 });
     socket.once("connect", () => { socket.destroy(); resolve(false); });
@@ -837,10 +864,10 @@ async function checkOffline(check) {
     socket.once("error", (error) => resolve(error.code));
   });
 
-  check("network holds loopback alone and refuses outbound connections",
+  check("only loopback, no route off it, and outbound connections refused",
     process.env.TACK_CODEX_OFFLINE === "1" && isDeepStrictEqual(interfaces, ["lo"]) &&
-      typeof refused === "string",
-    { interfaces, refused, flag: process.env.TACK_CODEX_OFFLINE });
+      routes.length === 0 && typeof refused === "string",
+    { interfaces, routes, refused, flag: process.env.TACK_CODEX_OFFLINE });
 }
 
 function readRequests(tree) {
@@ -1078,8 +1105,8 @@ function checkDirect(env, expected, listing, check) {
   if (!guard) return;
 
   const result = runPreToolUse(guard.command, tree, env.codex);
-  check("node " + expected.node + ": wrapper exits 2 with tack: node_missing on stderr",
-    result.status === 2 && result.stdout === "" && result.stderr.trim() === "tack: node_missing",
+  check("node " + expected.node + ": wrapper exits 2 with " + expected.reason + " on stderr",
+    result.status === 2 && result.stdout === "" && result.stderr.trim() === expected.reason,
     { status: result.status, signal: result.signal, error: result.error?.message,
       stdout: result.stdout, stderr: result.stderr });
   check("no tack-hook call without a working node", readOptional(tree.hookAttempts) === "",
@@ -1117,7 +1144,8 @@ async function exerciseCase(env, expected, check) {
   }
 
   const problems = trustProblems(listing, tree, out);
-  check("exactly tack's handlers are enabled and trusted", problems.length === 0,
+  check(expected.rebuild ? "rebuild keeps exactly tack's handlers enabled and trusted"
+    : "exactly tack's handlers are enabled and trusted", problems.length === 0,
     { problems, hooks: hooksOf(listing) });
   if (expected.mcpBroken) breakMcp(out, check);
 

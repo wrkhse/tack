@@ -36,7 +36,9 @@ CODEX_HOME=/tmp/codex-home tack build fixtures/safe-push --out dist --target cod
 
 Each hook command is `sh '<dir>/run-hook.sh' '<dir>/<script>.js'`. Codex runs
 it with `$SHELL -lc` and lets the call run on exit 127 or a crash, so the
-wrapper turns both into exit 2 with `tack: node_missing` on stderr.
+wrapper exits 2 with an exact reason on stderr and nothing on stdout:
+`tack: node_missing` when there is no `node`, and `tack: node_failed` when
+`node` exits nonzero or dies of a signal.
 
 The `config.toml` fragment marks the `tack` server `required`, so a server
 that fails to start is a named failure, and passes `TACK_RECORDER`,

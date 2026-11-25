@@ -223,6 +223,71 @@ fn a_refused_config_leaves_both_files_untouched() {
 }
 
 #[test]
+fn read_optional_reports_a_path_it_cannot_read_and_only_a_missing_one_is_none() {
+    let scratch = Scratch::new();
+    let file = scratch.root.join("config.toml");
+    fs::write(&file, "x = 1\n").expect("file");
+
+    assert_eq!(read_optional(&scratch.root.join("missing.toml")), Ok(None));
+    assert_eq!(read_optional(&file), Ok(Some("x = 1\n".to_owned())));
+    assert!(matches!(
+        read_optional(&scratch.root),
+        Err(CodexError::Io(_))
+    ));
+}
+
+fn command_group(command: &str) -> Value {
+    json!({ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] })
+}
+
+#[test]
+fn only_the_wrapped_tack_script_is_a_tack_group() {
+    let wrapped = "sh '/out/codex/run-hook.sh' '/out/codex/pre-tool-use.js'";
+
+    assert!(is_tack_group(&command_group(wrapped), Event::PreToolUse));
+
+    for command in [
+        "bash '/out/codex/run-hook.sh' '/out/codex/pre-tool-use.js'",
+        "sh '/out/codex/other.sh' '/out/codex/pre-tool-use.js'",
+        "node '/out/codex/pre-tool-use.js'",
+        "sh '/out/codex/run-hook.sh' '/out/codex/session-start.js'",
+        "sh '/out/codex/run-hook.sh' '/out/codex/pre-tool-use.js' --extra",
+    ] {
+        assert!(
+            !is_tack_group(&command_group(command), Event::PreToolUse),
+            "{command}"
+        );
+    }
+
+    let prompt = json!({ "hooks": [{ "type": "prompt", "command": wrapped }] });
+    let two = json!({ "hooks": [
+        { "type": "command", "command": wrapped },
+        { "type": "command", "command": wrapped }
+    ] });
+
+    assert!(!is_tack_group(&prompt, Event::PreToolUse));
+    assert!(!is_tack_group(&two, Event::PreToolUse));
+}
+
+#[test]
+fn a_state_key_outside_hooks_or_another_key_inside_it_is_kept() {
+    let trust = [(
+        "/h/hooks.json:pre_tool_use:0:0".to_owned(),
+        "sha256:x".to_owned(),
+    )];
+    let existing = "[tui]\nstate = \"compact\"\n\n[hooks]\ndescription = \"mine\"\n";
+
+    let merged = merge_state(existing, &trust).expect("both lines are kept");
+
+    assert_eq!(
+        merged,
+        "[tui]\nstate = \"compact\"\n\n[hooks]\ndescription = \"mine\"\n\n\
+         [hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"]\nenabled = true\n\
+         trusted_hash = \"sha256:x\"\n"
+    );
+}
+
+#[test]
 fn the_home_resolves_as_codex_resolves_it() {
     let scratch = Scratch::new();
     let file = scratch.root.join("file");

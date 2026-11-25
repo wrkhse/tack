@@ -113,7 +113,7 @@ fn the_adapter_emits_six_files_in_order() {
 }
 
 #[test]
-fn the_wrapper_turns_a_missing_or_failing_node_into_a_named_block() {
+fn the_wrapper_names_a_missing_node_apart_from_a_failing_one() {
     let lines: Vec<&str> = RUN_HOOK
         .lines()
         .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
@@ -127,14 +127,16 @@ fn the_wrapper_turns_a_missing_or_failing_node_into_a_named_block() {
             "  echo 'tack: node_missing' >&2",
             "  exit 2",
             "fi",
-            r#"if output=$(node "$script" 2>/dev/null); then"#,
-            r#"  if [ -n "$output" ]; then"#,
-            r#"    printf '%s\n' "$output""#,
-            "  fi",
-            "  exit 0",
+            r#"output=$( (node "$script") 2>/dev/null )"#,
+            "status=$?",
+            r#"if [ "$status" -ne 0 ]; then"#,
+            "  echo 'tack: node_failed' >&2",
+            "  exit 2",
             "fi",
-            "echo 'tack: node_missing' >&2",
-            "exit 2",
+            r#"if [ -n "$output" ]; then"#,
+            r#"  printf '%s\n' "$output""#,
+            "fi",
+            "exit 0",
         ]
     );
 }

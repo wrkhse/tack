@@ -45,7 +45,7 @@ When Codex offers `shell_command` or `shell` in place of
 deferred behind `tool_search`, the status step searches for it first.
 Each logged request holds the offered tool names, the outputs by call id
 and a timestamp. It serves at most 20 requests, reads at most 8 MiB a body, refuses a
-websocket upgrade, and exits after 150 seconds.
+websocket upgrade, which Codex never asks for here, and exits after 150 seconds.
 
 ## The run
 
@@ -60,12 +60,18 @@ the run takes the user's one remaining step: it puts the generated
 That fragment registers the `tack` MCP server and turns analytics and update
 checks off, which the run checks. Codex then runs with
 `CODEX_API_KEY=dummy` and these session flags, with no
-`--ignore-user-config` and no trust bypass:
+`--ignore-user-config` and no trust bypass. The model is a custom Responses
+provider over plain HTTP, since the built-in `openai` provider uses the
+Responses websocket:
 
 ```sh
 codex -c feedback.enabled=false -c 'otel.metrics_exporter="none"' \
   -c mcp_optional_startup_grace_ms=0 -c 'web_search="disabled"' \
-  -c 'openai_base_url="http://127.0.0.1:<port>/v1"' \
+  -c 'model_provider="loopback"' -c 'model_providers.loopback.name="loopback"' \
+  -c 'model_providers.loopback.base_url="http://127.0.0.1:<port>/v1"' \
+  -c 'model_providers.loopback.env_key="CODEX_API_KEY"' \
+  -c 'model_providers.loopback.wire_api="responses"' \
+  -c model_providers.loopback.supports_websockets=false \
   exec --json --sandbox danger-full-access -m scripted 'push my branch'
 ```
 
@@ -87,7 +93,7 @@ PreToolUse handler matches Bash and one SessionStart handler loads.
 | invalid-guard-status | the call fails with `tack: malformed` and never reaches tack-hook       |
 | mcp-start-failure    | Codex names the `tack` MCP server's failure and pushes nothing; it stops, or runs on with the push blocked and no `guard_status` |
 | node-missing         | the PreToolUse command, run with `$SHELL -lc`, exits 2 with `tack: node_missing` on stderr |
-| node-crash           | the same, with a `node` that dies of SIGSEGV                         |
+| node-crash           | with a `node` that dies of SIGSEGV, it exits 2 with `tack: node_failed` on stderr |
 | stale-trust          | a changed PreToolUse handler lists as `modified` and blocks nothing    |
 | config-parse-error   | an unparsable hooks file fails the trust and load checks               |
 
@@ -101,7 +107,9 @@ the real one, and logs each verdict it returned; those lines match the same
 calls one for one.
 
 The workflow runs the cases in a network namespace that holds loopback
-alone, and `run.mjs` checks that before and after them. On failure it
+alone. Before and after them, `run.mjs` checks from inside it that it sees
+only `lo`, that no route leaves loopback, and that an outbound connect is
+refused. On failure it
 uploads each case's requests, recorders, JSONL, stderr, hook listings,
 daemon log and generated Codex config. The throwaway tree is always
 removed.
