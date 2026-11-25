@@ -44,6 +44,10 @@ const RUN_TIMEOUT_MS = 90_000;
 const MAX_OUTPUT_CHARS = 4 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 256;
 const PUSH = "git push origin main";
+// The command tack allows in the harmless case, and the untracked file whose
+// `?? ` line in its output shows the real git ran in the project.
+const HARMLESS = "git status --short";
+const UNTRACKED = "harmless.txt";
 // Codex leaves additionalContextLimit out of the hash at its default.
 const DEFAULT_CONTEXT_LIMIT = 2500;
 // What the adapter appends to TACK_RECORDER: the SessionStart load marker,
@@ -51,20 +55,23 @@ const DEFAULT_CONTEXT_LIMIT = 2500;
 const ADAPTER_LINES = {
   loaded: '{"call":"tack-loaded"}',
   bash: '{"call":"bash","id":1}',
+  allow: '{"call":"bash","id":1}',
   status: '{"call":"guard_status","id":1}',
 };
 // What the hook recorder logs for each verdict tack-hook returned.
 const VERDICT_LINES = {
   bash: '{"request":"hook","hook":"toolBefore","outcome":"deny"}',
+  allow: '{"request":"hook","hook":"toolBefore","outcome":"allow"}',
   status: '{"request":"tool","name":"guard_status","outcome":"tool"}',
 };
 
 // session: a full codex exec run. direct: the PreToolUse command run as
 // Codex runs it, with no model. detect: a broken install the trust and load
-// assertions must catch.
+// assertions must catch. allow: the Bash command tack lets run.
 const cases = [
   { name: "normal", kind: "session", model: "normal", hook: "real", rebuild: true,
     bash: "tack: push blocked", status: "ok" },
+  { name: "harmless", kind: "session", model: "harmless", hook: "real", allow: HARMLESS },
   { name: "missing-hook", kind: "session", model: "bash", hook: "missing",
     bash: "tack: hook_missing" },
   { name: "daemon-crash", kind: "session", model: "bash", hook: "real", crash: true,
@@ -153,6 +160,8 @@ function layout(base) {
     recorder: path.join(base, "recorder.log"),
     hookCalls: path.join(base, "hook-calls.log"),
     hookAttempts: path.join(base, "hook-attempts.log"),
+    gitShim: path.join(base, "git-shim"),
+    gitRuns: path.join(base, "git-runs.log"),
     sleepPid: path.join(base, "sleep.pid"),
   };
 }
@@ -356,6 +365,30 @@ function installNode(tree, env, mode) {
   symlinkSync(process.execPath, node);
 }
 
+function shellQuote(text) {
+  return "'" + text.replaceAll("'", "'\\''") + "'";
+}
+
+// The shared git shim on PATH. A case with an allowed command wraps it in a
+// recorder that logs each call's exit status and arguments once it returns,
+// so the log shows the command ran; the shim itself stays unchanged.
+function installGit(tree, expected) {
+  const git = path.join(tree.bin, "git");
+
+  if (!expected.allow) {
+    copyFileSync(gitShim, git);
+    chmodSync(git, 0o755);
+    return;
+  }
+
+  copyFileSync(gitShim, tree.gitShim);
+  chmodSync(tree.gitShim, 0o755);
+  writeFileSync(tree.gitRuns, "");
+  writeFileSync(git, "#!/bin/sh\n" + shellQuote(tree.gitShim) + ' "$@"\nstatus=$?\n' +
+    "printf '%s %s\\n' \"$status\" \"$*\" >> " + shellQuote(tree.gitRuns) +
+    '\nexit "$status"\n', { mode: 0o755 });
+}
+
 function prepare(tree, env, expected) {
   for (const dir of [tree.home, tree.codexHome, tree.config, tree.data, tree.cache,
     tree.tmp, tree.bin, tree.project]) {
@@ -368,12 +401,11 @@ function prepare(tree, env, expected) {
   writeFileSync(tree.hookCalls, "");
   writeFileSync(tree.hookAttempts, "");
 
-  const git = path.join(tree.bin, "git");
-  copyFileSync(gitShim, git);
-  chmodSync(git, 0o755);
+  installGit(tree, expected);
   installNode(tree, env, expected.node);
   installHook(tree, env, expected.hook);
   initProject(tree, env);
+  if (expected.allow) writeFileSync(path.join(tree.project, UNTRACKED), "untracked\n");
 }
 
 function tackBuild(tack, tree, out) {
@@ -1015,8 +1047,11 @@ function checkCase(tree, run, expected, check) {
     check("no guard_status call", calls.length === 0, calls);
   }
 
+  if (expected.allow) checkAllowed(tree, output, reason, check);
+
   checkRecorders(tree, [
     ...(reason === "tack: push blocked" ? ["bash"] : []),
+    ...(expected.allow ? ["allow"] : []),
     ...(statusOk ? ["status"] : []),
   ], stopped, check);
   checkAttempts(tree, expected, check);
@@ -1029,6 +1064,31 @@ function checkCase(tree, run, expected, check) {
       "tack-daemon: tool guard_status ok",
     ]), lines);
   }
+}
+
+// tack allowed the harmless command and it ran: Codex returned real git's
+// output to the model with no block, the wrapped shim logged the one call
+// with exit status 0, and the daemon logged exactly one allow. Codex may run
+// git for itself; only calls with the command's own arguments count.
+function checkAllowed(tree, output, reason, check) {
+  const args = HARMLESS.slice("git ".length);
+  const runs = (readOptional(tree.gitRuns) ?? "").split("\n")
+    .filter((line) => line.slice(line.indexOf(" ") + 1) === args);
+  const lines = readOptional(path.join(tree.state, "daemon.log"))?.split("\n");
+  const terminated = lines?.pop() === "";
+
+  // Codex frames the command's output, so the untracked file's line is a
+  // substring of what it returned to the model.
+  check("bash allowed: " + HARMLESS + " ran with no block reason",
+    reason === undefined && typeof output === "string" &&
+      output.includes("?? " + UNTRACKED) && !output.includes("blocked by PreToolUse hook"),
+    { output });
+  check("git shim recorded " + HARMLESS + " executing once with exit status 0",
+    isDeepStrictEqual(runs, ["0 " + args]), readOptional(tree.gitRuns));
+  check("exact daemon log line: hook toolBefore allow", terminated &&
+    isDeepStrictEqual(lines, ["tack-daemon: hook toolBefore allow"]), lines);
+  check("tack-hook invoked once", readOptional(tree.hookAttempts) === "invoked\n",
+    readOptional(tree.hookAttempts));
 }
 
 function checkAttempts(tree, expected, check) {
@@ -1183,6 +1243,7 @@ function keepEvidence(tree, target) {
     path.join(tree.base, "codex-output.jsonl"), path.join(tree.base, "codex-stderr.log"),
     path.join(tree.base, "app-server-stderr.log"), path.join(tree.base, "hooks-list.jsonl"),
     path.join(tree.base, "model-stderr.log"), path.join(tree.state, "daemon.log"),
+    tree.gitRuns,
     path.join(tree.codexHome, "config.toml"), path.join(tree.codexHome, "hooks.json")];
 
   for (const file of files) {
@@ -1224,10 +1285,11 @@ async function runCase(bins, expected, root, target, check) {
   }
 }
 
-function checker(rows, name) {
+function checker(rows, name, own = []) {
   return (label, ok, evidence) => {
     const row = (ok === true ? "PASS " : "FAIL ") + name + ": " + label;
     rows.push(row);
+    own.push(row);
     console.log(row);
     if (ok !== true) console.error("  evidence: " + JSON.stringify(evidence)?.slice(0, 4000));
   };
@@ -1252,17 +1314,26 @@ async function main() {
   mkdirSync(artifacts, { recursive: true });
 
   const rows = [];
+  const caseRows = new Map();
   await checkOffline(checker(rows, "network"));
 
   for (const expected of cases) {
+    const own = [];
+    caseRows.set(expected.name, own);
     await runCase(bins, expected, root, path.join(artifacts, expected.name),
-      checker(rows, expected.name));
+      checker(rows, expected.name, own));
   }
 
   await checkOffline(checker(rows, "network"));
-  writeFileSync(path.join(artifacts, "verdict.txt"), rows.join("\n") + "\n");
 
-  return rows.every((row) => row.startsWith("PASS ")) ? 0 : 1;
+  // Its own row: every check of the harmless case passed, and it ran some.
+  const harmless = caseRows.get("harmless") ?? [];
+  const allowed = harmless.length > 0 && harmless.every((row) => row.startsWith("PASS "));
+  const allowedRow = "harmless_allowed=" + allowed;
+  console.log(allowedRow);
+  writeFileSync(path.join(artifacts, "verdict.txt"), [...rows, allowedRow].join("\n") + "\n");
+
+  return rows.every((row) => row.startsWith("PASS ")) && allowed ? 0 : 1;
 }
 
 process.exitCode = await main();

@@ -11,12 +11,14 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 // Outlives the runner's session and model-start bounds combined.
 const LIFETIME_MS = 150_000;
 const PUSH = "git push origin main";
+const HARMLESS = "git status --short";
 
-const BASH = { kind: "bash", callId: "call_bash" };
+const BASH = { kind: "bash", callId: "call_bash", command: PUSH };
 const STATUS = { kind: "status", callId: "call_status", input: {} };
 const scripts = new Map([
   ["normal", [BASH, STATUS]],
   ["bash", [BASH]],
+  ["harmless", [{ ...BASH, command: HARMLESS }]],
   ["invalid-tool", [{ ...STATUS, input: { unexpected: true } }]],
 ]);
 
@@ -75,17 +77,17 @@ function findStatus(tools, input) {
   return undefined;
 }
 
-function bashCall(names) {
+function bashCall(names, command) {
   if (names.includes("exec_command")) {
-    return { name: "exec_command", arguments: { cmd: PUSH } };
+    return { name: "exec_command", arguments: { cmd: command } };
   }
 
   if (names.includes("shell_command")) {
-    return { name: "shell_command", arguments: { command: PUSH } };
+    return { name: "shell_command", arguments: { command } };
   }
 
   if (names.includes("shell")) {
-    return { name: "shell", arguments: { command: ["bash", "-lc", PUSH] } };
+    return { name: "shell", arguments: { command: ["bash", "-lc", command] } };
   }
 
   throw new Error("no shell tool offered: " + JSON.stringify(names));
@@ -122,7 +124,7 @@ function nextItem(tools, input, outputs) {
     if (step.callId in outputs) continue;
 
     if (step.kind === "bash") {
-      const call = bashCall(names);
+      const call = bashCall(names, step.command);
       return {
         type: "function_call",
         call_id: step.callId,

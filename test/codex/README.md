@@ -2,8 +2,9 @@
 
 The CI check `conformance (codex)` runs the pinned Codex 0.172.0 against the
 safe-push fixture built with `--target codex`. A push through Bash is
-blocked by tack's PreToolUse handler, and `guard_status` runs in tack's
-daemon through the adapter's MCP server.
+blocked by tack's PreToolUse handler, a harmless `git status --short` is
+allowed by tack and runs, and `guard_status` runs in tack's daemon through
+the adapter's MCP server.
 
 ```mermaid
 flowchart LR
@@ -26,7 +27,9 @@ flowchart LR
 - `run.mjs` builds the throwaway tree for each case, runs tack and Codex,
   checks the evidence and writes `verdict.txt`.
 - The git shim is `test/claude/git-shim`. It records pushes and runs
-  every other call with the real git.
+  every other call with the real git. The harmless case wraps it in a
+  recorder that appends each call's exit status and arguments to
+  `git-runs.log` once it returns, such as `0 status --short`.
 
 ## The stand-in
 
@@ -34,11 +37,12 @@ flowchart LR
 `POST /v1/responses`. Each request's reply follows the script and the
 function outputs already in its input:
 
-| Step   | Reply                                                          |
-| ------ | -------------------------------------------------------------- |
-| bash   | `exec_command` with `{ "cmd": "git push origin main" }`        |
-| status | `guard_status` in the `mcp__tack` namespace, with `{}`         |
-| last   | the text `done`                                                |
+| Step     | Reply                                                   |
+| -------- | ------------------------------------------------------- |
+| bash     | `exec_command` with `{ "cmd": "git push origin main" }` |
+| harmless | `exec_command` with `{ "cmd": "git status --short" }`   |
+| status   | `guard_status` in the `mcp__tack` namespace, with `{}`  |
+| last     | the text `done`                                         |
 
 When Codex offers `shell_command` or `shell` in place of
 `exec_command`, the bash step uses that tool. When `guard_status` is
@@ -86,6 +90,7 @@ PreToolUse handler matches Bash and one SessionStart handler loads.
 | Case                 | Passes when                                                            |
 | -------------------- | ---------------------------------------------------------------------- |
 | normal               | trusted after a rebuild into a new folder with the same IDs and a new hash; `tack: push blocked`; `guard_status: daemon ok`; exact daemon log |
+| harmless             | `git status --short` runs with no block reason and its output shows the untracked `harmless.txt`; `git-runs.log` holds exactly one `0 status --short`; tack-hook runs once; the daemon log is exactly `tack-daemon: hook toolBefore allow` |
 | missing-hook         | `tack: hook_missing`                                                   |
 | daemon-crash         | `tack: socket_closed`                                                  |
 | timeout              | `tack: timeout`, before the stalled tack-hook exits                    |
@@ -101,10 +106,16 @@ Every session case also needs a clean exit with the text `done` and these
 lines in `TACK_RECORDER`: zero pushes from the git shim, exactly one
 `{"call":"tack-loaded"}` from tack's SessionStart handler, and one adapter
 line for each successful call, `{"call":"bash","id":1}` for the blocked
-push and `{"call":"guard_status","id":1}` for a working `guard_status`.
+push or the allowed `git status --short` and `{"call":"guard_status","id":1}`
+for a working `guard_status`.
 The hook recorder runs as `tack-hook` first on PATH, passes each call to
 the real one, and logs each verdict it returned; those lines match the same
 calls one for one.
+
+`verdict.txt` holds one `PASS` or `FAIL` row for each check, then the row
+`harmless_allowed=true` when the harmless case ran and every one of its
+checks passed, or `harmless_allowed=false`. The run exits 0 only when every
+check passed and that row is true.
 
 The workflow runs the cases in a network namespace that holds loopback
 alone. Before and after them, `run.mjs` checks from inside it that it sees
