@@ -623,6 +623,23 @@ fn a_hash_record_longer_than_its_bound_is_refused() {
 }
 
 #[test]
+fn a_hash_record_that_cannot_be_opened_is_an_io_error_and_only_a_missing_one_is_none() {
+    let scratch = Scratch::new();
+    let blocker = scratch.root.join("blocker");
+    fs::write(&blocker, "").expect("blocker");
+
+    // A path under a regular file fails to open, and not as missing.
+    let unreadable = blocker.join(HASHES_FILE);
+    let expected = fs::File::open(&unreadable).expect_err("a file is not a folder");
+
+    assert_eq!(
+        read_hashes_file(&unreadable),
+        Err(CodexError::Io(expected.to_string()))
+    );
+    assert_eq!(read_hashes_file(&scratch.root.join(HASHES_FILE)), Ok(None));
+}
+
+#[test]
 fn state_merge_refuses_what_it_cannot_place() {
     let trust = [(
         "/h/hooks.json:pre_tool_use:0:0".to_owned(),
