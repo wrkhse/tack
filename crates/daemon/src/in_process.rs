@@ -6,10 +6,13 @@
 //! sandbox with a fresh VM from the plugin folder. A line the module cannot
 //! answer yields a named error, never an allow.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 use barn_stall::Request as StallRequest;
 use tack_luau::{Capabilities, EngineError, Limits, Sandbox};
@@ -20,6 +23,9 @@ use crate::{dispatch, frames};
 
 /// The single-line reply to a reload control frame.
 pub const RELOAD_REPLY: &str = r#"{"type":"reloaded"}"#;
+
+const MAX_PLUGIN_FILES: usize = 64;
+const MAX_PLUGIN_FILE_BYTES: u64 = 1024 * 1024;
 
 /// The reload control line sent when the plugin folder changes.
 #[must_use]
@@ -47,46 +53,93 @@ fn parse(frame: &str) -> Result<Frame, StallError> {
         .map_err(|_| StallError::Malformed)
 }
 
-/// Remembers the plugin folder's modification time between requests.
+/// A bounded snapshot of a plugin folder's direct files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fingerprint {
+    Value(u64),
+    Unsafe,
+}
+
+/// Hash each direct file's path and bytes in path order. An unreadable
+/// folder, too many files or an oversized file is `Unsafe`, which always
+/// reports a change.
+fn folder_fingerprint(plugin: &Path) -> Fingerprint {
+    let Ok(entries) = fs::read_dir(plugin) else {
+        return Fingerprint::Unsafe;
+    };
+
+    let mut paths = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return Fingerprint::Unsafe;
+        };
+        match entry.file_type() {
+            Ok(kind) if kind.is_file() => paths.push(entry.path()),
+            Ok(_) => {}
+            Err(_) => return Fingerprint::Unsafe,
+        }
+    }
+    if paths.len() > MAX_PLUGIN_FILES {
+        return Fingerprint::Unsafe;
+    }
+    paths.sort();
+
+    let mut hasher = DefaultHasher::new();
+    for path in paths {
+        let Ok(mut file) = fs::File::open(&path) else {
+            return Fingerprint::Unsafe;
+        };
+        let mut bytes = Vec::new();
+        if file
+            .by_ref()
+            .take(MAX_PLUGIN_FILE_BYTES)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            return Fingerprint::Unsafe;
+        }
+        let mut extra = [0u8; 1];
+        match file.read(&mut extra) {
+            Ok(0) => {}
+            _ => return Fingerprint::Unsafe,
+        }
+
+        path.hash(&mut hasher);
+        bytes.hash(&mut hasher);
+    }
+
+    Fingerprint::Value(hasher.finish())
+}
+
+/// Remembers the plugin folder's fingerprint between requests.
 pub struct ReloadGuard {
     plugin: PathBuf,
-    modified: Option<SystemTime>,
+    fingerprint: Fingerprint,
 }
 
 impl ReloadGuard {
-    /// Snapshot the folder's modification time now.
+    /// Snapshot the plugin folder now.
     #[must_use]
     pub fn new(plugin: PathBuf) -> Self {
-        let modified = Self::modified(&plugin);
+        let fingerprint = folder_fingerprint(&plugin);
 
-        Self { plugin, modified }
-    }
-
-    /// The newer of the folder's and plugin.luau's modification times.
-    fn modified(plugin: &Path) -> Option<SystemTime> {
-        let dir = fs::metadata(plugin).and_then(|meta| meta.modified()).ok();
-        let file = fs::metadata(plugin.join("plugin.luau"))
-            .and_then(|meta| meta.modified())
-            .ok();
-
-        match (dir, file) {
-            (Some(dir), Some(file)) => Some(dir.max(file)),
-            (Some(dir), None) | (None, Some(dir)) => Some(dir),
-            (None, None) => None,
+        Self {
+            plugin,
+            fingerprint,
         }
     }
 
-    /// Report and remember a change since the last check.
-    pub fn changed(&mut self) -> bool {
-        let modified = Self::modified(&self.plugin);
+    /// Report whether the folder differs from the committed snapshot.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        let current = folder_fingerprint(&self.plugin);
 
-        if modified == self.modified {
-            return false;
-        }
+        matches!(current, Fingerprint::Unsafe) || current != self.fingerprint
+    }
 
-        self.modified = modified;
-
-        true
+    /// Commit the current snapshot after a successful reload.
+    pub fn commit(&mut self) {
+        self.fingerprint = folder_fingerprint(&self.plugin);
     }
 }
 
@@ -331,15 +384,49 @@ mod tests {
 
     #[test]
     fn a_reload_guard_detects_a_changed_file() {
-        let folder = PluginFolder::new("return { name = \"guard-test\" }");
-        let mut guard = ReloadGuard::new(folder.0.clone());
+        let folder = PluginFolder::new("return { name = \"v1\" }");
+        let guard = ReloadGuard::new(folder.0.clone());
 
         assert!(!guard.changed());
 
-        folder.write("return { name = \"changed\" }");
+        folder.write("return { name = \"v2\" }");
 
         assert!(guard.changed());
+    }
+
+    #[test]
+    fn a_guard_stays_changed_when_the_reload_fails() {
+        let folder = PluginFolder::new("return { name = \"v1\" }");
+        let guard = ReloadGuard::new(folder.0.clone());
+
+        folder.write("return { name = \"v2\" }");
+
+        assert!(guard.changed());
+        assert!(guard.changed());
+    }
+
+    #[test]
+    fn a_guard_is_clear_after_a_successful_reload_commits() {
+        let folder = PluginFolder::new("return { name = \"v1\" }");
+        let mut guard = ReloadGuard::new(folder.0.clone());
+
+        folder.write("return { name = \"v2\" }");
+
+        assert!(guard.changed());
+        guard.commit();
         assert!(!guard.changed());
+    }
+
+    #[test]
+    fn an_expired_deadline_returns_timeout_without_dispatch() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/safe-push");
+        let mut stall = InProcessStall::new(folder).unwrap();
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("the clock is far from the epoch");
+        let frame = hook_frame(7, "git push");
+
+        assert_eq!(stall.call(&frame, deadline), Err(StallError::Timeout));
     }
 
     #[test]

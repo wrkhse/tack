@@ -74,7 +74,7 @@ fn handle(request: &Request, client: &Mutex<(Client, ReloadGuard)>) -> Reply {
 
         if guard.changed() {
             match client.control(reload_frame(), control_deadline()) {
-                Ok(reply) if reply == RELOAD_REPLY => {}
+                Ok(reply) if reply == RELOAD_REPLY => guard.commit(),
                 Ok(_) => return daemon_error(id, "unexpected reload reply"),
                 Err(error) => return daemon_error(id, error),
             }

@@ -648,12 +648,16 @@ mod tests {
     #[test]
     fn control_times_out_before_calling() {
         let clock = FakeClock::new(Instant::now());
+        let deadline = clock
+            .now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("the clock is far from the epoch");
         let stall = FakeStall::reply(clock.clone(), RELOADED);
         let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
         let no_frames: &[String] = &[];
 
         assert_eq!(
-            client.control(RELOAD_FRAME, Instant::now()),
+            client.control(RELOAD_FRAME, deadline),
             Err(StallError::Timeout)
         );
         assert_eq!(client.transport.frames(), no_frames);
