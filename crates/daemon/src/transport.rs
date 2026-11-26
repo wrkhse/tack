@@ -1957,10 +1957,16 @@ mod tests {
         });
 
         let mut received = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut received))
-            .await
-            .expect("the daemon ends a trickling peer at its I/O lifetime")
-            .unwrap();
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut received))
+                .await
+                .expect("the daemon ends a trickling peer at its I/O lifetime");
+
+        // The daemon closes with trickled bytes still unread, which the peer
+        // may see as a reset rather than a clean end. Either way it closed.
+        if let Err(error) = outcome {
+            assert_eq!(error.kind(), ErrorKind::ConnectionReset, "{error}");
+        }
 
         assert_eq!(received, Vec::<u8>::new());
 
