@@ -64,6 +64,11 @@ compact, sorted JSON of the event label, the matcher and the handler with
   and neither file changes.
 - Each file is written beside itself and renamed into place.
 
+Tack keeps a bounded `tack-hashes` file beside config.toml. It records the
+hashes its hooks were trusted under, so a later build recognises trust state
+from tack hooks no longer in hooks.json. A malformed record refuses the build
+with a named reason; config.toml is never modified by this record.
+
 ## Verification
 
 - `tests/render.rs` and the unit tests: template-only differences, exact

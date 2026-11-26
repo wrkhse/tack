@@ -79,13 +79,14 @@ codex -c feedback.enabled=false -c 'otel.metrics_exporter="none"' \
   exec --json --sandbox danger-full-access -m scripted 'push my branch'
 ```
 
-Every case first runs `tack build` and checks that the throwaway folders
-hold only `config.toml` and `hooks.json` in `CODEX_HOME` and the empty
-tack state folder, before any Codex process runs. It then asks `codex app-server` for `hooks/list` and
-checks Codex's own view: every listed hook is tack's, from the user layer,
-enabled and `trusted`, keyed `<source>:<event>:<group>:<handler>`, with
-the current hash recomputed from the listing as Codex computes it; one
-PreToolUse handler matches Bash and one SessionStart handler loads.
+Every case first runs `tack build` and checks that the throwaway folders hold
+only tack's `config.toml`, `hooks.json` and `tack-hashes` in `CODEX_HOME` and
+the empty tack state folder, before any Codex process runs; the check rejects
+any other file. It then asks `codex app-server` for `hooks/list` and checks
+Codex's own view: every listed hook is tack's, from the user layer, enabled and
+`trusted`, keyed `<source>:<event>:<group>:<handler>`, with the current hash
+recomputed from the listing as Codex computes it; one PreToolUse handler matches
+Bash and one SessionStart handler loads.
 
 | Case                 | Passes when                                                                                                                                                                                                                                |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
