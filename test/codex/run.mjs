@@ -569,8 +569,9 @@ function checkPristine(tree, check) {
   };
   const codexOk =
     found.codexHome.includes("config.toml") &&
+    found.codexHome.includes("tack-hashes") &&
     found.codexHome.every((file) =>
-      ["config.toml", "hooks.json"].includes(file),
+      ["config.toml", "hooks.json", "tack-hashes"].includes(file),
     );
 
   check(

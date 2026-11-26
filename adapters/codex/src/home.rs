@@ -1,14 +1,19 @@
 //! Install tack's handlers into a Codex home: merge their groups into
 //! `hooks.json` and their trust into `[hooks.state.<key>]` of `config.toml`.
 //!
-//! Every other hook keeps its group index, so its state key, and its state
-//! table is copied unchanged. Both files are computed before either is
-//! written, and each is replaced by an atomic rename.
+//! Every other hook keeps its group index, so its state key, and the state
+//! tables of hooks that still exist are copied unchanged. Two kinds of table
+//! are dropped: one holding a hash tack recorded as its own, and, on the first
+//! build after an upgrade, before any `tack-hashes` exists, one whose key names
+//! no hook. tack's own `tack-hashes` file beside them remembers the hashes its
+//! hooks were trusted under, so a later build still knows tack's state tables
+//! once no tack group is left in `hooks.json`. All three files are computed
+//! before any is written, and each is replaced by an atomic rename.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -20,6 +25,18 @@ use crate::{CodexError, toml_string};
 pub const HOOKS_FILE: &str = "hooks.json";
 /// The user config Codex reads hook state from.
 pub const CONFIG_FILE: &str = "config.toml";
+/// tack's record of the hashes its hooks were trusted under, newest last: one
+/// `sha256:<hex>` per line, with blank lines and `#` comments ignored.
+pub const HASHES_FILE: &str = "tack-hashes";
+/// The most hashes `HASHES_FILE` keeps.
+const MAX_HASHES: usize = 32;
+/// Why a `HASHES_FILE` is refused: a line that is not a blank line, a comment
+/// or exactly `sha256:<hex>`.
+const MALFORMED_HASHES: &str = "a malformed tack-hashes line";
+/// The largest `HASHES_FILE` tack reads, refused past it as malformed: 80
+/// bytes for each of `MAX_HASHES` lines, room for every hash, the header and
+/// short comments.
+const MAX_HASHES_BYTES: u64 = 2560;
 
 /// Find the Codex home as Codex does: `CODEX_HOME`, which must be an
 /// existing folder and is canonicalized, else `HOME/.codex`, created when
@@ -59,22 +76,25 @@ pub fn resolve_home(
     Ok(path)
 }
 
-/// The two files written into the Codex home.
+/// The three files written into the Codex home.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
     pub hooks: PathBuf,
     pub config: PathBuf,
+    pub hashes: PathBuf,
 }
 
-/// The two home files as a build will write them: read, merged and checked,
+/// The three home files as a build will write them: read, merged and checked,
 /// with nothing written yet. Only [`plan_home`] makes one, and
 /// [`Planned::commit`] writes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Planned {
     hooks_path: PathBuf,
     config_path: PathBuf,
+    hashes_path: PathBuf,
     hooks: String,
     config: String,
+    hashes: String,
 }
 
 impl Planned {
@@ -88,10 +108,12 @@ impl Planned {
         // Trust first: a rebuilt hook whose state is missing would be skipped.
         write_atomic(&self.config_path, &self.config)?;
         write_atomic(&self.hooks_path, &self.hooks)?;
+        write_atomic(&self.hashes_path, &self.hashes)?;
 
         Ok(Installed {
             hooks: self.hooks_path,
             config: self.config_path,
+            hashes: self.hashes_path,
         })
     }
 }
@@ -108,18 +130,19 @@ pub fn install(home: &Path, handlers: &[Handler]) -> Result<Installed, CodexErro
     plan_home(home, handlers)?.commit()
 }
 
-/// Read both home files and compute their merge with `handlers` and their
+/// Read the home files and compute their merge with `handlers` and their
 /// trust, checking everything `install` checks, without writing anything.
 ///
 /// # Errors
 ///
 /// Returns [`CodexError::Unsafe`] for a home path Codex's state key cannot
 /// hold, [`CodexError::Hooks`] or [`CodexError::Config`] for an existing
-/// file tack cannot merge into safely, and [`CodexError::Io`] when a file
-/// cannot be read.
+/// file tack cannot merge into safely, a malformed `tack-hashes` included, and
+/// [`CodexError::Io`] when a file cannot be read.
 pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexError> {
     let hooks_path = home.join(HOOKS_FILE);
     let config_path = home.join(CONFIG_FILE);
+    let hashes_path = home.join(HASHES_FILE);
     let source = hooks_path
         .to_str()
         .filter(|text| !text.chars().any(char::is_control))
@@ -127,12 +150,22 @@ pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexErro
 
     let hooks_text = read_optional(&hooks_path)?;
     let (hooks, groups) = merge_hooks(hooks_text.as_deref(), handlers)?;
-    let stale = match hooks_text.as_deref() {
+    let merged: Value =
+        serde_json::from_str(&hooks).map_err(|error| CodexError::Hooks(error.to_string()))?;
+    let mut stale = match hooks_text.as_deref() {
         Some(text) => tack_hashes(
             &serde_json::from_str(text).map_err(|error| CodexError::Hooks(error.to_string()))?,
         ),
         None => HashSet::new(),
     };
+    let hashes_text = read_hashes_file(&hashes_path)?;
+    let record = if hashes_text.is_some() {
+        HashRecord::Present
+    } else {
+        HashRecord::Missing
+    };
+    let recorded = parse_hashes(hashes_text.as_deref().unwrap_or(""))?;
+    stale.extend(recorded.iter().cloned());
     let trust: Vec<(String, String)> = handlers
         .iter()
         .zip(groups)
@@ -145,14 +178,105 @@ pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexErro
         .collect();
 
     let config_text = read_optional(&config_path)?;
-    let config = merge_state(config_text.as_deref().unwrap_or(""), &trust, source, &stale)?;
+    let config = merge_state(
+        config_text.as_deref().unwrap_or(""),
+        &trust,
+        source,
+        &stale,
+        &HookKeys::read(&merged),
+        record,
+    )?;
+    let hashes = render_hashes(&recorded, &trust);
 
     Ok(Planned {
         hooks_path,
         config_path,
+        hashes_path,
         hooks,
         config,
+        hashes,
     })
+}
+
+/// Whether `text` is exactly a hash as tack writes one: `sha256:` and 64
+/// lowercase hex digits.
+fn is_hash(text: &str) -> bool {
+    text.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// The hashes a `tack-hashes` file holds, each once, in file order, keeping
+/// only the newest `MAX_HASHES`: the last ones in the file. At most
+/// `MAX_HASHES` are held while reading; a line repeating a held hash is
+/// skipped.
+///
+/// # Errors
+///
+/// Returns [`CodexError::Config`] for a line that is not blank, a `#`
+/// comment, or exactly a hash.
+fn parse_hashes(text: &str) -> Result<Vec<String>, CodexError> {
+    let mut hashes = VecDeque::with_capacity(MAX_HASHES);
+
+    for line in text.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+
+        if !is_hash(line) {
+            return Err(CodexError::Config(MALFORMED_HASHES.to_owned()));
+        }
+
+        if hashes.iter().any(|held: &String| held == line) {
+            continue;
+        }
+
+        if hashes.len() == MAX_HASHES {
+            hashes.pop_front();
+        }
+
+        hashes.push_back(line.to_owned());
+    }
+
+    Ok(hashes.into())
+}
+
+/// The next `tack-hashes` file: the `recorded` hashes, then `trust`'s hashes
+/// as the newest, each once, keeping the last `MAX_HASHES`. A hash in use is
+/// always among the newest, so it is never dropped while tack trusts it.
+fn render_hashes(recorded: &[String], trust: &[(String, String)]) -> String {
+    let current: Vec<&str> = trust
+        .iter()
+        .map(|(_, hash)| hash.as_str())
+        .filter(|hash| is_hash(hash))
+        .collect();
+    let mut hashes: Vec<&str> = recorded
+        .iter()
+        .map(String::as_str)
+        .filter(|hash| !current.contains(hash))
+        .collect();
+
+    for hash in &current {
+        if !hashes.contains(hash) {
+            hashes.push(hash);
+        }
+    }
+
+    let excess = hashes.len().saturating_sub(MAX_HASHES);
+    hashes.drain(..excess);
+
+    let mut text =
+        String::from("# The hashes tack's Codex hooks were trusted under, newest last.\n");
+
+    for hash in hashes {
+        text.push_str(hash);
+        text.push('\n');
+    }
+
+    text
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, CodexError> {
@@ -161,6 +285,35 @@ fn read_optional(path: &Path) -> Result<Option<String>, CodexError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(CodexError::Io(error.to_string())),
     }
+}
+
+/// Read the `tack-hashes` file at `path`, `None` when it is missing, never
+/// reading more than one byte past `MAX_HASHES_BYTES`.
+///
+/// # Errors
+///
+/// Returns [`CodexError::Config`] for a file longer than `MAX_HASHES_BYTES`,
+/// and [`CodexError::Io`] when it cannot be read or is not UTF-8.
+fn read_hashes_file(path: &Path) -> Result<Option<String>, CodexError> {
+    let io = |error: std::io::Error| CodexError::Io(error.to_string());
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io(error)),
+    };
+
+    let mut bytes = Vec::new();
+    file.take(MAX_HASHES_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+
+    if !u64::try_from(bytes.len()).is_ok_and(|length| length <= MAX_HASHES_BYTES) {
+        return Err(CodexError::Config(MALFORMED_HASHES.to_owned()));
+    }
+
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| CodexError::Io(error.to_string()))
 }
 
 const fn script_name(event: Event) -> &'static str {
@@ -292,17 +445,104 @@ fn tack_hashes(hooks: &Value) -> HashSet<String> {
     hashes
 }
 
-/// Whether `line` sets `trusted_hash` to a plain basic string in `hashes`.
-/// Any other spelling, such as a literal string or a trailing comment, reads
-/// as no, so its table stays.
-fn trusted_hash_in(line: &str, hashes: &HashSet<String>) -> bool {
+/// The value `line` sets `trusted_hash` to, when it is a plain basic string.
+/// Any other spelling, such as a literal string or a trailing comment, gives
+/// `None`, so its table stays.
+fn plain_trusted_hash(line: &str) -> Option<String> {
     let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
 
     compact
         .strip_prefix("trusted_hash=")
         .and_then(|value| value.strip_prefix('"'))
         .and_then(|value| value.strip_suffix('"'))
-        .is_some_and(|hash| !hash.contains(['"', '\\', '#']) && hashes.contains(hash))
+        .filter(|hash| !hash.contains(['"', '\\', '#']))
+        .map(str::to_owned)
+}
+
+/// Whether a `tack-hashes` file was there to read before this build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashRecord {
+    Present,
+    Missing,
+}
+
+/// What a hooks file holds at one state key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyHook {
+    /// A hook, of any shape.
+    Present,
+    /// An event tack does not read, or a group whose handlers are not a list:
+    /// tack cannot tell whether a hook is there.
+    Unknown,
+    /// No hook at all.
+    Missing,
+}
+
+/// The hooks of a hooks file by state key, for the events tack reads: per
+/// event label, its groups in order, each with how many handlers it has, or
+/// `None` for a group whose handlers are not a list.
+#[derive(Debug, Default)]
+struct HookKeys {
+    events: HashMap<&'static str, Vec<Option<usize>>>,
+}
+
+impl HookKeys {
+    fn read(hooks: &Value) -> Self {
+        let mut events = HashMap::new();
+
+        for event in [Event::PreToolUse, Event::SessionStart] {
+            let Some(groups) = hooks
+                .get("hooks")
+                .and_then(|events| events.get(event.name()))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+
+            let counted = groups
+                .iter()
+                .map(|group| group.get("hooks").and_then(Value::as_array).map(Vec::len))
+                .collect();
+
+            events.insert(event.key_label(), counted);
+        }
+
+        Self { events }
+    }
+
+    fn at(&self, event: &str, group: usize, handler: usize) -> KeyHook {
+        let Some(groups) = self.events.get(event) else {
+            return KeyHook::Unknown;
+        };
+
+        match groups.get(group) {
+            Some(None) => KeyHook::Unknown,
+            Some(Some(handlers)) if handler < *handlers => KeyHook::Present,
+            // No such group, or no such handler in it.
+            None | Some(Some(_)) => KeyHook::Missing,
+        }
+    }
+}
+
+/// Whether `line` makes its table, a state table of this hooks file whose
+/// key holds `hook`, tack's to drop. Only two things do, and both need a plain
+/// `trusted_hash`:
+///
+/// - It is one of tack's `stale` hashes. A hash tack recorded as its own is
+///   proof on its own, so the table drops whatever hook its key now holds.
+/// - Its key names no hook, on the first build after an upgrade, before any
+///   `tack-hashes` was written (`record`).
+///
+/// Every other table stays, whatever its hash: the table of a hook that
+/// still exists, though its hash differs from the hook's, the table of a key
+/// tack cannot read, and any table whose hash is spelled otherwise than a
+/// plain string. tack never drops trust it cannot prove is its own.
+fn drops(hook: KeyHook, line: &str, stale: &HashSet<String>, record: HashRecord) -> bool {
+    let Some(hash) = plain_trusted_hash(line) else {
+        return false;
+    };
+
+    stale.contains(&hash) || (hook == KeyHook::Missing && record == HashRecord::Missing)
 }
 
 fn state_header(key: &str) -> String {
@@ -344,21 +584,19 @@ fn state_key(header: &str) -> Option<&str> {
     }
 }
 
-/// Whether `header` is a state table header for a hook of the hooks file
-/// `source`: `[hooks.state."<source>:<event>:<group>:<handler>"]`, with a
-/// non-empty event label and two indices, and only space or a comment after
-/// it. The key is split from its end, so a hooks file whose path only begins
-/// with `source` and a colon is another source and does not match.
-fn is_source_state(header: &str, source: &str) -> bool {
-    let Some(key) = state_key(header) else {
-        return false;
-    };
-
+/// The event label, group and handler of `header` when it is a state table
+/// header for a hook of the hooks file `source`:
+/// `[hooks.state."<source>:<event>:<group>:<handler>"]`, with a non-empty event
+/// label and two indices, and only space or a comment after it. The key is
+/// split from its end, so a hooks file whose path only begins with `source`
+/// and a colon is another source and does not match.
+fn source_state_hook<'a>(header: &'a str, source: &str) -> Option<(&'a str, usize, usize)> {
+    let key = state_key(header)?;
     let mut fields = key.rsplitn(4, ':');
     let (Some(handler), Some(group), Some(event), Some(path)) =
         (fields.next(), fields.next(), fields.next(), fields.next())
     else {
-        return false;
+        return None;
     };
 
     // The key is compared as written, so the source is escaped the same way.
@@ -367,10 +605,11 @@ fn is_source_state(header: &str, source: &str) -> bool {
         .strip_prefix('"')
         .and_then(|rest| rest.strip_suffix('"'));
 
-    escaped == Some(path)
-        && !event.is_empty()
-        && group.parse::<usize>().is_ok()
-        && handler.parse::<usize>().is_ok()
+    if escaped != Some(path) || event.is_empty() {
+        return None;
+    }
+
+    Some((event, group.parse().ok()?, handler.parse().ok()?))
 }
 
 /// What the line-level merge cannot place safely: a multi-line string, any
@@ -407,15 +646,17 @@ fn check_line(table: &str, line: &str, keys: &[&str]) -> Result<(), CodexError> 
 }
 
 /// Drop the state tables of `trust`'s keys, and every state table of `source`
-/// whose `trusted_hash` is in `stale`: the hashes tack's own groups had
-/// before this build, so such a table is tack's, left behind under a key
-/// that may now name another hook. Keep every other line as it is, and append
-/// one table per key of `trust`.
+/// that `drops` names: one holding a hash in `stale`, the hashes tack's own
+/// groups had before this build, and on a first build with no `tack-hashes`
+/// (`record`) one whose key holds no hook in `hooks`. Keep every other line as
+/// it is, and append one table per key of `trust`.
 fn merge_state(
     existing: &str,
     trust: &[(String, String)],
     source: &str,
     stale: &HashSet<String>,
+    hooks: &HookKeys,
+    record: HashRecord,
 ) -> Result<String, CodexError> {
     let headers: Vec<String> = trust.iter().map(|(key, _)| state_header(key)).collect();
     let keys: Vec<&str> = trust.iter().map(|(key, _)| key.as_str()).collect();
@@ -423,7 +664,7 @@ fn merge_state(
     let mut pending = String::new();
     let mut table = String::new();
     let mut skipping = false;
-    let mut judged = false;
+    let mut judged: Option<KeyHook> = None;
     let mut dropped = false;
 
     for line in existing.split_inclusive('\n') {
@@ -437,7 +678,8 @@ fn merge_state(
 
             pending.clear();
             skipping = headers.iter().any(|header| header == trimmed);
-            judged = is_source_state(trimmed, source);
+            judged = source_state_hook(trimmed, source)
+                .map(|(event, group, handler)| hooks.at(event, group, handler));
             dropped = false;
             table = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
         }
@@ -448,7 +690,9 @@ fn merge_state(
 
         check_line(&table, line, &keys)?;
 
-        if judged && trusted_hash_in(line, stale) {
+        if let Some(hook) = judged
+            && drops(hook, line, stale, record)
+        {
             dropped = true;
         }
 
@@ -516,7 +760,9 @@ fn write_new(
 
 #[cfg(test)]
 mod source_state_tests {
-    use super::is_source_state;
+    fn is_source_state(header: &str, source: &str) -> bool {
+        super::source_state_hook(header, source).is_some()
+    }
 
     #[test]
     fn only_a_tack_key_of_exactly_this_source_is_judged() {
