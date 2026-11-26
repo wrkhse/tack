@@ -236,9 +236,7 @@ jobs:
           if [ "$EVENT_NAME" != "push" ] && [ ! -s pr.diff ]; then
             echo "No Rust changes in this diff; nothing to mutate."
             mkdir -p mutants.out
-            jq -n '{
-              total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0
-            }' > mutants.out/outcomes.json
+            jq -n '{total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0}' > mutants.out/outcomes.json
             exit 0
           fi
 
@@ -247,6 +245,13 @@ jobs:
             args+=(--in-diff pr.diff)
           fi
           cargo mutants "${args[@]}"
+
+          # set -e exits on failure, so this only runs after a successful run.
+          if [ ! -f mutants.out/outcomes.json ]; then
+            echo "No viable mutants produced an outcome file."
+            mkdir -p mutants.out
+            jq -n '{total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0}' > mutants.out/outcomes.json
+          fi
       # A missed mutant or a timeout fails. One that truly hangs the tests is
       # excluded by name in .cargo/mutants.toml, with its reason.
       - name: Check outcomes
@@ -267,9 +272,7 @@ jobs:
           {
             echo "### Mutants, shard ${{ matrix.shard }}"
             if [ -f mutants.out/outcomes.json ]; then
-              jq -r '"- tested: \(.total_mutants)", "- caught: \(.caught)",'\
-                '"- missed: \(.missed)", "- timeouts: \(.timeout)",'\
-                '"- unviable: \(.unviable)"' mutants.out/outcomes.json
+              jq -r '"- tested: \(.total_mutants)", "- caught: \(.caught)", "- missed: \(.missed)", "- timeouts: \(.timeout)", "- unviable: \(.unviable)"' mutants.out/outcomes.json
             else
               echo "- no outcomes file"
             fi
@@ -305,9 +308,7 @@ jobs:
             exit 1
           fi
 
-          mapfile -t outcomes < <(
-            find mutants-outcomes -name outcomes.json -type f | sort
-          )
+          mapfile -t outcomes < <(find mutants-outcomes -name outcomes.json -type f | sort)
           if [ "${#outcomes[@]}" -ne 4 ]; then
             echo "::error::expected 4 shard outcomes, found ${#outcomes[@]}"
             exit 1
