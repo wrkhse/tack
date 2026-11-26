@@ -1570,8 +1570,11 @@ mod tests {
         task.abort();
     }
 
+    /// A large overflow request always ends in a denial, never an allow or a
+    /// hang. It does not tell the busy line from a closed socket; the drain
+    /// itself is covered by its unit test and by mutation testing.
     #[tokio::test]
-    async fn an_overflow_client_sending_a_large_request_ends_in_a_denial() {
+    async fn an_overflow_request_is_always_denied() {
         let dir = TempDir::new();
         let state = dir.path().join("state");
         let socket = state.join("tack.sock");

@@ -58,7 +58,7 @@ jobs:
           tests=(
             transport::tests::a_refused_peer_past_the_drain_limit_is_closed_at_once
             transport::tests::an_overflow_client_sending_a_small_request_gets_busy
-            transport::tests::an_overflow_client_sending_a_large_request_ends_in_a_denial
+            transport::tests::an_overflow_request_is_always_denied
             transport::tests::a_slow_but_progressing_frame_is_handled
           )
           log="$RUNNER_TEMP/stress-test.log"
