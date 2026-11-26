@@ -1387,4 +1387,152 @@ mod tests {
 
         task.abort();
     }
+
+    #[tokio::test]
+    async fn a_slow_but_progressing_frame_is_handled() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+
+        // Six chunks with a 200 ms gap before each one after the first: the
+        // frame takes about 1 s to arrive, past the 750 ms frame budget, but
+        // every gap is short and the peer keeps making progress.
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+
+        for (index, chunk) in line.chunks(line.len().div_ceil(6)).enumerate() {
+            if index > 0 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            client.write_all(chunk).await.unwrap();
+            client.flush().await.unwrap();
+        }
+
+        let reply = tokio::time::timeout(Duration::from_secs(3), read_reply(client))
+            .await
+            .expect("a frame that keeps making progress is handled");
+        assert_eq!(
+            reply,
+            Reply::Hook {
+                id: 7,
+                version: PROTOCOL_VERSION,
+                outcome: Outcome::Allow,
+            }
+        );
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_overflow_client_sending_a_large_request_still_gets_busy() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+
+        // About 900 KiB of input: far more than a socket buffer holds, and
+        // still under MAX_FRAME_BYTES once encoded.
+        let large = wire::encode_line(&Request::Tool {
+            id: 9,
+            version: PROTOCOL_VERSION,
+            name: "dump".into(),
+            input: serde_json::json!({ "text": "x".repeat(900 * 1024) }),
+        })
+        .unwrap();
+        assert!(large.len() < MAX_FRAME_BYTES);
+
+        // Each peer connects in its own task and hands back its stream. Awaiting
+        // every handle proves all 16 connects completed, so all 16 sit in the
+        // accept queue ahead of the client below.
+        let connecting: Vec<_> = (0..MAX_PENDING)
+            .map(|_| {
+                let socket = socket.clone();
+
+                tokio::spawn(async move { UnixStream::connect(&socket).await.unwrap() })
+            })
+            .collect();
+
+        let mut peers = Vec::with_capacity(MAX_PENDING);
+
+        for connected in connecting {
+            peers.push(connected.await.unwrap());
+        }
+
+        let mut held = Vec::with_capacity(MAX_PENDING);
+
+        for mut peer in peers {
+            let frame = line.clone();
+
+            // A complete frame every 300 ms keeps each slot taken. Replies stay
+            // unread, and write errors are ignored until the peer is aborted.
+            held.push(tokio::spawn(async move {
+                loop {
+                    let _ = peer.write_all(&frame).await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }));
+        }
+
+        // The accept loop takes the 16 queued peers before this client and has
+        // no slot left for it. The whole request must go through, and the busy
+        // line must follow, though the daemon never handles the request.
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), async {
+            client
+                .write_all(&large)
+                .await
+                .expect("the overflow client can send its whole request");
+            client.flush().await.unwrap();
+
+            read_reply(client).await
+        })
+        .await
+        .expect("an overflow client with a large request must get a busy denial");
+        assert_eq!(
+            reply,
+            Reply::Error {
+                id: 0,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::Busy,
+                message: "tack: busy".into(),
+            }
+        );
+
+        for peer in held {
+            peer.abort();
+        }
+        task.abort();
+    }
 }
