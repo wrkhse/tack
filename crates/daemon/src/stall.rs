@@ -64,12 +64,12 @@ impl std::error::Error for StallError {}
 
 /// One line in, one line out. The real transport is supplied by the caller.
 pub trait Transport {
-    /// Send `frame` and return the single-line reply.
+    /// Send `frame` and return the single-line reply before `deadline`.
     ///
     /// # Errors
     ///
     /// Returns the stall's error when the call fails.
-    fn call(&mut self, frame: &str) -> Result<String, StallError>;
+    fn call(&mut self, frame: &str, deadline: Instant) -> Result<String, StallError>;
 }
 
 /// One call to a stall under a fixed budget, with no retries.
@@ -95,16 +95,12 @@ impl<C: Clock, T: Transport> StallClient<C, T> {
     /// # Errors
     ///
     /// Returns `Malformed` when the request's version is not `FRAMED_VERSION`,
-    /// the reply is not one line, the reply does not decode, or its id does
-    /// not repeat the request's id. Returns `Io` when the request cannot be
-    /// encoded, `Timeout` when the clock is at or past the deadline before or
-    /// after the call, and the transport's error when the call fails.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "the typed stall API owns the request it sends"
-    )]
-    pub fn call(&mut self, request: Request) -> Result<Reply, StallError> {
-        let (request_id, version) = match &request {
+    /// the reply is not one line, the reply does not decode, or its variant or
+    /// id does not match the request's. Returns `Io` when the request cannot
+    /// be encoded, `Timeout` when the clock is at or past the deadline before
+    /// or after the call, and the transport's error when the call fails.
+    pub fn call(&mut self, request: &Request) -> Result<Reply, StallError> {
+        let (request_id, version) = match request {
             Request::Hook { id, version, .. } | Request::Tool { id, version, .. } => {
                 (*id, *version)
             }
@@ -115,7 +111,7 @@ impl<C: Clock, T: Transport> StallClient<C, T> {
         }
 
         let frame =
-            serde_json::to_string(&request).map_err(|error| StallError::Io(error.to_string()))?;
+            serde_json::to_string(request).map_err(|error| StallError::Io(error.to_string()))?;
 
         let deadline = self.clock.deadline(self.budget);
 
@@ -123,7 +119,7 @@ impl<C: Clock, T: Transport> StallClient<C, T> {
             return Err(StallError::Timeout);
         }
 
-        let wire = self.transport.call(&frame)?;
+        let wire = self.transport.call(&frame, deadline)?;
 
         if self.clock.now() >= deadline {
             return Err(StallError::Timeout);
@@ -139,7 +135,18 @@ impl<C: Clock, T: Transport> StallClient<C, T> {
             Reply::Hook { id, .. } | Reply::Tool { id, .. } | Reply::Error { id, .. } => *id,
         };
 
-        if reply_id != request_id {
+        let reply_kind_matches = matches!(
+            (request, &reply),
+            (
+                Request::Hook { .. },
+                Reply::Hook { .. } | Reply::Error { .. }
+            ) | (
+                Request::Tool { .. },
+                Reply::Tool { .. } | Reply::Error { .. }
+            )
+        );
+
+        if !reply_kind_matches || reply_id != request_id {
             return Err(StallError::Malformed);
         }
 
@@ -176,14 +183,12 @@ mod tests {
     #[derive(Clone)]
     struct FakeClock {
         now: Rc<RefCell<Instant>>,
-        start: Instant,
     }
 
     impl FakeClock {
         fn new(start: Instant) -> Self {
             Self {
                 now: Rc::new(RefCell::new(start)),
-                start,
             }
         }
 
@@ -200,7 +205,9 @@ mod tests {
         }
 
         fn deadline(&self, after: Duration) -> Instant {
-            self.start.checked_add(after).unwrap_or(self.start)
+            let now = *self.now.borrow();
+
+            now.checked_add(after).unwrap_or(now)
         }
     }
 
@@ -208,6 +215,7 @@ mod tests {
     struct FakeStall {
         clock: FakeClock,
         frames: Vec<String>,
+        deadlines: Vec<Instant>,
         reply: Result<String, StallError>,
         advance: Option<Duration>,
     }
@@ -217,6 +225,7 @@ mod tests {
             Self {
                 clock,
                 frames: Vec::new(),
+                deadlines: Vec::new(),
                 reply: Ok(reply.to_owned()),
                 advance: None,
             }
@@ -226,6 +235,7 @@ mod tests {
             Self {
                 clock,
                 frames: Vec::new(),
+                deadlines: Vec::new(),
                 reply: Err(error),
                 advance: None,
             }
@@ -240,11 +250,16 @@ mod tests {
         fn frames(&self) -> &[String] {
             &self.frames
         }
+
+        fn deadlines(&self) -> &[Instant] {
+            &self.deadlines
+        }
     }
 
     impl Transport for FakeStall {
-        fn call(&mut self, frame: &str) -> Result<String, StallError> {
+        fn call(&mut self, frame: &str, deadline: Instant) -> Result<String, StallError> {
             self.frames.push(frame.to_owned());
+            self.deadlines.push(deadline);
 
             if let Some(by) = self.advance {
                 self.clock.advance(by);
@@ -313,23 +328,37 @@ mod tests {
 
         let encoded_reply = serde_json::to_string(&deny_reply()).unwrap_or_default();
 
-        assert_eq!(client.call(deny_request()), Ok(deny_reply()));
+        assert_eq!(client.call(&deny_request()), Ok(deny_reply()));
         assert_eq!(client.transport.frames(), &[DENY_REQUEST.to_owned()]);
         assert_eq!(encoded_reply, DENY_REPLY);
     }
 
     #[test]
-    fn pre_expired_budget_times_out_without_calling() {
+    fn transport_receives_the_deadline_from_the_injected_clock() {
         let start = Instant::now();
+        let budget = Duration::from_secs(1);
         let clock = FakeClock::new(start);
         let stall = FakeStall::reply(clock.clone(), DENY_REPLY);
-        let mut client = StallClient::new(clock.clone(), stall, Duration::from_secs(1));
+        let mut client = StallClient::new(clock, stall, budget);
 
-        clock.advance(Duration::from_secs(1));
+        assert_eq!(client.call(&deny_request()), Ok(deny_reply()));
+        assert_eq!(
+            client.transport.deadlines(),
+            &[start
+                .checked_add(budget)
+                .expect("the budget is representable")]
+        );
+    }
+
+    #[test]
+    fn pre_expired_budget_times_out_without_calling() {
+        let clock = FakeClock::new(Instant::now());
+        let stall = FakeStall::reply(clock.clone(), DENY_REPLY);
+        let mut client = StallClient::new(clock, stall, Duration::ZERO);
 
         let no_frames: &[String] = &[];
 
-        assert_eq!(client.call(deny_request()), Err(StallError::Timeout));
+        assert_eq!(client.call(&deny_request()), Err(StallError::Timeout));
         assert_eq!(client.transport.frames(), no_frames);
     }
 
@@ -339,7 +368,7 @@ mod tests {
         let stall = FakeStall::reply(clock.clone(), DENY_REPLY).advancing(Duration::from_secs(2));
         let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
 
-        assert_eq!(client.call(deny_request()), Err(StallError::Timeout));
+        assert_eq!(client.call(&deny_request()), Err(StallError::Timeout));
         assert_eq!(client.transport.frames(), &[DENY_REQUEST.to_owned()]);
     }
 
@@ -349,7 +378,7 @@ mod tests {
         let stall = FakeStall::error(clock.clone(), StallError::Closed);
         let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
 
-        assert_eq!(client.call(deny_request()), Err(StallError::Closed));
+        assert_eq!(client.call(&deny_request()), Err(StallError::Closed));
         assert_eq!(client.transport.frames(), &[DENY_REQUEST.to_owned()]);
     }
 
@@ -359,7 +388,7 @@ mod tests {
         let stall = FakeStall::reply(clock.clone(), "first\nsecond");
         let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
 
-        assert_eq!(client.call(deny_request()), Err(StallError::Malformed));
+        assert_eq!(client.call(&deny_request()), Err(StallError::Malformed));
         assert_eq!(client.transport.frames(), &[DENY_REQUEST.to_owned()]);
     }
 
@@ -369,7 +398,7 @@ mod tests {
         let stall = FakeStall::reply(clock.clone(), "{not json}");
         let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
 
-        assert_eq!(client.call(deny_request()), Err(StallError::Malformed));
+        assert_eq!(client.call(&deny_request()), Err(StallError::Malformed));
         assert_eq!(client.transport.frames(), &[DENY_REQUEST.to_owned()]);
     }
 
@@ -379,8 +408,53 @@ mod tests {
         let stall = FakeStall::reply(clock.clone(), REWRITE_REPLY);
         let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
 
-        assert_eq!(client.call(deny_request()), Err(StallError::Malformed));
+        assert_eq!(client.call(&deny_request()), Err(StallError::Malformed));
         assert_eq!(client.transport.frames(), &[DENY_REQUEST.to_owned()]);
+    }
+
+    #[test]
+    fn hook_request_with_tool_reply_is_malformed() {
+        let reply = Reply::Tool {
+            id: 1,
+            content: Content {
+                kind: "text".to_owned(),
+                text: "buy milk".to_owned(),
+            },
+        };
+        let wire = serde_json::to_string(&reply).unwrap_or_default();
+        let clock = FakeClock::new(Instant::now());
+        let stall = FakeStall::reply(clock.clone(), &wire);
+        let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
+
+        assert_eq!(client.call(&deny_request()), Err(StallError::Malformed));
+        assert_eq!(client.transport.frames(), &[DENY_REQUEST.to_owned()]);
+    }
+
+    #[test]
+    fn tool_request_with_hook_reply_is_malformed() {
+        let reply = Reply::Hook {
+            id: 6,
+            outcome: Outcome::Deny {
+                reason: "push blocked".to_owned(),
+            },
+        };
+        let wire = serde_json::to_string(&reply).unwrap_or_default();
+        let clock = FakeClock::new(Instant::now());
+        let stall = FakeStall::reply(clock.clone(), &wire);
+        let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
+        let request = Request::Tool {
+            id: 6,
+            version: FRAMED_VERSION,
+            call: ToolCall {
+                tool: "notes".to_owned(),
+                name: "read".to_owned(),
+                input: json!({"path": "/tmp/note.txt"}),
+                session_id: None,
+            },
+        };
+
+        assert_eq!(client.call(&request), Err(StallError::Malformed));
+        assert_eq!(client.transport.frames(), &[TOOL_REQUEST.to_owned()]);
     }
 
     #[test]
@@ -396,7 +470,7 @@ mod tests {
 
         let no_frames: &[String] = &[];
 
-        assert_eq!(client.call(wrong), Err(StallError::Malformed));
+        assert_eq!(client.call(&wrong), Err(StallError::Malformed));
         assert_eq!(client.transport.frames(), no_frames);
     }
 
@@ -406,7 +480,7 @@ mod tests {
         let stall = FakeStall::reply(clock.clone(), REWRITE_REPLY);
         let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
 
-        assert_eq!(client.call(rewrite_request()), Ok(rewrite_reply()));
+        assert_eq!(client.call(&rewrite_request()), Ok(rewrite_reply()));
         assert_eq!(client.transport.frames(), &[REWRITE_REQUEST.to_owned()]);
     }
 
@@ -418,7 +492,7 @@ mod tests {
 
         let encoded_reply = serde_json::to_string(&rewrite_reply()).unwrap_or_default();
 
-        assert_eq!(client.call(rewrite_request()), Ok(rewrite_reply()));
+        assert_eq!(client.call(&rewrite_request()), Ok(rewrite_reply()));
         assert_eq!(client.transport.frames(), &[REWRITE_REQUEST.to_owned()]);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&encoded_reply).unwrap(),
@@ -452,7 +526,7 @@ mod tests {
         };
         let encoded_reply = serde_json::to_string(&expected).unwrap_or_default();
 
-        assert_eq!(client.call(request), Ok(expected));
+        assert_eq!(client.call(&request), Ok(expected));
         assert_eq!(client.transport.frames(), &[ANNOTATE_REQUEST.to_owned()]);
         assert_eq!(encoded_reply, ANNOTATE_REPLY);
     }
@@ -481,7 +555,7 @@ mod tests {
         };
         let encoded_reply = serde_json::to_string(&expected).unwrap_or_default();
 
-        assert_eq!(client.call(request), Ok(expected));
+        assert_eq!(client.call(&request), Ok(expected));
         assert_eq!(client.transport.frames(), &[TOOL_REQUEST.to_owned()]);
         assert_eq!(encoded_reply, TOOL_REPLY);
     }
