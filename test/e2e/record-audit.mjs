@@ -73,7 +73,10 @@ async function waitForSocket(socket, daemon) {
 }
 
 function occupy(socket, peers) {
-  const peer = createConnection({ path: socket, signal: AbortSignal.timeout(1000) });
+  const peer = createConnection({
+    path: socket,
+    signal: AbortSignal.timeout(1000),
+  });
   peers.push(peer);
 
   return new Promise((resolve, reject) => {
@@ -88,7 +91,11 @@ async function checkBusy(scratch, binDir) {
   const state = path.join(scratch, "state");
   const socket = path.join(state, "tack.sock");
   const daemonBin = path.join(binDir, "tack-daemon");
-  const env = { ...process.env, TACK_STATE_DIR: state, TACK_DAEMON_BIN: daemonBin };
+  const env = {
+    ...process.env,
+    TACK_STATE_DIR: state,
+    TACK_DAEMON_BIN: daemonBin,
+  };
   const peers = [];
   const daemon = spawn(daemonBin, ["--socket", socket, "--plugin", plugin], {
     cwd: repoRoot,
@@ -110,7 +117,11 @@ async function checkBusy(scratch, binDir) {
         id: 7,
         version: 1,
         hook: "toolBefore",
-        call: { tool: "shell", name: "shell", input: { command: "git status" } },
+        call: {
+          tool: "shell",
+          name: "shell",
+          input: { command: "git status" },
+        },
       }) + "\n";
     const reply = run(path.join(binDir, "tack-hook"), ["--plugin", plugin], {
       env,
@@ -152,7 +163,10 @@ function checkTrust(tack, scratch) {
 
   // Reserve distinct keys for the old tack table and the inserted user table.
   const seed = { hooks: [{ type: "command", command: ":" }] };
-  writeFileSync(hooksPath, JSON.stringify({ hooks: { PreToolUse: [seed] } }) + "\n");
+  writeFileSync(
+    hooksPath,
+    JSON.stringify({ hooks: { PreToolUse: [seed] } }) + "\n",
+  );
   const first = build(tack, path.join(scratch, "out-a"), home);
   assert.equal(first.status, 0, first.stderr);
 
@@ -165,10 +179,19 @@ function checkTrust(tack, scratch) {
   // Insertion order is the sorted key order of Codex's compact JSON.
   const identity = {
     event_name: "pre_tool_use",
-    hooks: [{ async: false, command: userHook.command, timeout: 600, type: userHook.type }],
+    hooks: [
+      {
+        async: false,
+        command: userHook.command,
+        timeout: 600,
+        type: userHook.type,
+      },
+    ],
     matcher,
   };
-  const hash = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  const hash = createHash("sha256")
+    .update(JSON.stringify(identity))
+    .digest("hex");
   const userHeader = stateHeader(hooksPath, 0);
   const staleHeader = stateHeader(hooksPath, 1);
   const userTable = [
@@ -177,7 +200,10 @@ function checkTrust(tack, scratch) {
     'trusted_hash = "sha256:' + hash + '"',
   ].join("\n");
   const original = readFileSync(configPath, "utf8");
-  assert.ok(stateTable(original, staleHeader), "first build did not write tack trust");
+  assert.ok(
+    stateTable(original, staleHeader),
+    "first build did not write tack trust",
+  );
   writeFileSync(configPath, original + "\n" + userTable + "\n");
 
   const second = build(tack, path.join(scratch, "out-b"), home);
@@ -186,7 +212,10 @@ function checkTrust(tack, scratch) {
   const rebuilt = readFileSync(configPath, "utf8");
   assert.equal(stateTable(rebuilt, staleHeader), undefined);
   assert.equal(stateTable(rebuilt, userHeader), userTable);
-  assert.ok(stateTable(rebuilt, stateHeader(hooksPath, 2)), "new tack trust is missing");
+  assert.ok(
+    stateTable(rebuilt, stateHeader(hooksPath, 2)),
+    "new tack trust is missing",
+  );
 }
 
 function checkHome(tack, scratch) {
@@ -204,7 +233,10 @@ function checkHome(tack, scratch) {
 async function main() {
   const tack = process.argv[2] || process.env.TACK_CLI;
   const binDir = process.argv[3] || process.env.TACK_BIN_DIR;
-  assert.ok(tack && binDir, "provide the released tack CLI path and bin directory");
+  assert.ok(
+    tack && binDir,
+    "provide the released tack CLI path and bin directory",
+  );
 
   const parent = realpathSync(process.env.TACK_E2E_DIR || tmpdir());
   const scratch = mkdtempSync(path.join(parent, "tack-audit-"));
