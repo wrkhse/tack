@@ -78,6 +78,7 @@ fn hook_line(id: u64) -> Vec<u8> {
             input: serde_json::json!({ "command": "git push" }),
             session_id: Some("s-1".into()),
         },
+        _meta: None,
     })
     .unwrap()
 }
