@@ -69,6 +69,11 @@ hashes its hooks were trusted under, so a later build recognises trust state
 from tack hooks no longer in hooks.json. A malformed record refuses the build
 with a named reason; config.toml is never modified by this record.
 
+(supervisor, 2026-11-26) Trust state for a hook that no longer exists grants
+nothing anyone uses. Dropping it only removes trust, the safe direction: if the
+hook comes back, Codex asks again. Tables for existing hooks stay
+byte-identical; the exception is trust state for hooks that no longer exist.
+
 ## Verification
 
 - `tests/render.rs` and the unit tests: template-only differences, exact

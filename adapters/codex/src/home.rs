@@ -8,7 +8,7 @@
 //! three files are computed before any is written, and each is replaced by an
 //! atomic rename.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write as _;
@@ -204,15 +204,16 @@ fn is_hash(text: &str) -> bool {
 }
 
 /// The hashes a `tack-hashes` file holds, each once, in file order, keeping
-/// only the newest `MAX_HASHES`: the last ones in the file.
+/// only the newest `MAX_HASHES`: the last ones in the file. At most
+/// `MAX_HASHES` are held while reading; a line repeating a held hash is
+/// skipped.
 ///
 /// # Errors
 ///
 /// Returns [`CodexError::Config`] for a line that is not blank, a `#`
 /// comment, or exactly a hash.
 fn parse_hashes(text: &str) -> Result<Vec<String>, CodexError> {
-    let mut seen = HashSet::new();
-    let mut hashes = Vec::new();
+    let mut hashes = VecDeque::with_capacity(MAX_HASHES);
 
     for line in text.lines() {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
@@ -223,15 +224,18 @@ fn parse_hashes(text: &str) -> Result<Vec<String>, CodexError> {
             return Err(CodexError::Config(MALFORMED_HASHES.to_owned()));
         }
 
-        if seen.insert(line) {
-            hashes.push(line.to_owned());
+        if hashes.iter().any(|held: &String| held == line) {
+            continue;
         }
+
+        if hashes.len() == MAX_HASHES {
+            hashes.pop_front();
+        }
+
+        hashes.push_back(line.to_owned());
     }
 
-    let excess = hashes.len().saturating_sub(MAX_HASHES);
-    hashes.drain(..excess);
-
-    Ok(hashes)
+    Ok(hashes.into())
 }
 
 /// The next `tack-hashes` file: the `recorded` hashes, then `trust`'s hashes
@@ -501,13 +505,19 @@ impl HookHashes {
 /// key holds `hook`, tack's to drop: its plain `trusted_hash` is one of
 /// tack's `stale` hashes, differs from the hash of the hook now at its key,
 /// or names no hook on a build with no `tack-hashes` yet, the first after
-/// an upgrade. A table whose hook tack cannot hash, or whose hash is spelled
-/// otherwise, stays: tack never drops trust it cannot verify.
+/// an upgrade.
+///
+/// A `stale` hash is proof on its own: tack recorded it as its own, so the
+/// table is tack's and drops whatever hook its key now holds, one tack cannot
+/// hash included. Without that proof a table whose hook tack cannot hash
+/// stays, and so does any table whose hash is spelled otherwise than a plain
+/// string: tack never drops trust it cannot verify.
 fn drops(hook: KeyHook<'_>, line: &str, stale: &HashSet<String>, record: HashRecord) -> bool {
     let Some(hash) = plain_trusted_hash(line) else {
         return false;
     };
 
+    // A recorded tack hash decides first, before the hook at the key is read.
     stale.contains(&hash)
         || match hook {
             KeyHook::Hashed(expected) => hash != expected,
