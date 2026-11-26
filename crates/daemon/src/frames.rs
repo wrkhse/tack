@@ -11,8 +11,8 @@
 use std::fmt;
 
 use barn_stall::{
-    FRAMED_VERSION, Meta as StallMeta, Outcome as StallOutcome, Reply as StallReply,
-    Request as StallRequest, ToolCall as StallToolCall,
+    Content as StallContent, FRAMED_VERSION, Meta as StallMeta, Outcome as StallOutcome,
+    Reply as StallReply, Request as StallRequest, ToolCall as StallToolCall,
 };
 use tack_protocol::wire::{
     Content, HookKind, Meta as WireMeta, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
@@ -174,6 +174,120 @@ pub fn from_stall(request: &Request, reply: StallReply) -> Result<Reply, Convert
             message,
         }),
         _ => Err(ConvertError::UnsupportedOutcome),
+    }
+}
+
+fn wire_meta(meta: &StallMeta) -> WireMeta {
+    WireMeta {
+        traceparent: meta.traceparent.clone(),
+        tracestate: meta.tracestate.clone(),
+    }
+}
+
+/// Translate a stall request into the wire request the daemon dispatches.
+///
+/// A hook keeps its id, name, call and trace data. A tool keeps its id, name
+/// and input; the stall's tool name and session stay at the stall boundary.
+/// Both carry tack's protocol version.
+///
+/// # Errors
+///
+/// Returns `UnsupportedOutcome` when a hook name is outside tack's closed
+/// registry: no wire verdict can answer a hook the daemon cannot dispatch.
+pub fn from_stall_request(request: &StallRequest) -> Result<Request, ConvertError> {
+    match request {
+        StallRequest::Hook {
+            id,
+            hook,
+            call,
+            _meta: meta,
+            ..
+        } => {
+            if hook_kind(hook).is_none() {
+                return Err(ConvertError::UnsupportedOutcome);
+            }
+
+            Ok(Request::Hook {
+                id: *id,
+                version: PROTOCOL_VERSION,
+                hook: hook.clone(),
+                call: ToolCall {
+                    tool: call.tool.clone(),
+                    name: call.name.clone(),
+                    input: call.input.clone(),
+                    session_id: call.session_id.clone(),
+                },
+                _meta: meta.as_ref().map(wire_meta),
+            })
+        }
+        StallRequest::Tool { id, call, .. } => Ok(Request::Tool {
+            id: *id,
+            version: PROTOCOL_VERSION,
+            name: call.name.clone(),
+            input: call.input.clone(),
+        }),
+    }
+}
+
+fn stall_outcome(outcome: &Outcome) -> StallOutcome {
+    match outcome {
+        Outcome::Allow => StallOutcome::Allow,
+        Outcome::Deny { reason } => StallOutcome::Deny {
+            reason: reason.clone(),
+        },
+        Outcome::Rewrite { input } => StallOutcome::Rewrite {
+            input: input.clone(),
+        },
+        Outcome::Annotate { fields } => StallOutcome::Annotate {
+            fields: fields.clone(),
+        },
+        Outcome::Drop => StallOutcome::Drop,
+    }
+}
+
+fn stall_error_name(error: ReplyError) -> Result<String, ConvertError> {
+    serde_json::to_value(error)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or(ConvertError::UnsupportedOutcome)
+}
+
+/// Translate a wire reply into the frame a stall reads.
+///
+/// All five hook outcomes have a stall form. Tack's tool verdict carries
+/// exactly one content item today, so a stall's tool reply holds one piece
+/// of content; an error keeps its wire name and message.
+///
+/// # Errors
+///
+/// Returns `UnsupportedOutcome` when a tool reply does not carry exactly one
+/// piece of content, or its error kind has no wire name.
+pub fn to_stall_reply(reply: &Reply) -> Result<StallReply, ConvertError> {
+    match reply {
+        Reply::Hook { id, outcome, .. } => Ok(StallReply::Hook {
+            id: *id,
+            outcome: stall_outcome(outcome),
+        }),
+        Reply::Tool { id, content, .. } => {
+            let [only] = content.as_slice() else {
+                return Err(ConvertError::UnsupportedOutcome);
+            };
+
+            Ok(StallReply::Tool {
+                id: *id,
+                content: StallContent {
+                    kind: only.kind.clone(),
+                    text: only.text.clone(),
+                },
+            })
+        }
+        Reply::Error {
+            id, error, message, ..
+        } => Ok(StallReply::Error {
+            id: *id,
+            error: stall_error_name(*error)?,
+            message: message.clone(),
+        }),
     }
 }
 
@@ -505,5 +619,272 @@ mod tests {
             ),
             Err(ConvertError::UnsupportedOutcome)
         );
+    }
+
+    fn stall_hook() -> StallRequest {
+        StallRequest::Hook {
+            id: 7,
+            version: FRAMED_VERSION,
+            hook: "toolBefore".to_owned(),
+            call: call(),
+            _meta: None,
+        }
+    }
+
+    fn stall_tool() -> StallRequest {
+        StallRequest::Tool {
+            id: 8,
+            version: FRAMED_VERSION,
+            call: StallToolCall {
+                tool: "notes".to_owned(),
+                name: "read".to_owned(),
+                input: json!({ "path": "/tmp/note.txt" }),
+                session_id: Some("s-9".to_owned()),
+            },
+        }
+    }
+
+    #[test]
+    fn stall_hook_request_maps_every_field() {
+        assert_eq!(from_stall_request(&stall_hook()), Ok(hook("toolBefore")));
+    }
+
+    #[test]
+    fn stall_tool_request_maps_name_and_input_without_session_or_meta() {
+        assert_eq!(
+            from_stall_request(&stall_tool()),
+            Ok(Request::Tool {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                name: "read".to_owned(),
+                input: json!({ "path": "/tmp/note.txt" }),
+            })
+        );
+    }
+
+    #[test]
+    fn stall_trace_meta_crosses_into_the_wire_request() {
+        let mut request = stall_hook();
+
+        if let StallRequest::Hook { _meta: meta, .. } = &mut request {
+            *meta = Some(StallMeta {
+                traceparent: Some(TRACEPARENT.to_owned()),
+                tracestate: Some("congo=t61rcWkgMzE".to_owned()),
+            });
+        }
+
+        let mut expected = hook("toolBefore");
+
+        if let Request::Hook { _meta: meta, .. } = &mut expected {
+            *meta = Some(WireMeta {
+                traceparent: Some(TRACEPARENT.to_owned()),
+                tracestate: Some("congo=t61rcWkgMzE".to_owned()),
+            });
+        }
+
+        assert_eq!(from_stall_request(&request), Ok(expected));
+    }
+
+    #[test]
+    fn stall_partial_trace_meta_stays_partial() {
+        let mut request = stall_hook();
+
+        if let StallRequest::Hook { _meta: meta, .. } = &mut request {
+            *meta = Some(StallMeta {
+                traceparent: Some(TRACEPARENT.to_owned()),
+                tracestate: None,
+            });
+        }
+
+        let mut expected = hook("toolBefore");
+
+        if let Request::Hook { _meta: meta, .. } = &mut expected {
+            *meta = Some(WireMeta {
+                traceparent: Some(TRACEPARENT.to_owned()),
+                tracestate: None,
+            });
+        }
+
+        assert_eq!(from_stall_request(&request), Ok(expected));
+    }
+
+    #[test]
+    fn an_unknown_stall_hook_is_unsupported() {
+        let mut request = stall_hook();
+
+        if let StallRequest::Hook { hook: name, .. } = &mut request {
+            *name = "PreToolUse".to_owned();
+        }
+
+        assert_eq!(
+            from_stall_request(&request),
+            Err(ConvertError::UnsupportedOutcome)
+        );
+    }
+
+    #[test]
+    fn wire_hook_outcomes_map_to_every_stall_outcome() {
+        let cases = [
+            (Outcome::Allow, StallOutcome::Allow),
+            (
+                Outcome::Deny {
+                    reason: "push blocked".to_owned(),
+                },
+                StallOutcome::Deny {
+                    reason: "push blocked".to_owned(),
+                },
+            ),
+            (
+                Outcome::Rewrite {
+                    input: json!({ "command": "git push --dry-run" }),
+                },
+                StallOutcome::Rewrite {
+                    input: json!({ "command": "git push --dry-run" }),
+                },
+            ),
+            (
+                Outcome::Annotate { fields: fields() },
+                StallOutcome::Annotate { fields: fields() },
+            ),
+            (Outcome::Drop, StallOutcome::Drop),
+        ];
+
+        for (outcome, expected) in cases {
+            assert_eq!(
+                to_stall_reply(&Reply::Hook {
+                    id: 7,
+                    version: PROTOCOL_VERSION,
+                    outcome,
+                }),
+                Ok(StallReply::Hook {
+                    id: 7,
+                    outcome: expected,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn wire_tool_content_maps_to_stall_content() {
+        assert_eq!(
+            to_stall_reply(&Reply::Tool {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                content: vec![Content {
+                    kind: "text".to_owned(),
+                    text: "buy milk".to_owned(),
+                }],
+            }),
+            Ok(StallReply::Tool {
+                id: 8,
+                content: StallContent {
+                    kind: "text".to_owned(),
+                    text: "buy milk".to_owned(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn wire_tool_content_that_is_not_one_item_is_unsupported() {
+        for content in [
+            vec![],
+            vec![
+                Content {
+                    kind: "text".to_owned(),
+                    text: "a".to_owned(),
+                },
+                Content {
+                    kind: "text".to_owned(),
+                    text: "b".to_owned(),
+                },
+            ],
+        ] {
+            assert_eq!(
+                to_stall_reply(&Reply::Tool {
+                    id: 8,
+                    version: PROTOCOL_VERSION,
+                    content,
+                }),
+                Err(ConvertError::UnsupportedOutcome)
+            );
+        }
+    }
+
+    #[test]
+    fn two_tool_content_items_are_unsupported() {
+        assert_eq!(
+            to_stall_reply(&Reply::Tool {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                content: vec![
+                    Content {
+                        kind: "text".to_owned(),
+                        text: "a".to_owned(),
+                    },
+                    Content {
+                        kind: "text".to_owned(),
+                        text: "b".to_owned(),
+                    },
+                ],
+            }),
+            Err(ConvertError::UnsupportedOutcome)
+        );
+    }
+
+    #[test]
+    fn an_unsupported_reply_kind_is_rejected() {
+        assert_eq!(
+            from_stall(
+                &hook("eventBefore"),
+                StallReply::Tool {
+                    id: 7,
+                    content: StallContent {
+                        kind: "text".to_owned(),
+                        text: "buy milk".to_owned(),
+                    },
+                }
+            ),
+            Err(ConvertError::UnsupportedOutcome)
+        );
+    }
+
+    #[test]
+    fn a_daemon_error_keeps_its_message_in_the_stall_reply() {
+        assert_eq!(
+            to_stall_reply(&Reply::Error {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::DaemonError,
+                message: "tack: stall unavailable".to_owned(),
+            }),
+            Ok(StallReply::Error {
+                id: 8,
+                error: "daemon_error".to_owned(),
+                message: "tack: stall unavailable".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn wire_error_maps_to_a_stall_error_with_its_message() {
+        for (error, name) in [
+            (ReplyError::DaemonError, "daemon_error"),
+            (ReplyError::UnsupportedHook, "unsupported_hook"),
+        ] {
+            assert_eq!(
+                to_stall_reply(&Reply::Error {
+                    id: 8,
+                    version: PROTOCOL_VERSION,
+                    error,
+                    message: "stall unavailable".to_owned(),
+                }),
+                Ok(StallReply::Error {
+                    id: 8,
+                    error: name.to_owned(),
+                    message: "stall unavailable".to_owned(),
+                })
+            );
+        }
     }
 }
