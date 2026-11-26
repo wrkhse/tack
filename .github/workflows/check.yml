@@ -60,6 +60,8 @@ jobs:
             transport::tests::an_overflow_client_sending_a_small_request_gets_busy
             transport::tests::an_overflow_request_is_always_denied
             transport::tests::a_slow_but_progressing_frame_is_handled
+            transport::tests::many_idle_overflow_peers_do_not_delay_a_served_request
+            transport::tests::a_peer_cannot_outlive_the_io_lifetime_by_trickling_bytes
           )
           log="$RUNNER_TEMP/stress-test.log"
 
