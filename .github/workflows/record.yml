@@ -186,6 +186,30 @@ jobs:
             fi
             sleep 0.25
           done
+
+          audit="node \"$GITHUB_WORKSPACE/test/e2e/record-audit.mjs\""
+          audit="$audit \"$TACK_CLI\" \"$RUNNER_TEMP/tack-bin\""
+          termctrl mark rec audit-busy
+          termctrl send rec "text:$audit" enter
+          termctrl wait rec "AUDIT_BUSY tack: busy" --timeout 30000
+          termctrl save rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --out frames/05-audit-busy
+
+          termctrl mark rec audit-trust
+          termctrl wait rec "AUDIT_TRUST stale tack trust dropped; user trust kept" \
+            --timeout 30000
+          termctrl save rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --out frames/06-audit-trust
+
+          termctrl mark rec audit-home
+          termctrl wait rec "AUDIT_HOME refused home left no output" --timeout 30000
+          termctrl save rec --format png --pixel-ratio 1 --padding 0 \
+            --font-family 'DejaVu Sans Mono' \
+            --out frames/07-audit-home
+          termctrl wait rec "AUDIT_DONE" --timeout 30000
+          termctrl mark rec audit-done
           termctrl stop rec
 
       - name: Render the GIF
