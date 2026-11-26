@@ -18,6 +18,24 @@
       "caption": "3. nothing reached origin",
       "speed": 0.75,
       "hold_ms": 2000
+    },
+    {
+      "from": "audit-busy",
+      "to": "audit-trust",
+      "caption": "4. full daemon denies tack: busy",
+      "hold_ms": 2500
+    },
+    {
+      "from": "audit-trust",
+      "to": "audit-home",
+      "caption": "5. stale trust dropped, user trust kept",
+      "hold_ms": 2500
+    },
+    {
+      "from": "audit-home",
+      "to": "audit-done",
+      "caption": "6. refused home leaves no output",
+      "hold_ms": 3500
     }
   ]
 }

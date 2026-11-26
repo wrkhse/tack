@@ -32,8 +32,8 @@ const LEFT_W = 72;
 const RIGHT_W = 48;
 const MAX_LINES = 200;
 const WATCH_MS = 250;
-const SESSION_MS = 30_000;
-const HOLD_AFTER_PROOF_MS = 6_000;
+const SESSION_MS = 120_000;
+const HOLD_AFTER_AUDIT_MS = 5_000;
 
 const BUILD_TIMEOUT_MS = 4_000;
 const MODEL_TIMEOUT_MS = 4_000;
@@ -368,9 +368,11 @@ function runCommand(line) {
     child.once("close", () => process.stdout.write("SESSION_DONE\n"));
   }
 
-  if (/git log|recorder/.test(line)) {
-    clearTimeout(holdTimer);
-    holdTimer = setTimeout(finish, HOLD_AFTER_PROOF_MS);
+  if (line.includes("record-audit.mjs")) {
+    child.once("close", () => {
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(finish, HOLD_AFTER_AUDIT_MS);
+    });
   }
 }
 
