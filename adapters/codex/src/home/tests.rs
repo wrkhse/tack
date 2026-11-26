@@ -156,7 +156,15 @@ fn state_merge_keeps_other_tables_and_rewrites_only_tack_keys() {
         trusted_hash = \"sha256:old\"\n\n\
         [projects.\"/repo\"]\ntrust_level = \"trusted\"\n";
 
-    let merged = merge_state(existing, &trust, "/h/hooks.json", &HashSet::new()).expect("merge");
+    let merged = merge_state(
+        existing,
+        &trust,
+        "/h/hooks.json",
+        &HashSet::new(),
+        &HookHashes::default(),
+        HashRecord::Present,
+    )
+    .expect("merge");
 
     assert_eq!(
         merged,
@@ -167,7 +175,15 @@ fn state_merge_keeps_other_tables_and_rewrites_only_tack_keys() {
          trusted_hash = \"sha256:new\"\n"
     );
     assert_eq!(
-        merge_state(&merged, &trust, "/h/hooks.json", &HashSet::new()).expect("again"),
+        merge_state(
+            &merged,
+            &trust,
+            "/h/hooks.json",
+            &HashSet::new(),
+            &HookHashes::default(),
+            HashRecord::Present
+        )
+        .expect("again"),
         merged
     );
 }
@@ -194,7 +210,15 @@ fn state_merge_drops_only_tables_holding_an_old_tack_hash() {
         trusted_hash = \"sha256:old\"\n\n\
         [projects.\"/repo\"]\ntrust_level = \"trusted\"\n";
 
-    let merged = merge_state(existing, &trust, "/h/hooks.json", &stale).expect("merge");
+    let merged = merge_state(
+        existing,
+        &trust,
+        "/h/hooks.json",
+        &stale,
+        &HookHashes::default(),
+        HashRecord::Present,
+    )
+    .expect("merge");
 
     assert_eq!(
         merged,
@@ -209,7 +233,15 @@ fn state_merge_drops_only_tables_holding_an_old_tack_hash() {
          trusted_hash = \"sha256:tack\"\n"
     );
     assert_eq!(
-        merge_state(&merged, &trust, "/h/hooks.json", &stale).expect("again"),
+        merge_state(
+            &merged,
+            &trust,
+            "/h/hooks.json",
+            &stale,
+            &HookHashes::default(),
+            HashRecord::Present
+        )
+        .expect("again"),
         merged
     );
 }
@@ -227,7 +259,15 @@ fn state_merge_keeps_a_state_table_from_another_source_that_shares_the_prefix() 
         trusted_hash = \"sha256:old\"\n\n\
         [projects.\"/repo\"]\ntrust_level = \"trusted\"\n";
 
-    let merged = merge_state(existing, &[], "/h/hooks.json", &stale).expect("merge");
+    let merged = merge_state(
+        existing,
+        &[],
+        "/h/hooks.json",
+        &stale,
+        &HookHashes::default(),
+        HashRecord::Present,
+    )
+    .expect("merge");
 
     assert_eq!(
         merged,
@@ -383,6 +423,198 @@ fn the_hash_record_keeps_the_newest_and_never_drops_one_in_use() {
 }
 
 #[test]
+fn a_hash_record_is_read_as_its_newest_hashes_only() {
+    let lines: Vec<String> = (0..40).map(hash).collect();
+
+    assert_eq!(
+        parse_hashes(&format!("{}\n", lines.join("\n"))),
+        Ok((8..40).map(hash).collect())
+    );
+}
+
+fn plain_group(command: &str) -> Value {
+    json!({ "hooks": [{ "type": "command", "command": command }] })
+}
+
+fn plain_hash(command: &str) -> String {
+    let group = plain_group(command);
+
+    handler_hash(Event::PreToolUse, &group, &group["hooks"][0]).expect("a plain hook hashes")
+}
+
+/// tack's two tables as a build appends them, its `PreToolUse` group at `pre_group`.
+fn tack_tables(source: &str, pre_group: usize) -> String {
+    let [pre, start] = handlers("/out/codex");
+
+    format!(
+        "[hooks.state.\"{source}:pre_tool_use:{pre_group}:0\"]\nenabled = true\n\
+         trusted_hash = \"{}\"\n\n\
+         [hooks.state.\"{source}:session_start:0:0\"]\nenabled = true\n\
+         trusted_hash = \"{}\"\n",
+        pre.trusted_hash(),
+        start.trusted_hash()
+    )
+}
+
+/// A state table of `source` at `PreToolUse` group `group`, handler 0.
+fn state_table(source: &str, group: usize, enabled: bool, hash: &str) -> String {
+    format!(
+        "[hooks.state.\"{source}:pre_tool_use:{group}:0\"]\nenabled = {enabled}\n\
+         trusted_hash = \"{hash}\"\n"
+    )
+}
+
+#[test]
+fn a_first_build_without_a_hash_record_drops_an_orphan_stale_table() {
+    let scratch = Scratch::new();
+    let source = scratch.root.join(HOOKS_FILE).display().to_string();
+
+    // An older tack left this table, and nothing recorded its hash: hooks.json
+    // has no PreToolUse group 1, and there is no tack-hashes yet.
+    let orphan = state_table(&source, 1, true, &hash(1));
+    fs::write(scratch.root.join(HOOKS_FILE), "{}\n").expect("hooks");
+    fs::write(
+        scratch.root.join(CONFIG_FILE),
+        format!("model = \"o3\"\n\n{orphan}"),
+    )
+    .expect("config");
+
+    let installed = install(&scratch.root, &handlers("/out/codex")).expect("install");
+
+    assert_eq!(
+        fs::read_to_string(&installed.config).expect("config"),
+        format!("model = \"o3\"\n\n{}", tack_tables(&source, 0))
+    );
+}
+
+#[test]
+fn an_orphan_table_stays_once_a_hash_record_exists() {
+    let scratch = Scratch::new();
+    let source = scratch.root.join(HOOKS_FILE).display().to_string();
+
+    // tack-hashes exists, so this is not a first build, and the table's hash
+    // is not one tack recorded: it is not tack's to drop.
+    let orphan = state_table(&source, 1, true, &hash(1));
+    fs::write(scratch.root.join(HOOKS_FILE), "{}\n").expect("hooks");
+    fs::write(scratch.root.join(CONFIG_FILE), &orphan).expect("config");
+    fs::write(scratch.root.join(HASHES_FILE), HASHES_HEADER).expect("hashes");
+
+    let installed = install(&scratch.root, &handlers("/out/codex")).expect("install");
+
+    assert_eq!(
+        fs::read_to_string(&installed.config).expect("config"),
+        format!("{orphan}\n{}", tack_tables(&source, 0))
+    );
+}
+
+#[test]
+fn a_table_matching_its_hook_stays_and_a_mismatched_one_is_dropped() {
+    let scratch = Scratch::new();
+    let source = scratch.root.join(HOOKS_FILE).display().to_string();
+    let unhashable = json!({ "hooks": [
+        { "type": "command", "command": "./x.sh", "statusMessage": "x" }
+    ] });
+    let hooks = json!({ "hooks": { "PreToolUse": [
+        plain_group("./lint.sh"),
+        plain_group("./fmt.sh"),
+        unhashable
+    ] } });
+
+    // Group 0's table holds its hook's hash, group 1's a hash its hook does
+    // not have, and group 2's hook is a shape tack cannot hash.
+    let matching = state_table(&source, 0, false, &plain_hash("./lint.sh"));
+    let mismatched = state_table(&source, 1, true, &hash(2));
+    let unverified = state_table(&source, 2, true, &hash(3));
+    fs::write(scratch.root.join(HOOKS_FILE), hooks.to_string()).expect("hooks");
+    fs::write(
+        scratch.root.join(CONFIG_FILE),
+        format!("{matching}\n{mismatched}\n{unverified}"),
+    )
+    .expect("config");
+    fs::write(scratch.root.join(HASHES_FILE), HASHES_HEADER).expect("hashes");
+
+    let installed = install(&scratch.root, &handlers("/out/codex")).expect("install");
+
+    assert_eq!(
+        fs::read_to_string(&installed.config).expect("config"),
+        format!("{matching}\n{unverified}\n{}", tack_tables(&source, 3))
+    );
+}
+
+#[test]
+fn hook_hashes_tell_a_hashed_hook_from_an_unverified_and_a_missing_one() {
+    let lint = plain_hash("./lint.sh");
+    let hooks = json!({ "hooks": {
+        "PreToolUse": [
+            plain_group("./lint.sh"),
+            { "hooks": "not a list" },
+            { "hooks": [{ "type": "prompt", "prompt": "x" }] }
+        ],
+        "SessionStart": []
+    } });
+    let hashes = HookHashes::read(&hooks);
+
+    assert_eq!(hashes.at("pre_tool_use", 0, 0), KeyHook::Hashed(&lint));
+    assert_eq!(hashes.at("pre_tool_use", 0, 1), KeyHook::Missing);
+    assert_eq!(hashes.at("pre_tool_use", 1, 0), KeyHook::Unverified);
+    assert_eq!(hashes.at("pre_tool_use", 2, 0), KeyHook::Unverified);
+    assert_eq!(hashes.at("pre_tool_use", 3, 0), KeyHook::Missing);
+    assert_eq!(hashes.at("session_start", 0, 0), KeyHook::Missing);
+    assert_eq!(hashes.at("stop", 0, 0), KeyHook::Unverified);
+    assert_eq!(
+        HookHashes::read(&json!({})).at("pre_tool_use", 0, 0),
+        KeyHook::Unverified
+    );
+}
+
+#[test]
+fn a_table_is_dropped_only_for_a_hash_tack_can_judge() {
+    let stale = HashSet::from(["sha256:old".to_owned()]);
+    let line = |hash: &str| format!("trusted_hash = \"{hash}\"\n");
+    let present = HashRecord::Present;
+    let missing = HashRecord::Missing;
+
+    assert!(drops(
+        KeyHook::Unverified,
+        &line("sha256:old"),
+        &stale,
+        present
+    ));
+    assert!(!drops(
+        KeyHook::Unverified,
+        &line("sha256:x"),
+        &stale,
+        missing
+    ));
+    assert!(!drops(
+        KeyHook::Hashed("sha256:x"),
+        &line("sha256:x"),
+        &stale,
+        missing
+    ));
+    assert!(drops(
+        KeyHook::Hashed("sha256:x"),
+        &line("sha256:y"),
+        &stale,
+        present
+    ));
+    assert!(drops(KeyHook::Missing, &line("sha256:x"), &stale, missing));
+    assert!(!drops(KeyHook::Missing, &line("sha256:x"), &stale, present));
+    assert!(!drops(
+        KeyHook::Missing,
+        "trusted_hash = 'sha256:x'\n",
+        &stale,
+        missing
+    ));
+    assert!(!drops(
+        KeyHook::Missing,
+        "enabled = true\n",
+        &stale,
+        missing
+    ));
+}
+
+#[test]
 fn state_merge_refuses_what_it_cannot_place() {
     let trust = [(
         "/h/hooks.json:pre_tool_use:0:0".to_owned(),
@@ -410,7 +642,14 @@ fn state_merge_refuses_what_it_cannot_place() {
         ),
     ] {
         assert_eq!(
-            merge_state(text, &trust, "/h/hooks.json", &HashSet::new()),
+            merge_state(
+                text,
+                &trust,
+                "/h/hooks.json",
+                &HashSet::new(),
+                &HookHashes::default(),
+                HashRecord::Present
+            ),
             Err(CodexError::Config(expected.to_owned())),
             "{text}"
         );
@@ -490,8 +729,15 @@ fn a_state_key_outside_hooks_or_another_key_inside_it_is_kept() {
     )];
     let existing = "[tui]\nstate = \"compact\"\n\n[hooks]\ndescription = \"mine\"\n";
 
-    let merged = merge_state(existing, &trust, "/h/hooks.json", &HashSet::new())
-        .expect("both lines are kept");
+    let merged = merge_state(
+        existing,
+        &trust,
+        "/h/hooks.json",
+        &HashSet::new(),
+        &HookHashes::default(),
+        HashRecord::Present,
+    )
+    .expect("both lines are kept");
 
     assert_eq!(
         merged,

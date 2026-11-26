@@ -8,7 +8,7 @@
 //! three files are computed before any is written, and each is replaced by an
 //! atomic rename.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write as _;
@@ -144,13 +144,21 @@ pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexErro
 
     let hooks_text = read_optional(&hooks_path)?;
     let (hooks, groups) = merge_hooks(hooks_text.as_deref(), handlers)?;
+    let merged: Value =
+        serde_json::from_str(&hooks).map_err(|error| CodexError::Hooks(error.to_string()))?;
     let mut stale = match hooks_text.as_deref() {
         Some(text) => tack_hashes(
             &serde_json::from_str(text).map_err(|error| CodexError::Hooks(error.to_string()))?,
         ),
         None => HashSet::new(),
     };
-    let recorded = parse_hashes(read_optional(&hashes_path)?.as_deref().unwrap_or(""))?;
+    let hashes_text = read_optional(&hashes_path)?;
+    let record = if hashes_text.is_some() {
+        HashRecord::Present
+    } else {
+        HashRecord::Missing
+    };
+    let recorded = parse_hashes(hashes_text.as_deref().unwrap_or(""))?;
     stale.extend(recorded.iter().cloned());
     let trust: Vec<(String, String)> = handlers
         .iter()
@@ -164,7 +172,14 @@ pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexErro
         .collect();
 
     let config_text = read_optional(&config_path)?;
-    let config = merge_state(config_text.as_deref().unwrap_or(""), &trust, source, &stale)?;
+    let config = merge_state(
+        config_text.as_deref().unwrap_or(""),
+        &trust,
+        source,
+        &stale,
+        &HookHashes::read(&merged),
+        record,
+    )?;
     let hashes = render_hashes(&recorded, &trust);
 
     Ok(Planned {
@@ -188,7 +203,8 @@ fn is_hash(text: &str) -> bool {
     })
 }
 
-/// The hashes a `tack-hashes` file holds, each once, in file order.
+/// The hashes a `tack-hashes` file holds, each once, in file order, keeping
+/// only the newest `MAX_HASHES`: the last ones in the file.
 ///
 /// # Errors
 ///
@@ -211,6 +227,9 @@ fn parse_hashes(text: &str) -> Result<Vec<String>, CodexError> {
             hashes.push(line.to_owned());
         }
     }
+
+    let excess = hashes.len().saturating_sub(MAX_HASHES);
+    hashes.drain(..excess);
 
     Ok(hashes)
 }
@@ -387,17 +406,114 @@ fn tack_hashes(hooks: &Value) -> HashSet<String> {
     hashes
 }
 
-/// Whether `line` sets `trusted_hash` to a plain basic string in `hashes`.
-/// Any other spelling, such as a literal string or a trailing comment, reads
-/// as no, so its table stays.
-fn trusted_hash_in(line: &str, hashes: &HashSet<String>) -> bool {
+/// The value `line` sets `trusted_hash` to, when it is a plain basic string.
+/// Any other spelling, such as a literal string or a trailing comment, gives
+/// `None`, so its table stays.
+fn plain_trusted_hash(line: &str) -> Option<String> {
     let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
 
     compact
         .strip_prefix("trusted_hash=")
         .and_then(|value| value.strip_prefix('"'))
         .and_then(|value| value.strip_suffix('"'))
-        .is_some_and(|hash| !hash.contains(['"', '\\', '#']) && hashes.contains(hash))
+        .filter(|hash| !hash.contains(['"', '\\', '#']))
+        .map(str::to_owned)
+}
+
+/// Whether a `tack-hashes` file was there to read before this build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashRecord {
+    Present,
+    Missing,
+}
+
+/// What a hooks file holds at one state key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyHook<'a> {
+    /// A hook whose trust hash tack reproduces exactly.
+    Hashed(&'a str),
+    /// A hook tack cannot hash, or an event it does not read.
+    Unverified,
+    /// No hook at all.
+    Missing,
+}
+
+/// The hooks of a hooks file by state key, for the events tack reads: per
+/// event label, its groups in order, each with its handlers' trust hashes. A
+/// group whose handlers are not a list is `None`, and so is a handler tack
+/// cannot hash.
+#[derive(Debug, Default)]
+struct HookHashes {
+    events: HashMap<&'static str, Vec<Option<Vec<Option<String>>>>>,
+}
+
+impl HookHashes {
+    fn read(hooks: &Value) -> Self {
+        let mut events = HashMap::new();
+
+        for event in [Event::PreToolUse, Event::SessionStart] {
+            let Some(groups) = hooks
+                .get("hooks")
+                .and_then(|events| events.get(event.name()))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+
+            let hashed = groups
+                .iter()
+                .map(|group| {
+                    let handlers = group.get("hooks").and_then(Value::as_array)?;
+
+                    Some(
+                        handlers
+                            .iter()
+                            .map(|handler| handler_hash(event, group, handler))
+                            .collect(),
+                    )
+                })
+                .collect();
+
+            events.insert(event.key_label(), hashed);
+        }
+
+        Self { events }
+    }
+
+    fn at(&self, event: &str, group: usize, handler: usize) -> KeyHook<'_> {
+        let Some(groups) = self.events.get(event) else {
+            return KeyHook::Unverified;
+        };
+
+        match groups.get(group) {
+            None => KeyHook::Missing,
+            Some(None) => KeyHook::Unverified,
+            Some(Some(handlers)) => match handlers.get(handler) {
+                None => KeyHook::Missing,
+                Some(None) => KeyHook::Unverified,
+                Some(Some(hash)) => KeyHook::Hashed(hash),
+            },
+        }
+    }
+}
+
+/// Whether `line` makes its table, a state table of this hooks file whose
+/// key holds `hook`, tack's to drop: its plain `trusted_hash` is one of
+/// tack's `stale` hashes, differs from the hash of the hook now at its key,
+/// or names no hook on a build with no `tack-hashes` yet, the first after
+/// an upgrade. A table whose hook tack cannot hash, or whose hash is spelled
+/// otherwise, stays: tack never drops trust it cannot verify.
+fn drops(hook: KeyHook<'_>, line: &str, stale: &HashSet<String>, record: HashRecord) -> bool {
+    let Some(hash) = plain_trusted_hash(line) else {
+        return false;
+    };
+
+    stale.contains(&hash)
+        || match hook {
+            KeyHook::Hashed(expected) => hash != expected,
+            KeyHook::Missing => record == HashRecord::Missing,
+            KeyHook::Unverified => false,
+        }
 }
 
 fn state_header(key: &str) -> String {
@@ -439,21 +555,19 @@ fn state_key(header: &str) -> Option<&str> {
     }
 }
 
-/// Whether `header` is a state table header for a hook of the hooks file
-/// `source`: `[hooks.state."<source>:<event>:<group>:<handler>"]`, with a
-/// non-empty event label and two indices, and only space or a comment after
-/// it. The key is split from its end, so a hooks file whose path only begins
-/// with `source` and a colon is another source and does not match.
-fn is_source_state(header: &str, source: &str) -> bool {
-    let Some(key) = state_key(header) else {
-        return false;
-    };
-
+/// The event label, group and handler of `header` when it is a state table
+/// header for a hook of the hooks file `source`:
+/// `[hooks.state."<source>:<event>:<group>:<handler>"]`, with a non-empty event
+/// label and two indices, and only space or a comment after it. The key is
+/// split from its end, so a hooks file whose path only begins with `source`
+/// and a colon is another source and does not match.
+fn source_state_hook<'a>(header: &'a str, source: &str) -> Option<(&'a str, usize, usize)> {
+    let key = state_key(header)?;
     let mut fields = key.rsplitn(4, ':');
     let (Some(handler), Some(group), Some(event), Some(path)) =
         (fields.next(), fields.next(), fields.next(), fields.next())
     else {
-        return false;
+        return None;
     };
 
     // The key is compared as written, so the source is escaped the same way.
@@ -462,10 +576,11 @@ fn is_source_state(header: &str, source: &str) -> bool {
         .strip_prefix('"')
         .and_then(|rest| rest.strip_suffix('"'));
 
-    escaped == Some(path)
-        && !event.is_empty()
-        && group.parse::<usize>().is_ok()
-        && handler.parse::<usize>().is_ok()
+    if escaped != Some(path) || event.is_empty() {
+        return None;
+    }
+
+    Some((event, group.parse().ok()?, handler.parse().ok()?))
 }
 
 /// What the line-level merge cannot place safely: a multi-line string, any
@@ -502,15 +617,18 @@ fn check_line(table: &str, line: &str, keys: &[&str]) -> Result<(), CodexError> 
 }
 
 /// Drop the state tables of `trust`'s keys, and every state table of `source`
-/// whose `trusted_hash` is in `stale`: the hashes tack's own groups had
-/// before this build, so such a table is tack's, left behind under a key
-/// that may now name another hook. Keep every other line as it is, and append
-/// one table per key of `trust`.
+/// that `drops` names: one holding a hash in `stale`, the hashes tack's own
+/// groups had before this build, one whose hash differs from the hook `hooks`
+/// now holds at its key, and on a first build with no `tack-hashes` (`record`)
+/// one whose key holds no hook. Keep every other line as it is, and append one
+/// table per key of `trust`.
 fn merge_state(
     existing: &str,
     trust: &[(String, String)],
     source: &str,
     stale: &HashSet<String>,
+    hooks: &HookHashes,
+    record: HashRecord,
 ) -> Result<String, CodexError> {
     let headers: Vec<String> = trust.iter().map(|(key, _)| state_header(key)).collect();
     let keys: Vec<&str> = trust.iter().map(|(key, _)| key.as_str()).collect();
@@ -518,7 +636,7 @@ fn merge_state(
     let mut pending = String::new();
     let mut table = String::new();
     let mut skipping = false;
-    let mut judged = false;
+    let mut judged: Option<KeyHook<'_>> = None;
     let mut dropped = false;
 
     for line in existing.split_inclusive('\n') {
@@ -532,7 +650,8 @@ fn merge_state(
 
             pending.clear();
             skipping = headers.iter().any(|header| header == trimmed);
-            judged = is_source_state(trimmed, source);
+            judged = source_state_hook(trimmed, source)
+                .map(|(event, group, handler)| hooks.at(event, group, handler));
             dropped = false;
             table = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
         }
@@ -543,7 +662,9 @@ fn merge_state(
 
         check_line(&table, line, &keys)?;
 
-        if judged && trusted_hash_in(line, stale) {
+        if let Some(hook) = judged
+            && drops(hook, line, stale, record)
+        {
             dropped = true;
         }
 
@@ -611,7 +732,9 @@ fn write_new(
 
 #[cfg(test)]
 mod source_state_tests {
-    use super::is_source_state;
+    fn is_source_state(header: &str, source: &str) -> bool {
+        super::source_state_hook(header, source).is_some()
+    }
 
     #[test]
     fn only_a_tack_key_of_exactly_this_source_is_judged() {
