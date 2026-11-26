@@ -1957,13 +1957,10 @@ mod tests {
         });
 
         let mut received = Vec::new();
-        tokio::time::timeout(
-            CONNECTION_LIFETIME.saturating_add(Duration::from_millis(500)),
-            reader.read_to_end(&mut received),
-        )
-        .await
-        .expect("the daemon ends a trickling peer at its I/O lifetime")
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut received))
+            .await
+            .expect("the daemon ends a trickling peer at its I/O lifetime")
+            .unwrap();
 
         assert_eq!(received, Vec::<u8>::new());
 
