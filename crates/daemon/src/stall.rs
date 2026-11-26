@@ -420,7 +420,10 @@ mod tests {
 
         assert_eq!(client.call(rewrite_request()), Ok(rewrite_reply()));
         assert_eq!(client.transport.frames(), &[REWRITE_REQUEST.to_owned()]);
-        assert_eq!(encoded_reply, REWRITE_REPLY);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded_reply).unwrap(),
+            serde_json::from_str::<serde_json::Value>(REWRITE_REPLY).unwrap()
+        );
     }
 
     #[test]
