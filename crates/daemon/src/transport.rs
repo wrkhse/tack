@@ -1969,7 +1969,7 @@ mod tests {
         // must not close before CONNECTION_LIFETIME, less a little for the
         // admission that preceded `start`.
         assert!(
-            elapsed >= CONNECTION_LIFETIME.saturating_sub(Duration::from_millis(200)),
+            elapsed >= CONNECTION_LIFETIME.saturating_sub(Duration::from_millis(100)),
             "the daemon closed a progressing peer after {elapsed:?}, before its lifetime"
         );
 
