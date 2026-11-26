@@ -322,6 +322,14 @@ mod tests {
     }
 
     #[test]
+    fn stall_error_display_names_are_stable() {
+        assert_eq!(StallError::Closed.to_string(), "closed");
+        assert_eq!(StallError::Timeout.to_string(), "timeout");
+        assert_eq!(StallError::Malformed.to_string(), "malformed");
+        assert_eq!(StallError::Io("disk".into()).to_string(), "io(disk)");
+    }
+
+    #[test]
     fn reply_inside_budget_is_decoded_and_returned() {
         let clock = FakeClock::new(Instant::now());
         let stall = FakeStall::reply(clock.clone(), DENY_REPLY);
