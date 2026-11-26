@@ -6,7 +6,8 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 use tack_adapter_claude::{ModConfig, ModError};
 use tack_adapter_codex::CodexError;
@@ -228,6 +229,66 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
     Ok(extension)
 }
 
+/// Where `path` will resolve once its folders exist, without creating
+/// anything: its deepest existing ancestor, canonicalized, then the rest of
+/// its components as written. A component that does not exist yet cannot be a
+/// symlink, so `..` drops the last of them; one that would climb above the
+/// existing ancestor is refused.
+fn planned_dir(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        let (Some(parent), Some(last)) = (existing.parent(), existing.components().next_back())
+        else {
+            return Err(std::io::Error::new(
+                ErrorKind::NotFound,
+                "no existing ancestor",
+            ));
+        };
+
+        missing.push(last);
+        existing = parent;
+    }
+
+    let mut planned = std::fs::canonicalize(existing)?;
+    let mut added = 0_usize;
+
+    for component in missing.into_iter().rev() {
+        match component {
+            Component::Normal(name) => {
+                planned.push(name);
+                added = added.saturating_add(1);
+            }
+            Component::ParentDir => {
+                added = added.checked_sub(1).ok_or_else(|| {
+                    std::io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "the output path climbs above an existing folder",
+                    )
+                })?;
+                planned.pop();
+            }
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "the output path is not a plain folder path",
+                ));
+            }
+        }
+    }
+
+    Ok(planned)
+}
+
 /// Read one plugin, check its needs, emit the Codex adapter into
 /// `<out>/codex`, and install its hooks and their trust into `codex_home`.
 ///
@@ -237,8 +298,9 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
 /// its script through. Into the Codex home go tack's groups in
 /// `hooks.json` and `[hooks.state.<key>]` in `config.toml` for exactly
 /// tack's handlers, rewritten on every build; every other hook and its state
-/// stays as it is. The scripts are written before the home trusts them, and
-/// both home files are checked before either is written.
+/// stays as it is. The home is merged and checked before anything is
+/// created, so a home tack cannot merge into leaves no output behind; the
+/// scripts are written before the home trusts them.
 ///
 /// # Errors
 ///
@@ -254,9 +316,7 @@ pub fn build_codex(
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
     let (plugin_dir, _) = load(plugin_dir)?;
-    let dest = out.join("codex");
-    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
-    let dest = std::fs::canonicalize(&dest).map_err(BuildError::Io)?;
+    let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
         plugin_dir: &plugin_dir,
@@ -264,6 +324,18 @@ pub fn build_codex(
         version: env!("CARGO_PKG_VERSION"),
     })
     .map_err(BuildError::Codex)?;
+    let planned =
+        tack_adapter_codex::plan_home(codex_home, &adapter.handlers).map_err(BuildError::Codex)?;
+
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+
+    // The scripts embed `dest`, so it must be where they now live.
+    if std::fs::canonicalize(&dest).map_err(BuildError::Io)? != dest {
+        return Err(BuildError::Io(std::io::Error::other(
+            "the output folder changed while building",
+        )));
+    }
+
     let mut written = Vec::with_capacity(adapter.files.len().saturating_add(2));
 
     for file in adapter.files {
@@ -272,8 +344,7 @@ pub fn build_codex(
         written.push(path);
     }
 
-    let installed =
-        tack_adapter_codex::install(codex_home, &adapter.handlers).map_err(BuildError::Codex)?;
+    let installed = planned.commit().map_err(BuildError::Codex)?;
 
     written.push(installed.hooks);
     written.push(installed.config);
@@ -283,9 +354,42 @@ pub fn build_codex(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use tack_luau::LimitCause;
 
     use super::*;
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// A temporary folder removed when the test ends.
+    struct Scratch {
+        root: PathBuf,
+    }
+
+    impl Scratch {
+        fn new() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after the epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "tack-cli-lib-{}-{}-{}",
+                std::process::id(),
+                unique,
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&root).expect("scratch folder");
+            Self { root }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 
     #[test]
     fn build_error_reports_the_underlying_source() {
@@ -330,5 +434,55 @@ mod tests {
             build_error.source().map(ToString::to_string),
             Some(render.to_string())
         );
+    }
+
+    #[test]
+    fn planned_dir_puts_a_missing_tail_under_the_canonical_ancestor() {
+        let scratch = Scratch::new();
+        let canonical = std::fs::canonicalize(&scratch.root).expect("canonical");
+
+        let planned = planned_dir(&scratch.root.join("dist").join("codex")).expect("planned");
+
+        assert_eq!(planned, canonical.join("dist").join("codex"));
+        assert!(!scratch.root.join("dist").exists());
+    }
+
+    #[test]
+    fn planned_dir_collapses_a_missing_parent_step_without_creating_folders() {
+        let scratch = Scratch::new();
+        let canonical = std::fs::canonicalize(&scratch.root).expect("canonical");
+
+        let planned = planned_dir(&scratch.root.join("a/../b")).expect("planned");
+
+        assert_eq!(planned, canonical.join("b"));
+        assert!(!scratch.root.join("a").exists());
+        assert!(!scratch.root.join("b").exists());
+    }
+
+    #[test]
+    fn planned_dir_refuses_a_parent_step_above_the_existing_ancestor() {
+        let scratch = Scratch::new();
+
+        let error = planned_dir(&scratch.root.join("missing/../../x")).expect_err("refused");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "the output path climbs above an existing folder"
+        );
+        assert!(!scratch.root.join("missing").exists());
+    }
+
+    #[test]
+    fn planned_dir_reports_a_file_in_the_way_rather_than_treating_it_as_missing() {
+        let scratch = Scratch::new();
+        let file = scratch.root.join("file");
+        std::fs::write(&file, "x").expect("file");
+
+        let error = planned_dir(&file.join("child/codex")).expect_err("refused");
+
+        assert_eq!(error.kind(), ErrorKind::NotADirectory);
+        assert_eq!(std::fs::read(&file).expect("still a file"), b"x");
+        assert!(file.is_file());
     }
 }

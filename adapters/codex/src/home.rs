@@ -66,6 +66,36 @@ pub struct Installed {
     pub config: PathBuf,
 }
 
+/// The two home files as a build will write them: read, merged and checked,
+/// with nothing written yet. Only [`plan_home`] makes one, and
+/// [`Planned::commit`] writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Planned {
+    hooks_path: PathBuf,
+    config_path: PathBuf,
+    hooks: String,
+    config: String,
+}
+
+impl Planned {
+    /// Write the planned merge into the Codex home, each file by an atomic
+    /// rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodexError::Io`] when a file cannot be written.
+    pub fn commit(self) -> Result<Installed, CodexError> {
+        // Trust first: a rebuilt hook whose state is missing would be skipped.
+        write_atomic(&self.config_path, &self.config)?;
+        write_atomic(&self.hooks_path, &self.hooks)?;
+
+        Ok(Installed {
+            hooks: self.hooks_path,
+            config: self.config_path,
+        })
+    }
+}
+
 /// Merge `handlers` and their trust into the Codex home at `home`.
 ///
 /// # Errors
@@ -75,6 +105,19 @@ pub struct Installed {
 /// file tack cannot merge into safely, and [`CodexError::Io`] when a file
 /// cannot be read or written.
 pub fn install(home: &Path, handlers: &[Handler]) -> Result<Installed, CodexError> {
+    plan_home(home, handlers)?.commit()
+}
+
+/// Read both home files and compute their merge with `handlers` and their
+/// trust, checking everything `install` checks, without writing anything.
+///
+/// # Errors
+///
+/// Returns [`CodexError::Unsafe`] for a home path Codex's state key cannot
+/// hold, [`CodexError::Hooks`] or [`CodexError::Config`] for an existing
+/// file tack cannot merge into safely, and [`CodexError::Io`] when a file
+/// cannot be read.
+pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexError> {
     let hooks_path = home.join(HOOKS_FILE);
     let config_path = home.join(CONFIG_FILE);
     let source = hooks_path
@@ -104,13 +147,11 @@ pub fn install(home: &Path, handlers: &[Handler]) -> Result<Installed, CodexErro
     let config_text = read_optional(&config_path)?;
     let config = merge_state(config_text.as_deref().unwrap_or(""), &trust, source, &stale)?;
 
-    // Trust first: a rebuilt hook whose state is missing would be skipped.
-    write_atomic(&config_path, &config)?;
-    write_atomic(&hooks_path, &hooks)?;
-
-    Ok(Installed {
-        hooks: hooks_path,
-        config: config_path,
+    Ok(Planned {
+        hooks_path,
+        config_path,
+        hooks,
+        config,
     })
 }
 
