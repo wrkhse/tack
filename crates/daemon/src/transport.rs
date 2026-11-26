@@ -1941,12 +1941,14 @@ mod tests {
         .unwrap();
         let partial = line.get(..line.len().div_ceil(2)).unwrap().to_vec();
 
+        // The clock starts before the connect, so the daemon's admission, where
+        // the lifetime starts, cannot come before it.
+        let start = Instant::now();
         let (mut reader, mut writer) = UnixStream::connect(&socket).await.unwrap().into_split();
 
         // Half a frame, then a space every millisecond: never a newline, and
         // never a stall long enough for the frame budget. The write half stays
         // open until a write fails, so only the daemon can end the connection.
-        let start = Instant::now();
         let trickle = tokio::spawn(async move {
             if writer.write_all(&partial).await.is_err() {
                 return;
@@ -1966,8 +1968,8 @@ mod tests {
         let elapsed = start.elapsed();
 
         // Bytes keep flowing, so only the lifetime can end the connection: it
-        // must not close before CONNECTION_LIFETIME, less a little for the
-        // admission that preceded `start`.
+        // must not close before CONNECTION_LIFETIME, less 100 ms of timer and
+        // scheduling slack.
         assert!(
             elapsed >= CONNECTION_LIFETIME.saturating_sub(Duration::from_millis(100)),
             "the daemon closed a progressing peer after {elapsed:?}, before its lifetime"
