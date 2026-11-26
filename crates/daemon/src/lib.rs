@@ -1,6 +1,7 @@
 //! The per-user daemon that evaluates hooks and runs tools inside an mlua
 //! sandbox with memory and deadline limits.
 
+pub mod stall;
 pub mod transport;
 
 use std::path::{Path, PathBuf};
