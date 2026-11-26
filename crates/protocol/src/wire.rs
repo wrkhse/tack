@@ -14,6 +14,27 @@ pub use crate::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES, MAX_FRAME_BYTES, MAX_
 /// Every request and reply carries this version; peers refuse other versions.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// The closed set of hook kinds tack recognizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookKind {
+    /// A hook on a tool call.
+    Tool,
+    /// A hook on an event.
+    Event,
+}
+
+/// The kind of a known hook, or `None` for an unregistered name.
+///
+/// The list is closed: a name's shape never infers its kind.
+#[must_use]
+pub fn hook_kind(name: &str) -> Option<HookKind> {
+    match name {
+        "toolBefore" | "toolAfter" => Some(HookKind::Tool),
+        "eventBefore" => Some(HookKind::Event),
+        _ => None,
+    }
+}
+
 /// The machine-readable class carried by an error reply.
 ///
 /// The daemon sends the first eight. The remaining kinds name client
@@ -346,6 +367,16 @@ mod tests {
         };
         let decoded: Reply = serde_json::from_slice(&encode_line(&error).unwrap()).unwrap();
         assert_eq!(decoded, error);
+    }
+
+    #[test]
+    fn hook_names_map_to_closed_kinds() {
+        assert_eq!(hook_kind("toolBefore"), Some(HookKind::Tool));
+        assert_eq!(hook_kind("toolAfter"), Some(HookKind::Tool));
+        assert_eq!(hook_kind("eventBefore"), Some(HookKind::Event));
+        assert_eq!(hook_kind("eventTool"), None);
+        assert_eq!(hook_kind("eventAfter"), None);
+        assert_eq!(hook_kind(""), None);
     }
 
     #[test]

@@ -15,7 +15,8 @@ use barn_stall::{
     Request as StallRequest, ToolCall as StallToolCall,
 };
 use tack_protocol::wire::{
-    Content, Meta as WireMeta, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request, ToolCall,
+    Content, HookKind, Meta as WireMeta, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
+    ToolCall, hook_kind,
 };
 
 /// A frame the two contracts cannot express for each other.
@@ -23,15 +24,12 @@ use tack_protocol::wire::{
 pub enum ConvertError {
     /// The reply's id or kind does not answer the request.
     UnsupportedOutcome,
-    /// Trace context the request needs is absent.
-    MissingMeta,
 }
 
 impl fmt::Display for ConvertError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::UnsupportedOutcome => "unsupported_outcome",
-            Self::MissingMeta => "missing_meta",
         };
 
         f.write_str(message)
@@ -63,8 +61,9 @@ fn stall_meta(meta: &WireMeta) -> StallMeta {
 ///
 /// # Errors
 ///
-/// Returns `UnsupportedOutcome` when the request has no stall frame. Both wire
-/// variants have one, so the mapping itself is total.
+/// The mapping is total: both wire variants have a stall frame, so this
+/// returns `Ok` for every request. The `Result` keeps the shape of the reply
+/// mapping.
 pub fn to_stall(request: &Request) -> Result<StallRequest, ConvertError> {
     match request {
         Request::Hook {
@@ -95,10 +94,6 @@ pub fn to_stall(request: &Request) -> Result<StallRequest, ConvertError> {
     }
 }
 
-fn is_event_hook(hook: &str) -> bool {
-    hook.starts_with("event")
-}
-
 const fn outcome_name(outcome: &StallOutcome) -> &'static str {
     match outcome {
         StallOutcome::Allow => "allow",
@@ -112,14 +107,23 @@ const fn outcome_name(outcome: &StallOutcome) -> &'static str {
 fn wire_outcome(outcome: StallOutcome, hook: &str) -> Outcome {
     let name = outcome_name(&outcome);
 
-    match outcome {
-        StallOutcome::Allow => Outcome::Allow,
-        StallOutcome::Deny { reason } => Outcome::Deny { reason },
-        StallOutcome::Rewrite { input } => Outcome::Rewrite { input },
-        StallOutcome::Annotate { fields } if is_event_hook(hook) => Outcome::Annotate { fields },
-        StallOutcome::Drop if is_event_hook(hook) => Outcome::Drop,
-        StallOutcome::Annotate { .. } | StallOutcome::Drop => Outcome::Deny {
-            reason: format!("tack: {name} not valid for {hook}"),
+    match (hook_kind(hook), outcome) {
+        (Some(HookKind::Tool | HookKind::Event), StallOutcome::Allow) => Outcome::Allow,
+        (Some(HookKind::Tool | HookKind::Event), StallOutcome::Deny { reason }) => {
+            Outcome::Deny { reason }
+        }
+        (Some(HookKind::Tool | HookKind::Event), StallOutcome::Rewrite { input }) => {
+            Outcome::Rewrite { input }
+        }
+        (Some(HookKind::Event), StallOutcome::Annotate { fields }) => Outcome::Annotate { fields },
+        (Some(HookKind::Event), StallOutcome::Drop) => Outcome::Drop,
+        (Some(HookKind::Tool), StallOutcome::Annotate { .. } | StallOutcome::Drop) => {
+            Outcome::Deny {
+                reason: format!("tack: {name} not valid for {hook}"),
+            }
+        }
+        (None, _) => Outcome::Deny {
+            reason: format!("tack: unknown hook {hook}"),
         },
     }
 }
@@ -134,9 +138,9 @@ const fn reply_id(reply: &StallReply) -> u64 {
 
 /// Translate a stall reply into the wire verdict for request.
 ///
-/// An event hook accepts all five outcomes. A tool hook that receives
-/// annotate or drop gets a deny naming the outcome and the hook, never an
-/// allow.
+/// A registered event hook accepts all five outcomes; a registered tool hook
+/// denies annotate and drop with the outcome and hook named. An unknown hook
+/// denies every outcome, so no reply can turn into an allow.
 ///
 /// # Errors
 ///
@@ -218,8 +222,8 @@ mod tests {
     fn fields() -> Map<String, Value> {
         json!({ "chauffeurTriaged": true })
             .as_object()
-            .cloned()
-            .unwrap_or_default()
+            .expect("fields fixture is an object")
+            .clone()
     }
 
     #[test]
@@ -228,7 +232,6 @@ mod tests {
             ConvertError::UnsupportedOutcome.to_string(),
             "unsupported_outcome"
         );
-        assert_eq!(ConvertError::MissingMeta.to_string(), "missing_meta");
     }
 
     #[test]
@@ -387,6 +390,35 @@ mod tests {
     }
 
     #[test]
+    fn event_tool_and_unknown_hooks_deny_every_outcome() {
+        for (name, reason) in [
+            ("eventTool", "tack: unknown hook eventTool"),
+            ("unrelatedHook", "tack: unknown hook unrelatedHook"),
+        ] {
+            for outcome in [
+                StallOutcome::Allow,
+                StallOutcome::Deny {
+                    reason: "push blocked".to_owned(),
+                },
+                StallOutcome::Rewrite { input: json!({}) },
+                StallOutcome::Annotate { fields: fields() },
+                StallOutcome::Drop,
+            ] {
+                assert_eq!(
+                    from_stall(&hook(name), StallReply::Hook { id: 7, outcome }),
+                    Ok(Reply::Hook {
+                        id: 7,
+                        version: PROTOCOL_VERSION,
+                        outcome: Outcome::Deny {
+                            reason: reason.to_owned(),
+                        },
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
     fn stall_tool_content_maps_to_one_wire_content() {
         assert_eq!(
             from_stall(
@@ -455,6 +487,20 @@ mod tests {
                         kind: "text".to_owned(),
                         text: "buy milk".to_owned(),
                     },
+                }
+            ),
+            Err(ConvertError::UnsupportedOutcome)
+        );
+    }
+
+    #[test]
+    fn a_tool_request_with_a_hook_reply_is_unsupported() {
+        assert_eq!(
+            from_stall(
+                &tool(),
+                StallReply::Hook {
+                    id: 8,
+                    outcome: StallOutcome::Allow,
                 }
             ),
             Err(ConvertError::UnsupportedOutcome)
