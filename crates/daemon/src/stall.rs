@@ -172,6 +172,7 @@ mod tests {
     const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     const REWRITE_REQUEST: &str = r#"{"type":"hook","id":2,"version":1,"hook":"PostToolUse","call":{"tool":"github","name":"create_issue","input":{"title":"Fix flaky test"},"session_id":"sess-42"},"_meta":{"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","tracestate":"congo=t61rcWkgMzE"}}"#;
     const REWRITE_REPLY: &str = r#"{"type":"hook","id":2,"outcome":{"rewrite":{"input":{"title":"Fix flaky test","labels":["bug","p1"]}}}}"#;
+    const REWRITE_REPLY_SORTED: &str = r#"{"type":"hook","id":2,"outcome":{"rewrite":{"input":{"labels":["bug","p1"],"title":"Fix flaky test"}}}}"#;
     const ANNOTATE_REQUEST: &str = r#"{"type":"hook","id":4,"version":1,"hook":"PostToolUse","call":{"tool":"notes","name":"write","input":{"path":"/tmp/a.txt","text":"hi"}}}"#;
     const ANNOTATE_REPLY: &str =
         r#"{"type":"hook","id":4,"outcome":{"annotate":{"fields":{"chauffeurTriaged":true}}}}"#;
@@ -494,9 +495,10 @@ mod tests {
 
         assert_eq!(client.call(&rewrite_request()), Ok(rewrite_reply()));
         assert_eq!(client.transport.frames(), &[REWRITE_REQUEST.to_owned()]);
+        assert_eq!(encoded_reply, REWRITE_REPLY_SORTED);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&encoded_reply).unwrap(),
-            serde_json::from_str::<serde_json::Value>(REWRITE_REPLY).unwrap()
+            serde_json::from_str::<serde_json::Value>(REWRITE_REPLY).unwrap(),
+            serde_json::from_str::<serde_json::Value>(REWRITE_REPLY_SORTED).unwrap()
         );
     }
 
