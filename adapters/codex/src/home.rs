@@ -1,17 +1,19 @@
 //! Install tack's handlers into a Codex home: merge their groups into
 //! `hooks.json` and their trust into `[hooks.state.<key>]` of `config.toml`.
 //!
-//! Every other hook keeps its group index, so its state key, and its state
-//! table is copied unchanged. tack's own `tack-hashes` file beside them
-//! remembers the hashes its hooks were trusted under, so a later build still
-//! knows tack's state tables once no tack group is left in `hooks.json`. All
-//! three files are computed before any is written, and each is replaced by an
-//! atomic rename.
+//! Every other hook keeps its group index, so its state key, and the state
+//! tables of hooks that still exist are copied unchanged. Two kinds of table
+//! are dropped: one holding a hash tack recorded as its own, and, on the first
+//! build after an upgrade, before any `tack-hashes` exists, one whose key names
+//! no hook. tack's own `tack-hashes` file beside them remembers the hashes its
+//! hooks were trusted under, so a later build still knows tack's state tables
+//! once no tack group is left in `hooks.json`. All three files are computed
+//! before any is written, and each is replaced by an atomic rename.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -31,6 +33,10 @@ const MAX_HASHES: usize = 32;
 /// Why a `HASHES_FILE` is refused: a line that is not a blank line, a comment
 /// or exactly `sha256:<hex>`.
 const MALFORMED_HASHES: &str = "a malformed tack-hashes line";
+/// The largest `HASHES_FILE` tack reads, refused past it as malformed: 80
+/// bytes for each of `MAX_HASHES` lines, room for every hash, the header and
+/// short comments.
+const MAX_HASHES_BYTES: u64 = 2560;
 
 /// Find the Codex home as Codex does: `CODEX_HOME`, which must be an
 /// existing folder and is canonicalized, else `HOME/.codex`, created when
@@ -152,7 +158,7 @@ pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexErro
         ),
         None => HashSet::new(),
     };
-    let hashes_text = read_optional(&hashes_path)?;
+    let hashes_text = read_hashes_file(&hashes_path)?;
     let record = if hashes_text.is_some() {
         HashRecord::Present
     } else {
@@ -177,7 +183,7 @@ pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexErro
         &trust,
         source,
         &stale,
-        &HookHashes::read(&merged),
+        &HookKeys::read(&merged),
         record,
     )?;
     let hashes = render_hashes(&recorded, &trust);
@@ -279,6 +285,35 @@ fn read_optional(path: &Path) -> Result<Option<String>, CodexError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(CodexError::Io(error.to_string())),
     }
+}
+
+/// Read the `tack-hashes` file at `path`, `None` when it is missing, never
+/// reading more than one byte past `MAX_HASHES_BYTES`.
+///
+/// # Errors
+///
+/// Returns [`CodexError::Config`] for a file longer than `MAX_HASHES_BYTES`,
+/// and [`CodexError::Io`] when it cannot be read or is not UTF-8.
+fn read_hashes_file(path: &Path) -> Result<Option<String>, CodexError> {
+    let io = |error: std::io::Error| CodexError::Io(error.to_string());
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io(error)),
+    };
+
+    let mut bytes = Vec::new();
+    file.take(MAX_HASHES_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+
+    if !u64::try_from(bytes.len()).is_ok_and(|length| length <= MAX_HASHES_BYTES) {
+        return Err(CodexError::Config(MALFORMED_HASHES.to_owned()));
+    }
+
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| CodexError::Io(error.to_string()))
 }
 
 const fn script_name(event: Event) -> &'static str {
@@ -433,25 +468,25 @@ enum HashRecord {
 
 /// What a hooks file holds at one state key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyHook<'a> {
-    /// A hook whose trust hash tack reproduces exactly.
-    Hashed(&'a str),
-    /// A hook tack cannot hash, or an event it does not read.
-    Unverified,
+enum KeyHook {
+    /// A hook, of any shape.
+    Present,
+    /// An event tack does not read, or a group whose handlers are not a list:
+    /// tack cannot tell whether a hook is there.
+    Unknown,
     /// No hook at all.
     Missing,
 }
 
 /// The hooks of a hooks file by state key, for the events tack reads: per
-/// event label, its groups in order, each with its handlers' trust hashes. A
-/// group whose handlers are not a list is `None`, and so is a handler tack
-/// cannot hash.
+/// event label, its groups in order, each with how many handlers it has, or
+/// `None` for a group whose handlers are not a list.
 #[derive(Debug, Default)]
-struct HookHashes {
-    events: HashMap<&'static str, Vec<Option<Vec<Option<String>>>>>,
+struct HookKeys {
+    events: HashMap<&'static str, Vec<Option<usize>>>,
 }
 
-impl HookHashes {
+impl HookKeys {
     fn read(hooks: &Value) -> Self {
         let mut events = HashMap::new();
 
@@ -464,66 +499,50 @@ impl HookHashes {
                 continue;
             };
 
-            let hashed = groups
+            let counted = groups
                 .iter()
-                .map(|group| {
-                    let handlers = group.get("hooks").and_then(Value::as_array)?;
-
-                    Some(
-                        handlers
-                            .iter()
-                            .map(|handler| handler_hash(event, group, handler))
-                            .collect(),
-                    )
-                })
+                .map(|group| group.get("hooks").and_then(Value::as_array).map(Vec::len))
                 .collect();
 
-            events.insert(event.key_label(), hashed);
+            events.insert(event.key_label(), counted);
         }
 
         Self { events }
     }
 
-    fn at(&self, event: &str, group: usize, handler: usize) -> KeyHook<'_> {
+    fn at(&self, event: &str, group: usize, handler: usize) -> KeyHook {
         let Some(groups) = self.events.get(event) else {
-            return KeyHook::Unverified;
+            return KeyHook::Unknown;
         };
 
         match groups.get(group) {
-            None => KeyHook::Missing,
-            Some(None) => KeyHook::Unverified,
-            Some(Some(handlers)) => match handlers.get(handler) {
-                None => KeyHook::Missing,
-                Some(None) => KeyHook::Unverified,
-                Some(Some(hash)) => KeyHook::Hashed(hash),
-            },
+            Some(None) => KeyHook::Unknown,
+            Some(Some(handlers)) if handler < *handlers => KeyHook::Present,
+            // No such group, or no such handler in it.
+            None | Some(Some(_)) => KeyHook::Missing,
         }
     }
 }
 
 /// Whether `line` makes its table, a state table of this hooks file whose
-/// key holds `hook`, tack's to drop: its plain `trusted_hash` is one of
-/// tack's `stale` hashes, differs from the hash of the hook now at its key,
-/// or names no hook on a build with no `tack-hashes` yet, the first after
-/// an upgrade.
+/// key holds `hook`, tack's to drop. Only two things do, and both need a plain
+/// `trusted_hash`:
 ///
-/// A `stale` hash is proof on its own: tack recorded it as its own, so the
-/// table is tack's and drops whatever hook its key now holds, one tack cannot
-/// hash included. Without that proof a table whose hook tack cannot hash
-/// stays, and so does any table whose hash is spelled otherwise than a plain
-/// string: tack never drops trust it cannot verify.
-fn drops(hook: KeyHook<'_>, line: &str, stale: &HashSet<String>, record: HashRecord) -> bool {
+/// - It is one of tack's `stale` hashes. A hash tack recorded as its own is
+///   proof on its own, so the table drops whatever hook its key now holds.
+/// - Its key names no hook, on the first build after an upgrade, before any
+///   `tack-hashes` was written (`record`).
+///
+/// Every other table stays, whatever its hash: the table of a hook that
+/// still exists, though its hash differs from the hook's, the table of a key
+/// tack cannot read, and any table whose hash is spelled otherwise than a
+/// plain string. tack never drops trust it cannot prove is its own.
+fn drops(hook: KeyHook, line: &str, stale: &HashSet<String>, record: HashRecord) -> bool {
     let Some(hash) = plain_trusted_hash(line) else {
         return false;
     };
 
-    // A recorded tack hash decides first, before the hook at the key is read.
-    stale.contains(&hash)
-        || match hook {
-            KeyHook::Hashed(expected) => hash != expected,
-            KeyHook::Missing => record == HashRecord::Missing,
-            KeyHook::Unverified => false,
-        }
+    stale.contains(&hash) || (hook == KeyHook::Missing && record == HashRecord::Missing)
 }
 
 fn state_header(key: &str) -> String {
@@ -628,16 +647,15 @@ fn check_line(table: &str, line: &str, keys: &[&str]) -> Result<(), CodexError> 
 
 /// Drop the state tables of `trust`'s keys, and every state table of `source`
 /// that `drops` names: one holding a hash in `stale`, the hashes tack's own
-/// groups had before this build, one whose hash differs from the hook `hooks`
-/// now holds at its key, and on a first build with no `tack-hashes` (`record`)
-/// one whose key holds no hook. Keep every other line as it is, and append one
-/// table per key of `trust`.
+/// groups had before this build, and on a first build with no `tack-hashes`
+/// (`record`) one whose key holds no hook in `hooks`. Keep every other line as
+/// it is, and append one table per key of `trust`.
 fn merge_state(
     existing: &str,
     trust: &[(String, String)],
     source: &str,
     stale: &HashSet<String>,
-    hooks: &HookHashes,
+    hooks: &HookKeys,
     record: HashRecord,
 ) -> Result<String, CodexError> {
     let headers: Vec<String> = trust.iter().map(|(key, _)| state_header(key)).collect();
@@ -646,7 +664,7 @@ fn merge_state(
     let mut pending = String::new();
     let mut table = String::new();
     let mut skipping = false;
-    let mut judged: Option<KeyHook<'_>> = None;
+    let mut judged: Option<KeyHook> = None;
     let mut dropped = false;
 
     for line in existing.split_inclusive('\n') {

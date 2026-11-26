@@ -298,8 +298,11 @@ fn planned_dir(path: &Path) -> std::io::Result<PathBuf> {
 /// its script through. Into the Codex home go tack's groups in
 /// `hooks.json` and `[hooks.state.<key>]` in `config.toml` for exactly
 /// tack's handlers, rewritten on every build, and `tack-hashes`, tack's record
-/// of the hashes its hooks were trusted under; every other hook and its state
-/// stays as it is. The home is merged and checked before anything is
+/// of the hashes its hooks were trusted under. Every other hook stays as it
+/// is, and so does the state of every hook that still exists. Two kinds of
+/// state table are dropped: one holding a hash tack recorded as its own, and,
+/// on the first build after an upgrade, before any `tack-hashes` exists, one
+/// whose key names no hook. The home is merged and checked before anything is
 /// created, so a home tack cannot merge into leaves no output behind; the
 /// scripts are written before the home trusts them.
 ///

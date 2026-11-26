@@ -161,7 +161,7 @@ fn state_merge_keeps_other_tables_and_rewrites_only_tack_keys() {
         &trust,
         "/h/hooks.json",
         &HashSet::new(),
-        &HookHashes::default(),
+        &HookKeys::default(),
         HashRecord::Present,
     )
     .expect("merge");
@@ -180,7 +180,7 @@ fn state_merge_keeps_other_tables_and_rewrites_only_tack_keys() {
             &trust,
             "/h/hooks.json",
             &HashSet::new(),
-            &HookHashes::default(),
+            &HookKeys::default(),
             HashRecord::Present
         )
         .expect("again"),
@@ -215,7 +215,7 @@ fn state_merge_drops_only_tables_holding_an_old_tack_hash() {
         &trust,
         "/h/hooks.json",
         &stale,
-        &HookHashes::default(),
+        &HookKeys::default(),
         HashRecord::Present,
     )
     .expect("merge");
@@ -238,7 +238,7 @@ fn state_merge_drops_only_tables_holding_an_old_tack_hash() {
             &trust,
             "/h/hooks.json",
             &stale,
-            &HookHashes::default(),
+            &HookKeys::default(),
             HashRecord::Present
         )
         .expect("again"),
@@ -264,7 +264,7 @@ fn state_merge_keeps_a_state_table_from_another_source_that_shares_the_prefix() 
         &[],
         "/h/hooks.json",
         &stale,
-        &HookHashes::default(),
+        &HookKeys::default(),
         HashRecord::Present,
     )
     .expect("merge");
@@ -508,7 +508,7 @@ fn an_orphan_table_stays_once_a_hash_record_exists() {
 }
 
 #[test]
-fn a_table_matching_its_hook_stays_and_a_mismatched_one_is_dropped() {
+fn a_table_of_a_hook_that_still_exists_stays_whatever_its_hash() {
     let scratch = Scratch::new();
     let source = scratch.root.join(HOOKS_FILE).display().to_string();
     let unhashable = json!({ "hooks": [
@@ -521,29 +521,26 @@ fn a_table_matching_its_hook_stays_and_a_mismatched_one_is_dropped() {
     ] } });
 
     // Group 0's table holds its hook's hash, group 1's a hash its hook does
-    // not have, and group 2's hook is a shape tack cannot hash.
+    // not have, as after the user moved or edited a hook, and group 2's hook
+    // is a shape tack cannot hash. Each hook still exists, so each table stays.
     let matching = state_table(&source, 0, false, &plain_hash("./lint.sh"));
     let mismatched = state_table(&source, 1, true, &hash(2));
     let unverified = state_table(&source, 2, true, &hash(3));
+    let existing = format!("{matching}\n{mismatched}\n{unverified}");
     fs::write(scratch.root.join(HOOKS_FILE), hooks.to_string()).expect("hooks");
-    fs::write(
-        scratch.root.join(CONFIG_FILE),
-        format!("{matching}\n{mismatched}\n{unverified}"),
-    )
-    .expect("config");
-    fs::write(scratch.root.join(HASHES_FILE), HASHES_HEADER).expect("hashes");
+    fs::write(scratch.root.join(CONFIG_FILE), &existing).expect("config");
 
     let installed = install(&scratch.root, &handlers("/out/codex")).expect("install");
 
+    // No tack-hashes existed, so this is a first build, and still none drops.
     assert_eq!(
         fs::read_to_string(&installed.config).expect("config"),
-        format!("{matching}\n{unverified}\n{}", tack_tables(&source, 3))
+        format!("{existing}\n{}", tack_tables(&source, 3))
     );
 }
 
 #[test]
-fn hook_hashes_tell_a_hashed_hook_from_an_unverified_and_a_missing_one() {
-    let lint = plain_hash("./lint.sh");
+fn hook_keys_tell_a_hook_from_an_unknown_and_a_missing_one() {
     let hooks = json!({ "hooks": {
         "PreToolUse": [
             plain_group("./lint.sh"),
@@ -552,66 +549,77 @@ fn hook_hashes_tell_a_hashed_hook_from_an_unverified_and_a_missing_one() {
         ],
         "SessionStart": []
     } });
-    let hashes = HookHashes::read(&hooks);
+    let keys = HookKeys::read(&hooks);
 
-    assert_eq!(hashes.at("pre_tool_use", 0, 0), KeyHook::Hashed(&lint));
-    assert_eq!(hashes.at("pre_tool_use", 0, 1), KeyHook::Missing);
-    assert_eq!(hashes.at("pre_tool_use", 1, 0), KeyHook::Unverified);
-    assert_eq!(hashes.at("pre_tool_use", 2, 0), KeyHook::Unverified);
-    assert_eq!(hashes.at("pre_tool_use", 3, 0), KeyHook::Missing);
-    assert_eq!(hashes.at("session_start", 0, 0), KeyHook::Missing);
-    assert_eq!(hashes.at("stop", 0, 0), KeyHook::Unverified);
+    assert_eq!(keys.at("pre_tool_use", 0, 0), KeyHook::Present);
+    assert_eq!(keys.at("pre_tool_use", 0, 1), KeyHook::Missing);
+    assert_eq!(keys.at("pre_tool_use", 1, 0), KeyHook::Unknown);
+    assert_eq!(keys.at("pre_tool_use", 2, 0), KeyHook::Present);
+    assert_eq!(keys.at("pre_tool_use", 3, 0), KeyHook::Missing);
+    assert_eq!(keys.at("session_start", 0, 0), KeyHook::Missing);
+    assert_eq!(keys.at("stop", 0, 0), KeyHook::Unknown);
     assert_eq!(
-        HookHashes::read(&json!({})).at("pre_tool_use", 0, 0),
-        KeyHook::Unverified
+        HookKeys::read(&json!({})).at("pre_tool_use", 0, 0),
+        KeyHook::Unknown
     );
 }
 
 #[test]
-fn a_table_is_dropped_only_for_a_hash_tack_can_judge() {
+fn only_a_recorded_hash_or_a_first_upgrade_orphan_drops_a_table() {
     let stale = HashSet::from(["sha256:old".to_owned()]);
     let line = |hash: &str| format!("trusted_hash = \"{hash}\"\n");
     let present = HashRecord::Present;
     let missing = HashRecord::Missing;
 
-    assert!(drops(
-        KeyHook::Unverified,
-        &line("sha256:old"),
-        &stale,
-        present
-    ));
-    assert!(!drops(
-        KeyHook::Unverified,
-        &line("sha256:x"),
-        &stale,
-        missing
-    ));
-    assert!(!drops(
-        KeyHook::Hashed("sha256:x"),
-        &line("sha256:x"),
-        &stale,
-        missing
-    ));
-    assert!(drops(
-        KeyHook::Hashed("sha256:x"),
-        &line("sha256:y"),
-        &stale,
-        present
-    ));
+    // A recorded tack hash is proof, whatever hook the key holds.
+    for hook in [KeyHook::Present, KeyHook::Unknown, KeyHook::Missing] {
+        assert!(
+            drops(hook, &line("sha256:old"), &stale, present),
+            "{hook:?}"
+        );
+    }
+
+    // Without it, only a key with no hook drops, and only on a first build.
+    assert!(!drops(KeyHook::Present, &line("sha256:x"), &stale, missing));
+    assert!(!drops(KeyHook::Unknown, &line("sha256:x"), &stale, missing));
     assert!(drops(KeyHook::Missing, &line("sha256:x"), &stale, missing));
     assert!(!drops(KeyHook::Missing, &line("sha256:x"), &stale, present));
-    assert!(!drops(
-        KeyHook::Missing,
-        "trusted_hash = 'sha256:x'\n",
-        &stale,
-        missing
-    ));
+
+    // A hash spelled otherwise than a plain string, or none, never drops.
+    let literal = "trusted_hash = 'sha256:old'\n";
+    assert!(!drops(KeyHook::Missing, literal, &stale, missing));
     assert!(!drops(
         KeyHook::Missing,
         "enabled = true\n",
         &stale,
         missing
     ));
+}
+
+#[test]
+fn a_hash_record_longer_than_its_bound_is_refused() {
+    let scratch = Scratch::new();
+    let hashes = scratch.root.join(HASHES_FILE);
+    let limit = usize::try_from(MAX_HASHES_BYTES).expect("the bound fits");
+
+    // One comment line of exactly the bound is read.
+    fs::write(
+        &hashes,
+        format!("{}\n", "#".repeat(limit.saturating_sub(1))),
+    )
+    .expect("hashes");
+    install(&scratch.root, &handlers("/out/codex")).expect("a file at the bound is read");
+
+    // One byte more is refused, and the file is left as it is.
+    let over = format!("{}\n", "#".repeat(limit));
+    fs::write(&hashes, &over).expect("hashes");
+    let error = install(&scratch.root, &handlers("/out/codex")).expect_err("refused");
+
+    assert_eq!(
+        error,
+        CodexError::Config("a malformed tack-hashes line".into())
+    );
+    assert_eq!(fs::read_to_string(&hashes).expect("hashes"), over);
 }
 
 #[test]
@@ -647,7 +655,7 @@ fn state_merge_refuses_what_it_cannot_place() {
                 &trust,
                 "/h/hooks.json",
                 &HashSet::new(),
-                &HookHashes::default(),
+                &HookKeys::default(),
                 HashRecord::Present
             ),
             Err(CodexError::Config(expected.to_owned())),
@@ -734,7 +742,7 @@ fn a_state_key_outside_hooks_or_another_key_inside_it_is_kept() {
         &trust,
         "/h/hooks.json",
         &HashSet::new(),
-        &HookHashes::default(),
+        &HookKeys::default(),
         HashRecord::Present,
     )
     .expect("both lines are kept");
