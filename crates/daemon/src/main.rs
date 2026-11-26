@@ -3,10 +3,10 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tack_daemon::in_process::{InProcessStall, RELOAD_REPLY, ReloadGuard, reload_frame};
-use tack_daemon::stall::{Clock, StallClient, SystemClock};
+use tack_daemon::in_process::InProcessStall;
+use tack_daemon::stall::{StallClient, SystemClock};
 use tack_daemon::transport::{TransportError, bind};
 use tack_daemon::{
     ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, frames,
@@ -54,12 +54,8 @@ fn daemon_error(id: u64, error: impl fmt::Display) -> Reply {
 
 type Client = StallClient<SystemClock, InProcessStall>;
 
-fn control_deadline() -> Instant {
-    SystemClock.deadline(Duration::from_millis(DEFAULT_DEADLINE_MS))
-}
-
 /// Route one wire request through the stall and back into a wire reply.
-fn handle(request: &Request, client: &Mutex<(Client, ReloadGuard)>) -> Reply {
+fn handle(request: &Request, client: &Mutex<Client>) -> Reply {
     let id = request.id();
     let frame = match frames::to_stall(request) {
         Ok(frame) => frame,
@@ -67,18 +63,9 @@ fn handle(request: &Request, client: &Mutex<(Client, ReloadGuard)>) -> Reply {
     };
 
     let reply = {
-        let Ok(mut state) = client.lock() else {
+        let Ok(mut client) = client.lock() else {
             return daemon_error(id, "stall lock poisoned");
         };
-        let (client, guard) = &mut *state;
-
-        if guard.changed() {
-            match client.control(reload_frame(), control_deadline()) {
-                Ok(reply) if reply == RELOAD_REPLY => guard.commit(),
-                Ok(_) => return daemon_error(id, "unexpected reload reply"),
-                Err(error) => return daemon_error(id, error),
-            }
-        }
 
         match client.call(&frame) {
             Ok(reply) => reply,
@@ -118,7 +105,6 @@ async fn main() {
         std::process::exit(EXIT_USAGE);
     }
 
-    let guard = ReloadGuard::new(args.plugin.clone());
     let stall = match InProcessStall::new(args.plugin) {
         Ok(stall) => stall,
         Err(error) => {
@@ -126,13 +112,10 @@ async fn main() {
             std::process::exit(EXIT_ENGINE);
         }
     };
-    let client = Mutex::new((
-        StallClient::new(
-            SystemClock,
-            stall,
-            Duration::from_millis(DEFAULT_DEADLINE_MS),
-        ),
-        guard,
+    let client = Mutex::new(StallClient::new(
+        SystemClock,
+        stall,
+        Duration::from_millis(DEFAULT_DEADLINE_MS),
     ));
 
     let server = match bind(&state, &args.socket) {

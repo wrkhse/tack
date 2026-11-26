@@ -833,6 +833,40 @@ mod tests {
     }
 
     #[test]
+    fn an_unsupported_reply_kind_is_rejected() {
+        assert_eq!(
+            from_stall(
+                &hook("eventBefore"),
+                StallReply::Tool {
+                    id: 7,
+                    content: StallContent {
+                        kind: "text".to_owned(),
+                        text: "buy milk".to_owned(),
+                    },
+                }
+            ),
+            Err(ConvertError::UnsupportedOutcome)
+        );
+    }
+
+    #[test]
+    fn a_daemon_error_keeps_its_message_in_the_stall_reply() {
+        assert_eq!(
+            to_stall_reply(&Reply::Error {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::DaemonError,
+                message: "tack: stall unavailable".to_owned(),
+            }),
+            Ok(StallReply::Error {
+                id: 8,
+                error: "daemon_error".to_owned(),
+                message: "tack: stall unavailable".to_owned(),
+            })
+        );
+    }
+
+    #[test]
     fn wire_error_maps_to_a_stall_error_with_its_message() {
         for (error, name) in [
             (ReplyError::DaemonError, "daemon_error"),
