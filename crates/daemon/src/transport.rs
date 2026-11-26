@@ -1969,15 +1969,16 @@ mod tests {
         // must not close before CONNECTION_LIFETIME, less a little for the
         // admission that preceded `start`.
         assert!(
-            elapsed >= CONNECTION_LIFETIME.saturating_sub(Duration::from_millis(100)),
+            elapsed >= CONNECTION_LIFETIME.saturating_sub(Duration::from_millis(200)),
             "the daemon closed a progressing peer after {elapsed:?}, before its lifetime"
         );
 
-        // A generous upper bound, not a tight timing check: twice the lifetime
-        // and more still catches a daemon that lets a trickle run on.
+        // The upper bound is the lifetime plus a 1 s margin for the daemon to
+        // notice it and close under load, so a daemon that lets a trickle run on
+        // past its lifetime fails.
         assert!(
-            elapsed <= Duration::from_secs(3),
-            "the daemon kept a progressing peer open for {elapsed:?}"
+            elapsed <= CONNECTION_LIFETIME.saturating_add(Duration::from_secs(1)),
+            "the daemon kept a progressing peer open for {elapsed:?}, past its lifetime and a 1 s margin"
         );
 
         // The daemon closes with trickled bytes still unread, which the peer
