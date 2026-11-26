@@ -309,6 +309,70 @@ fn state_header(key: &str) -> String {
     format!("[hooks.state.{}]", toml_string(key))
 }
 
+/// The key of a `[hooks.state."<key>"]` header as written, escapes kept, when
+/// only space may sit between the key's closing quote and `]`, and only space
+/// or a TOML comment follows the `]`.
+fn state_key(header: &str) -> Option<&str> {
+    let quoted = header.strip_prefix("[hooks.state.\"")?;
+    let mut escaped = false;
+    let mut end = None;
+
+    // The key ends at the first quote that is not escaped.
+    for (index, character) in quoted.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            end = Some(index);
+            break;
+        }
+    }
+
+    let end = end?;
+    let after = quoted
+        .get(end..)?
+        .strip_prefix('"')?
+        .trim_start()
+        .strip_prefix(']')?
+        .trim_start();
+
+    if after.is_empty() || after.starts_with('#') {
+        quoted.get(..end)
+    } else {
+        None
+    }
+}
+
+/// Whether `header` is a state table header for a hook of the hooks file
+/// `source`: `[hooks.state."<source>:<event>:<group>:<handler>"]`, with a
+/// non-empty event label and two indices, and only space or a comment after
+/// it. The key is split from its end, so a hooks file whose path only begins
+/// with `source` and a colon is another source and does not match.
+fn is_source_state(header: &str, source: &str) -> bool {
+    let Some(key) = state_key(header) else {
+        return false;
+    };
+
+    let mut fields = key.rsplitn(4, ':');
+    let (Some(handler), Some(group), Some(event), Some(path)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+
+    // The key is compared as written, so the source is escaped the same way.
+    let quoted = toml_string(source);
+    let escaped = quoted
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'));
+
+    escaped == Some(path)
+        && !event.is_empty()
+        && group.parse::<usize>().is_ok()
+        && handler.parse::<usize>().is_ok()
+}
+
 /// What the line-level merge cannot place safely: a multi-line string, any
 /// other spelling of `hooks` or `hooks.state`, or a tack key outside its
 /// own table header.
@@ -355,8 +419,6 @@ fn merge_state(
 ) -> Result<String, CodexError> {
     let headers: Vec<String> = trust.iter().map(|(key, _)| state_header(key)).collect();
     let keys: Vec<&str> = trust.iter().map(|(key, _)| key.as_str()).collect();
-    let source_header = state_header(&format!("{source}:"));
-    let source_prefix = source_header.strip_suffix("\"]").unwrap_or(&source_header);
     let mut kept = String::with_capacity(existing.len());
     let mut pending = String::new();
     let mut table = String::new();
@@ -375,7 +437,7 @@ fn merge_state(
 
             pending.clear();
             skipping = headers.iter().any(|header| header == trimmed);
-            judged = trimmed.starts_with(source_prefix);
+            judged = is_source_state(trimmed, source);
             dropped = false;
             table = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
         }
@@ -450,6 +512,68 @@ fn write_new(
     }
 
     file.sync_all()
+}
+
+#[cfg(test)]
+mod source_state_tests {
+    use super::is_source_state;
+
+    #[test]
+    fn only_a_tack_key_of_exactly_this_source_is_judged() {
+        let source = "/h/hooks.json";
+
+        assert!(is_source_state(
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"]",
+            source
+        ));
+        assert!(is_source_state(
+            "[hooks.state.\"/h/hooks.json:session_start:2:1\"]",
+            source
+        ));
+        assert!(is_source_state(
+            "[hooks.state.\"/h/hooks.json:stop:0:0\"]",
+            source
+        ));
+        assert!(is_source_state(
+            "[hooks.state.\"/h/\\\"q\\\"/hooks.json:pre_tool_use:0:0\"]",
+            "/h/\"q\"/hooks.json"
+        ));
+
+        for header in [
+            "[hooks.state.\"/h/hooks.json:extra:pre_tool_use:0:0\"]",
+            "[hooks.state.\"/p/hooks.json:pre_tool_use:0:0\"]",
+            "[hooks.state.\"/h/hooks.json::0:0\"]",
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:x:0\"]",
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:x\"]",
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0\"]",
+            "[hooks.state.'/h/hooks.json:pre_tool_use:0:0']",
+            "[projects.\"/h/hooks.json:pre_tool_use:0:0\"]",
+        ] {
+            assert!(!is_source_state(header, source), "{header}");
+        }
+    }
+
+    #[test]
+    fn a_header_may_end_in_space_or_a_comment_but_nothing_else() {
+        let source = "/h/hooks.json";
+
+        for header in [
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"]  ",
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"] # kept by hand",
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"]#",
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:0\" ]",
+        ] {
+            assert!(is_source_state(header, source), "{header}");
+        }
+
+        for header in [
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"] x",
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"",
+            "[hooks.state.\"/h/hooks.json:pre_tool_use:0:0",
+        ] {
+            assert!(!is_source_state(header, source), "{header}");
+        }
+    }
 }
 
 #[cfg(test)]

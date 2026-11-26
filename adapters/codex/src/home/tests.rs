@@ -215,6 +215,30 @@ fn state_merge_drops_only_tables_holding_an_old_tack_hash() {
 }
 
 #[test]
+fn state_merge_keeps_a_state_table_from_another_source_that_shares_the_prefix() {
+    let stale = HashSet::from(["sha256:old".to_owned()]);
+
+    // "/h/hooks.json:extra" is another hooks file whose path starts with this
+    // source and a colon, so its table holds the old hash but is not tack's.
+    let existing = "model = \"o3\"\n\n\
+        [hooks.state.\"/h/hooks.json:pre_tool_use:0:0\"]\nenabled = true\n\
+        trusted_hash = \"sha256:old\"\n\n\
+        [hooks.state.\"/h/hooks.json:extra:pre_tool_use:0:0\"]\nenabled = true\n\
+        trusted_hash = \"sha256:old\"\n\n\
+        [projects.\"/repo\"]\ntrust_level = \"trusted\"\n";
+
+    let merged = merge_state(existing, &[], "/h/hooks.json", &stale).expect("merge");
+
+    assert_eq!(
+        merged,
+        "model = \"o3\"\n\n\
+         [hooks.state.\"/h/hooks.json:extra:pre_tool_use:0:0\"]\nenabled = true\n\
+         trusted_hash = \"sha256:old\"\n\n\
+         [projects.\"/repo\"]\ntrust_level = \"trusted\"\n"
+    );
+}
+
+#[test]
 fn state_merge_refuses_what_it_cannot_place() {
     let trust = [(
         "/h/hooks.json:pre_tool_use:0:0".to_owned(),
