@@ -2,6 +2,7 @@
 //! sandbox with memory and deadline limits.
 
 pub mod frames;
+pub mod in_process;
 pub mod stall;
 pub mod transport;
 
