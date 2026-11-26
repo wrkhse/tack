@@ -245,13 +245,6 @@ jobs:
             args+=(--in-diff pr.diff)
           fi
           cargo mutants "${args[@]}"
-
-          # set -e exits on failure, so this only runs after a successful run.
-          if [ ! -f mutants.out/outcomes.json ]; then
-            echo "No viable mutants produced an outcome file."
-            mkdir -p mutants.out
-            jq -n '{total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0}' > mutants.out/outcomes.json
-          fi
       # A missed mutant or a timeout fails. One that truly hangs the tests is
       # excluded by name in .cargo/mutants.toml, with its reason.
       - name: Check outcomes
@@ -289,10 +282,8 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      # Download may fail when no shard published an outcome; the check below
-      # reports that as a clear error instead of an action-level failure.
+      # A shard that published no outcome makes this download fail the job.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        continue-on-error: true
         with:
           pattern: mutants-shard-*
           path: mutants-outcomes
