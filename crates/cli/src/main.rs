@@ -441,6 +441,7 @@ mod tests {
             codex.join("run-hook.sh"),
             home.join("hooks.json"),
             home.join("config.toml"),
+            home.join("tack-hashes"),
         ]
         .iter()
         .map(|path| path.display().to_string())

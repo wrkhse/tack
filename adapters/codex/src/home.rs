@@ -2,8 +2,11 @@
 //! `hooks.json` and their trust into `[hooks.state.<key>]` of `config.toml`.
 //!
 //! Every other hook keeps its group index, so its state key, and its state
-//! table is copied unchanged. Both files are computed before either is
-//! written, and each is replaced by an atomic rename.
+//! table is copied unchanged. tack's own `tack-hashes` file beside them
+//! remembers the hashes its hooks were trusted under, so a later build still
+//! knows tack's state tables once no tack group is left in `hooks.json`. All
+//! three files are computed before any is written, and each is replaced by an
+//! atomic rename.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -20,6 +23,14 @@ use crate::{CodexError, toml_string};
 pub const HOOKS_FILE: &str = "hooks.json";
 /// The user config Codex reads hook state from.
 pub const CONFIG_FILE: &str = "config.toml";
+/// tack's record of the hashes its hooks were trusted under, newest last: one
+/// `sha256:<hex>` per line, with blank lines and `#` comments ignored.
+pub const HASHES_FILE: &str = "tack-hashes";
+/// The most hashes `HASHES_FILE` keeps.
+const MAX_HASHES: usize = 32;
+/// Why a `HASHES_FILE` is refused: a line that is not a blank line, a comment
+/// or exactly `sha256:<hex>`.
+const MALFORMED_HASHES: &str = "a malformed tack-hashes line";
 
 /// Find the Codex home as Codex does: `CODEX_HOME`, which must be an
 /// existing folder and is canonicalized, else `HOME/.codex`, created when
@@ -59,22 +70,25 @@ pub fn resolve_home(
     Ok(path)
 }
 
-/// The two files written into the Codex home.
+/// The three files written into the Codex home.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
     pub hooks: PathBuf,
     pub config: PathBuf,
+    pub hashes: PathBuf,
 }
 
-/// The two home files as a build will write them: read, merged and checked,
+/// The three home files as a build will write them: read, merged and checked,
 /// with nothing written yet. Only [`plan_home`] makes one, and
 /// [`Planned::commit`] writes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Planned {
     hooks_path: PathBuf,
     config_path: PathBuf,
+    hashes_path: PathBuf,
     hooks: String,
     config: String,
+    hashes: String,
 }
 
 impl Planned {
@@ -88,10 +102,12 @@ impl Planned {
         // Trust first: a rebuilt hook whose state is missing would be skipped.
         write_atomic(&self.config_path, &self.config)?;
         write_atomic(&self.hooks_path, &self.hooks)?;
+        write_atomic(&self.hashes_path, &self.hashes)?;
 
         Ok(Installed {
             hooks: self.hooks_path,
             config: self.config_path,
+            hashes: self.hashes_path,
         })
     }
 }
@@ -108,18 +124,19 @@ pub fn install(home: &Path, handlers: &[Handler]) -> Result<Installed, CodexErro
     plan_home(home, handlers)?.commit()
 }
 
-/// Read both home files and compute their merge with `handlers` and their
+/// Read the home files and compute their merge with `handlers` and their
 /// trust, checking everything `install` checks, without writing anything.
 ///
 /// # Errors
 ///
 /// Returns [`CodexError::Unsafe`] for a home path Codex's state key cannot
 /// hold, [`CodexError::Hooks`] or [`CodexError::Config`] for an existing
-/// file tack cannot merge into safely, and [`CodexError::Io`] when a file
-/// cannot be read.
+/// file tack cannot merge into safely, a malformed `tack-hashes` included, and
+/// [`CodexError::Io`] when a file cannot be read.
 pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexError> {
     let hooks_path = home.join(HOOKS_FILE);
     let config_path = home.join(CONFIG_FILE);
+    let hashes_path = home.join(HASHES_FILE);
     let source = hooks_path
         .to_str()
         .filter(|text| !text.chars().any(char::is_control))
@@ -127,12 +144,14 @@ pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexErro
 
     let hooks_text = read_optional(&hooks_path)?;
     let (hooks, groups) = merge_hooks(hooks_text.as_deref(), handlers)?;
-    let stale = match hooks_text.as_deref() {
+    let mut stale = match hooks_text.as_deref() {
         Some(text) => tack_hashes(
             &serde_json::from_str(text).map_err(|error| CodexError::Hooks(error.to_string()))?,
         ),
         None => HashSet::new(),
     };
+    let recorded = parse_hashes(read_optional(&hashes_path)?.as_deref().unwrap_or(""))?;
+    stale.extend(recorded.iter().cloned());
     let trust: Vec<(String, String)> = handlers
         .iter()
         .zip(groups)
@@ -146,13 +165,89 @@ pub fn plan_home(home: &Path, handlers: &[Handler]) -> Result<Planned, CodexErro
 
     let config_text = read_optional(&config_path)?;
     let config = merge_state(config_text.as_deref().unwrap_or(""), &trust, source, &stale)?;
+    let hashes = render_hashes(&recorded, &trust);
 
     Ok(Planned {
         hooks_path,
         config_path,
+        hashes_path,
         hooks,
         config,
+        hashes,
     })
+}
+
+/// Whether `text` is exactly a hash as tack writes one: `sha256:` and 64
+/// lowercase hex digits.
+fn is_hash(text: &str) -> bool {
+    text.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// The hashes a `tack-hashes` file holds, each once, in file order.
+///
+/// # Errors
+///
+/// Returns [`CodexError::Config`] for a line that is not blank, a `#`
+/// comment, or exactly a hash.
+fn parse_hashes(text: &str) -> Result<Vec<String>, CodexError> {
+    let mut seen = HashSet::new();
+    let mut hashes = Vec::new();
+
+    for line in text.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+
+        if !is_hash(line) {
+            return Err(CodexError::Config(MALFORMED_HASHES.to_owned()));
+        }
+
+        if seen.insert(line) {
+            hashes.push(line.to_owned());
+        }
+    }
+
+    Ok(hashes)
+}
+
+/// The next `tack-hashes` file: the `recorded` hashes, then `trust`'s hashes
+/// as the newest, each once, keeping the last `MAX_HASHES`. A hash in use is
+/// always among the newest, so it is never dropped while tack trusts it.
+fn render_hashes(recorded: &[String], trust: &[(String, String)]) -> String {
+    let current: Vec<&str> = trust
+        .iter()
+        .map(|(_, hash)| hash.as_str())
+        .filter(|hash| is_hash(hash))
+        .collect();
+    let mut hashes: Vec<&str> = recorded
+        .iter()
+        .map(String::as_str)
+        .filter(|hash| !current.contains(hash))
+        .collect();
+
+    for hash in &current {
+        if !hashes.contains(hash) {
+            hashes.push(hash);
+        }
+    }
+
+    let excess = hashes.len().saturating_sub(MAX_HASHES);
+    hashes.drain(..excess);
+
+    let mut text =
+        String::from("# The hashes tack's Codex hooks were trusted under, newest last.\n");
+
+    for hash in hashes {
+        text.push_str(hash);
+        text.push('\n');
+    }
+
+    text
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, CodexError> {
