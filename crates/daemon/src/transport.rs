@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use rustix::process::geteuid;
 use tack_protocol::wire::{self, MAX_PENDING, PROTOCOL_VERSION, Reply, ReplyError, Request};
+use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
 
@@ -26,20 +27,28 @@ const MAX_REQUESTS_PER_CONNECTION: usize = 1000;
 const MAX_FRAMES_PER_CONNECTION: usize = 4;
 /// The message of every `busy` refusal: overflow and the frame cap alike.
 const BUSY_MESSAGE: &str = "tack: busy";
-/// How long one frame's reads, and each blocking write call of a reply, may
-/// take before the connection gives up its slot. A stalled or dribbling peer,
-/// or one that stops draining a reply, must release its slot well before a new
-/// hook's own budget runs out, so a full set of slots cannot starve the next
-/// request. `CONNECTION_LIFETIME` bounds the whole connection.
+/// How long a frame's reads may wait with no bytes arriving, and how long each
+/// blocking write call of a reply may take, before the connection gives up its
+/// slot. A stalled peer, or one that stops draining a reply, must release its
+/// slot well before a new hook's own budget runs out, so a full set of slots
+/// cannot starve the next request. A peer that keeps sending, however slowly,
+/// is bounded by `CONNECTION_LIFETIME`, which bounds the whole connection.
 const CONNECTION_BUDGET: Duration = Duration::from_millis(750);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+/// How long a drain task reads and discards an overflow peer's request after
+/// its busy line, so the peer can finish writing before the close.
+const BUSY_DRAIN: Duration = Duration::from_millis(20);
+/// At most this many refused peers are drained at once. Past it a refused
+/// connection closes as soon as its busy line is written, so idle overflow
+/// peers cannot pile up tasks.
+const MAX_DRAIN_TASKS: usize = 8;
 /// The absolute cap on one connection's I/O time, counted from its admission
 /// with the handler's run time left out. It sits well below the hook's 8500 ms
 /// whole-run budget, so no peer can pin a slot by making steady progress.
 const CONNECTION_LIFETIME: Duration = Duration::from_millis(1500);
 
-/// The read deadline of one frame: `CONNECTION_BUDGET` from now, falling back
-/// to now if the clock cannot represent it.
+/// When a frame's read stalls: `CONNECTION_BUDGET` from now, falling back to
+/// now if the clock cannot represent it.
 fn frame_deadline() -> Instant {
     let now = Instant::now();
 
@@ -234,7 +243,10 @@ impl Server {
     /// `MAX_FRAMES_PER_CONNECTION` frames; `MAX_REQUESTS_PER_CONNECTION` is only
     /// a hard ceiling on its loop.
     /// A connection that finds every slot taken gets a `busy` error line at
-    /// once, in one nonblocking write; the loop never waits for a slot or a peer.
+    /// once, in one nonblocking write. A task beside the loop then discards
+    /// what that peer sends for at most `BUSY_DRAIN`; with `MAX_DRAIN_TASKS`
+    /// drains running, the connection closes at once instead. The loop never
+    /// waits for a slot, a peer or a drain.
     ///
     /// # Errors
     ///
@@ -245,10 +257,13 @@ impl Server {
     {
         let handle = Arc::new(handle);
         let mut connections = JoinSet::new();
+        let mut drains = JoinSet::new();
 
         loop {
-            // Free the slots of connections that ended since the last accept.
+            // Free the slots of connections and drains that ended since the
+            // last accept.
             while connections.try_join_next().is_some() {}
+            while drains.try_join_next().is_some() {}
 
             let (stream, _) = match self.listener.accept().await {
                 Ok(accepted) => accepted,
@@ -259,12 +274,20 @@ impl Server {
                 }
             };
 
-            // Free the slots of connections that ended while accept waited.
+            // Free the slots of connections and drains that ended while accept
+            // waited.
             while connections.try_join_next().is_some() {}
+            while drains.try_join_next().is_some() {}
 
             if connections.len() >= MAX_PENDING {
-                // Inline and nonblocking, so no task outlives it.
-                busy_reply(stream);
+                // The drain runs beside the loop and is never awaited by it.
+                // With every drain slot taken, the stream drops here, closed.
+                if let Some(stream) = busy_reply(stream)
+                    && has_drain_capacity(drains.len(), MAX_DRAIN_TASKS)
+                {
+                    drains.spawn(drain_refused(stream));
+                }
+
                 continue;
             }
 
@@ -272,6 +295,12 @@ impl Server {
             connections.spawn_blocking(move || run_connection(stream, &task_handle));
         }
     }
+}
+
+/// Whether one more refused peer may be drained while `active` drains run
+/// under `limit`.
+const fn has_drain_capacity(active: usize, limit: usize) -> bool {
+    active < limit
 }
 
 fn error_reply(error: ReplyError, message: &str) -> Reply {
@@ -291,44 +320,89 @@ fn send_error(writer: &mut impl Write, error: ReplyError, message: &str) {
 
 /// Answer a connection that found every slot taken with one `busy` error
 /// line, written in a single nonblocking attempt. It reads nothing from the
-/// peer and never waits, so the accept loop moves on at once. Any I/O failure,
-/// a full socket buffer included, ends it silently.
-fn busy_reply(stream: UnixStream) {
-    let Ok(mut stream) = stream.into_std() else {
-        return;
-    };
+/// peer first and never waits. It returns the stream for `drain_refused`, or
+/// `None` when an I/O failure, a full socket buffer included, ends it.
+fn busy_reply(stream: UnixStream) -> Option<StdUnixStream> {
+    let mut stream = stream.into_std().ok()?;
+    stream.set_nonblocking(true).ok()?;
 
-    if stream.set_nonblocking(true).is_err() {
-        return;
-    }
+    let encoded = wire::encode_line(&error_reply(ReplyError::Busy, BUSY_MESSAGE)).ok()?;
+    stream.write_all(&encoded).ok()?;
 
-    let Ok(encoded) = wire::encode_line(&error_reply(ReplyError::Busy, BUSY_MESSAGE)) else {
-        return;
-    };
-
-    let _ = stream.write_all(&encoded);
+    Some(stream)
 }
 
-/// Wraps a socket so every blocking read spends only the time left in the
-/// current frame's read budget, rather than resetting a fresh timeout per read.
+/// Read and discard a refused peer's request until its newline, its end of
+/// stream, a read error or `BUSY_DRAIN`, then close. A peer that is still
+/// writing its request can finish it within the bound, instead of failing on a
+/// socket closed under it. Returns how many bytes it discarded.
+async fn drain_refused(stream: StdUnixStream) -> usize {
+    let Ok(mut stream) = UnixStream::from_std(stream) else {
+        return 0;
+    };
+
+    let mut buffer = [0u8; 8192];
+    let mut consumed = 0usize;
+
+    // Running out of the bound is an expected end, so its error is dropped.
+    let _ = tokio::time::timeout(BUSY_DRAIN, async {
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    consumed = consumed.saturating_add(read);
+
+                    if buffer.iter().take(read).any(|byte| *byte == b'\n') {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    consumed
+}
+
+/// Wraps a socket so a frame's reads give up after `CONNECTION_BUDGET` with no
+/// bytes arriving, and never run past the connection's I/O `end`. Each read
+/// that brings bytes restarts the stall budget, so a slow peer that keeps
+/// sending is served until `end`.
 struct DeadlineReader<'a> {
     stream: &'a StdUnixStream,
     deadline: Instant,
+    end: Instant,
 }
 
 impl<'a> DeadlineReader<'a> {
-    const fn new(stream: &'a StdUnixStream, deadline: Instant) -> Self {
-        Self { stream, deadline }
+    fn new(stream: &'a StdUnixStream, end: Instant) -> Self {
+        Self {
+            stream,
+            deadline: frame_deadline().min(end),
+            end,
+        }
     }
 
-    const fn set_deadline(&mut self, deadline: Instant) {
-        self.deadline = deadline;
+    /// Start a frame's reads: a fresh stall budget, capped by the I/O `end`.
+    fn start_frame(&mut self, end: Instant) {
+        self.end = end;
+        self.deadline = frame_deadline().min(end);
     }
 }
 
 impl Read for DeadlineReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        let now = Instant::now();
+
+        // Past the I/O end no read starts, whatever the stall budget allows.
+        if self.end.saturating_duration_since(now).is_zero() {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "connection lifetime exceeded",
+            ));
+        }
+
+        let remaining = self.deadline.saturating_duration_since(now);
         if remaining.is_zero() {
             return Err(io::Error::new(
                 ErrorKind::TimedOut,
@@ -339,7 +413,15 @@ impl Read for DeadlineReader<'_> {
         // A timeval of zero means "no timeout" on Unix, so keep it positive.
         let remaining = remaining.max(Duration::from_millis(1));
         self.stream.set_read_timeout(Some(remaining))?;
-        self.stream.read(buf)
+        let read = self.stream.read(buf)?;
+
+        // Bytes arrived, so the peer is making progress: restart the stall
+        // budget, still capped by the I/O end.
+        if read > 0 {
+            self.deadline = frame_deadline().min(self.end);
+        }
+
+        Ok(read)
     }
 }
 
@@ -406,7 +488,7 @@ where
     // past the lifetime, so a peer that stops or barely drains a large reply
     // releases its slot.
     let mut writer = DeadlineWriter::new(&stream, CONNECTION_BUDGET, end);
-    let mut reader = io::BufReader::new(DeadlineReader::new(&stream, frame_deadline().min(end)));
+    let mut reader = io::BufReader::new(DeadlineReader::new(&stream, end));
 
     for frame in 0..MAX_REQUESTS_PER_CONNECTION {
         // The connection ends at its lifetime, whatever progress the peer makes.
@@ -414,11 +496,11 @@ where
             break;
         }
 
-        // Each frame gets a fresh read budget, starting when the daemon waits
-        // for it and shared by all of its reads, so a peer that dribbles bytes
-        // or sits idle cannot keep one frame's reads open past CONNECTION_BUDGET.
-        // The lifetime caps it too.
-        reader.get_mut().set_deadline(frame_deadline().min(end));
+        // Each frame starts a fresh stall budget when the daemon waits for it,
+        // and every read that brings bytes restarts it. A peer that sits idle
+        // gives up its slot after CONNECTION_BUDGET; one that keeps sending,
+        // however slowly, is ended by the lifetime.
+        reader.get_mut().start_frame(end);
 
         let line = match wire::read_line(&mut reader) {
             Ok(Some(line)) => line,
@@ -1385,6 +1467,510 @@ mod tests {
             ]
         );
 
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_slow_but_progressing_frame_is_handled() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+
+        // Six chunks with a 200 ms gap before each one after the first: the
+        // frame takes about 1 s to arrive, past the 750 ms frame budget, but
+        // every gap is short and the peer keeps making progress.
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+
+        for (index, chunk) in line.chunks(line.len().div_ceil(6)).enumerate() {
+            if index > 0 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            client.write_all(chunk).await.unwrap();
+            client.flush().await.unwrap();
+        }
+
+        let reply = tokio::time::timeout(Duration::from_secs(3), read_reply(client))
+            .await
+            .expect("a frame that keeps making progress is handled");
+        assert_eq!(
+            reply,
+            Reply::Hook {
+                id: 7,
+                version: PROTOCOL_VERSION,
+                outcome: Outcome::Allow,
+            }
+        );
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_overflow_client_sending_a_small_request_gets_busy() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+
+        // The accept loop takes the 16 held peers before this client and has
+        // no slot left for it. The request is far smaller than a socket buffer,
+        // so it is written whole before the daemon answers.
+        let held = hold_every_slot(&socket, &line).await;
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        client.write_all(&line).await.unwrap();
+        client.flush().await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), read_reply(client))
+            .await
+            .expect("an overflow client with a small request gets a busy denial");
+        assert_eq!(
+            reply,
+            Reply::Error {
+                id: 0,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::Busy,
+                message: "tack: busy".into(),
+            }
+        );
+
+        for peer in held {
+            peer.abort();
+        }
+        task.abort();
+    }
+
+    /// A large overflow request always ends in a denial, never an allow or a
+    /// hang. It does not tell the busy line from a closed socket; the drain
+    /// itself is covered by its unit test and by mutation testing.
+    #[tokio::test]
+    async fn an_overflow_request_is_always_denied() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+        let busy = wire::encode_line(&Reply::Error {
+            id: 0,
+            version: PROTOCOL_VERSION,
+            error: ReplyError::Busy,
+            message: "tack: busy".into(),
+        })
+        .unwrap();
+
+        // About 900 KiB of input: far more than a socket buffer holds, and
+        // still under MAX_FRAME_BYTES once encoded.
+        let large = wire::encode_line(&Request::Tool {
+            id: 9,
+            version: PROTOCOL_VERSION,
+            name: "dump".into(),
+            input: serde_json::json!({ "text": "x".repeat(900 * 1024) }),
+        })
+        .unwrap();
+        assert!(large.len() < MAX_FRAME_BYTES);
+
+        let held = hold_every_slot(&socket, &line).await;
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+
+        // The drain is bounded, so the daemon may close before the whole
+        // request is in. Either way the client is denied: it reads the busy
+        // line, or the socket closes with nothing (the hook's socket_closed).
+        // A write or read error is the socket closing, so neither is unwrapped.
+        let received = tokio::time::timeout(Duration::from_secs(10), async {
+            let _ = client.write_all(&large).await;
+            let mut received = Vec::new();
+            let _ = client.read_to_end(&mut received).await;
+
+            received
+        })
+        .await
+        .expect("an overflow client with a large request is denied, never left hanging");
+
+        assert!(
+            received == busy || received.is_empty(),
+            "expected the busy line or a closed socket, got {:?}",
+            String::from_utf8_lossy(&received)
+        );
+
+        for peer in held {
+            peer.abort();
+        }
+        task.abort();
+    }
+
+    #[test]
+    fn only_a_read_that_brings_bytes_restarts_the_stall_budget() {
+        let (daemon, mut peer) = StdUnixStream::pair().unwrap();
+        let end = Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+        let mut reader = DeadlineReader::new(&daemon, end);
+        let mut buf = [0u8; 8];
+
+        // Each read starts with the deadline at the I/O end, so only a restart
+        // of the stall budget can move it.
+        peer.write_all(b"x").unwrap();
+        reader.deadline = end;
+        let before = Instant::now();
+
+        assert_eq!(reader.read(&mut buf).unwrap(), 1);
+        assert!(reader.deadline >= before.checked_add(CONNECTION_BUDGET).unwrap());
+        assert!(reader.deadline < end);
+
+        // End of stream brings no bytes, so the deadline stays where it was.
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        reader.deadline = end;
+
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+        assert_eq!(reader.deadline, end);
+    }
+
+    #[test]
+    fn no_read_starts_past_the_io_end_even_with_stall_budget_left() {
+        let (mut daemon, mut peer) = StdUnixStream::pair().unwrap();
+        let now = Instant::now();
+        let end = now.checked_sub(Duration::from_millis(1)).unwrap();
+        let mut reader = DeadlineReader::new(&daemon, end);
+        let mut buf = [0u8; 1];
+
+        // A byte is waiting and the stall budget has 10 s left, so only the
+        // I/O end can refuse this read.
+        peer.write_all(b"x").unwrap();
+        reader.deadline = now.checked_add(Duration::from_secs(10)).unwrap();
+
+        let refused = reader.read(&mut buf).unwrap_err();
+        assert_eq!(refused.kind(), ErrorKind::TimedOut);
+        assert_eq!(refused.to_string(), "connection lifetime exceeded");
+
+        // The refused read left the byte in the socket.
+        daemon
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+
+        assert_eq!(daemon.read(&mut buf).unwrap(), 1);
+        assert_eq!(buf, [b'x']);
+    }
+
+    #[test]
+    fn a_drain_is_allowed_only_below_the_limit() {
+        assert!(has_drain_capacity(7, 8));
+        assert!(!has_drain_capacity(8, 8));
+        assert!(!has_drain_capacity(9, 8));
+    }
+
+    #[tokio::test]
+    async fn drain_refused_consumes_the_request_up_to_its_newline() {
+        let (daemon, mut peer) = UnixStream::pair().unwrap();
+        let daemon = daemon.into_std().unwrap();
+        daemon.set_nonblocking(true).unwrap();
+
+        // One read takes at most 8192 bytes, so this line needs at least two:
+        // only a drain that keeps reading until the newline consumes all of it.
+        let mut line = vec![b'x'; 8192];
+        line.push(b'\n');
+
+        let (written, consumed) = tokio::join!(peer.write_all(&line), drain_refused(daemon));
+        written.unwrap();
+
+        assert_eq!(consumed, line.len());
+    }
+
+    /// Take every slot with peers that each send a complete `frame` every
+    /// 300 ms until aborted. Every connect completes before this returns, so
+    /// all of them sit in the accept queue ahead of any later client.
+    async fn hold_every_slot(socket: &Path, frame: &[u8]) -> Vec<tokio::task::JoinHandle<()>> {
+        let connecting: Vec<_> = (0..MAX_PENDING)
+            .map(|_| {
+                let socket = socket.to_path_buf();
+
+                tokio::spawn(async move { UnixStream::connect(&socket).await.unwrap() })
+            })
+            .collect();
+
+        let mut held = Vec::with_capacity(MAX_PENDING);
+
+        for connected in connecting {
+            let mut peer = connected.await.unwrap();
+            let frame = frame.to_vec();
+
+            // Replies stay unread, and write errors are ignored until the peer
+            // is aborted.
+            held.push(tokio::spawn(async move {
+                loop {
+                    let _ = peer.write_all(&frame).await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }));
+        }
+
+        held
+    }
+
+    #[tokio::test]
+    async fn many_idle_overflow_peers_do_not_delay_a_served_request() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+        let busy = Reply::Error {
+            id: 0,
+            version: PROTOCOL_VERSION,
+            error: ReplyError::Busy,
+            message: "tack: busy".into(),
+        };
+
+        let held = hold_every_slot(&socket, &line).await;
+
+        // Eight times MAX_DRAIN_TASKS idle peers. Each reads its busy line and
+        // then stays open without sending, so every drain runs its whole
+        // BUSY_DRAIN. Drains awaited one after another by the accept loop
+        // would take 64 x 20 ms = 1280 ms; beside the loop they take a few ms,
+        // so the 1 s bound leaves wide room.
+        let idle_count = 64;
+        let idle: Vec<_> = (0..idle_count)
+            .map(|_| {
+                let socket = socket.clone();
+
+                tokio::spawn(async move {
+                    let client = UnixStream::connect(&socket).await.unwrap();
+                    let mut reader = AsyncBufReader::new(client);
+                    let mut buffer = Vec::new();
+
+                    reader.read_until(b'\n', &mut buffer).await.unwrap();
+
+                    (serde_json::from_slice::<Reply>(&buffer).unwrap(), reader)
+                })
+            })
+            .collect();
+
+        let denied = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut denied = Vec::with_capacity(idle_count);
+
+            for peer in idle {
+                denied.push(peer.await.unwrap());
+            }
+
+            denied
+        })
+        .await
+        .expect("busy denials to idle peers must not wait on one another's drain");
+
+        let (replies, open): (Vec<Reply>, Vec<_>) = denied.into_iter().unzip();
+        assert_eq!(replies, vec![busy; idle_count]);
+
+        drop(open);
+
+        for peer in held {
+            peer.abort();
+        }
+
+        // Every held connection has ended by its lifetime, so a slot is free.
+        tokio::time::sleep(CONNECTION_LIFETIME.saturating_add(Duration::from_millis(300))).await;
+
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        client.write_all(&line).await.unwrap();
+        client.flush().await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(2), read_reply(client))
+            .await
+            .expect("a request after the overflow is served");
+        assert_eq!(
+            reply,
+            Reply::Hook {
+                id: 7,
+                version: PROTOCOL_VERSION,
+                outcome: Outcome::Allow,
+            }
+        );
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_refused_peer_past_the_drain_limit_is_closed_at_once() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+        let busy = Reply::Error {
+            id: 0,
+            version: PROTOCOL_VERSION,
+            error: ReplyError::Busy,
+            message: "tack: busy".into(),
+        };
+
+        let held = hold_every_slot(&socket, &line).await;
+
+        // Blocking connects never yield to the accept loop, so it takes all
+        // MAX_DRAIN_TASKS + 1 refused peers in one run, before any drain is
+        // polled: the first ones fill the drain set and the last finds it full.
+        let mut refused: Vec<_> = (0..=MAX_DRAIN_TASKS)
+            .map(|_| {
+                let client = StdUnixStream::connect(&socket).unwrap();
+                client.set_nonblocking(true).unwrap();
+
+                AsyncBufReader::new(UnixStream::from_std(client).unwrap())
+            })
+            .collect();
+        let mut last = refused.pop().unwrap();
+        let mut reply = Vec::new();
+
+        tokio::time::timeout(Duration::from_secs(2), last.read_until(b'\n', &mut reply))
+            .await
+            .expect("the peer past the drain limit gets its busy line")
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Reply>(&reply).unwrap(), busy);
+
+        // After its busy line the peer past the drain limit is closed: it reads
+        // to its end with no more bytes. The timeout only stops a hang.
+        let mut rest = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), last.read_to_end(&mut rest))
+            .await
+            .expect("the peer past the drain limit is closed")
+            .unwrap();
+        assert_eq!(rest, Vec::<u8>::new());
+
+        for mut peer in refused {
+            let mut reply = Vec::new();
+
+            tokio::time::timeout(Duration::from_secs(2), peer.read_until(b'\n', &mut reply))
+                .await
+                .expect("a drained peer gets its busy line")
+                .unwrap();
+            assert_eq!(serde_json::from_slice::<Reply>(&reply).unwrap(), busy);
+        }
+
+        for peer in held {
+            peer.abort();
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_peer_cannot_outlive_the_io_lifetime_by_trickling_bytes() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        let socket = state.join("tack.sock");
+        let server = bind(&state, &socket).unwrap();
+
+        let task = tokio::spawn(server.serve(|request| allow_all(&request)));
+
+        let line = wire::encode_line(&Request::Hook {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({ "command": "ls" }),
+                session_id: None,
+            },
+        })
+        .unwrap();
+        let partial = line.get(..line.len().div_ceil(2)).unwrap().to_vec();
+
+        let (mut reader, mut writer) = UnixStream::connect(&socket).await.unwrap().into_split();
+
+        // Half a frame, then a space every millisecond: never a newline, and
+        // never a stall long enough for the frame budget. The write half stays
+        // open until a write fails, so only the daemon can end the connection.
+        let trickle = tokio::spawn(async move {
+            if writer.write_all(&partial).await.is_err() {
+                return;
+            }
+
+            while writer.write_all(b" ").await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        let mut received = Vec::new();
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut received))
+                .await
+                .expect("the daemon ends a trickling peer at its I/O lifetime");
+
+        // The daemon closes with trickled bytes still unread, which the peer
+        // may see as a reset rather than a clean end. Either way it closed.
+        if let Err(error) = outcome {
+            assert_eq!(error.kind(), ErrorKind::ConnectionReset, "{error}");
+        }
+
+        assert_eq!(received, Vec::<u8>::new());
+
+        trickle.abort();
         task.abort();
     }
 }

@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      # Set to bounded-io to run stress-repros, which repeats the bounded-I/O
+      # transport tests 50 times to show they do not flake.
+      stress_tests:
+        description: "bounded-io runs the 50x bounded-I/O test loop; empty skips it"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -28,6 +35,48 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  # Runs each bounded-I/O transport test 50 times, one exact test per command,
+  # when dispatched with stress_tests=bounded-io. Any failed run fails the job.
+  stress-repros:
+    if: inputs.stress_tests == 'bounded-io'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100
+      - run: cargo test --locked -p tack_daemon --lib --no-run
+      - name: Run the bounded-I/O tests 50 times
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tests=(
+            transport::tests::a_refused_peer_past_the_drain_limit_is_closed_at_once
+            transport::tests::an_overflow_client_sending_a_small_request_gets_busy
+            transport::tests::an_overflow_request_is_always_denied
+            transport::tests::a_slow_but_progressing_frame_is_handled
+            transport::tests::many_idle_overflow_peers_do_not_delay_a_served_request
+            transport::tests::a_peer_cannot_outlive_the_io_lifetime_by_trickling_bytes
+          )
+          log="$RUNNER_TEMP/stress-test.log"
+
+          for run in $(seq 1 50); do
+            for test in "${tests[@]}"; do
+              echo "run $run: $test"
+              cargo test --locked -p tack_daemon --lib -- --exact "$test" 2>&1 | tee "$log"
+
+              # A filter that matched no test would pass silently.
+              if ! grep -Fq 'test result: ok. 1 passed;' "$log"; then
+                echo "::error::run $run: $test did not run exactly one passing test"
+                exit 1
+              fi
+            done
+          done
 
   e2e:
     needs: [rust]
