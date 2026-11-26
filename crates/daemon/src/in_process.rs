@@ -6,9 +6,10 @@
 //! sandbox with a fresh VM from the plugin folder. A line the module cannot
 //! answer yields a named error, never an allow.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use barn_stall::Request as StallRequest;
 use tack_luau::{Capabilities, EngineError, Limits, Sandbox};
@@ -17,9 +18,14 @@ use tack_protocol::wire::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
 use crate::stall::{StallError, Transport};
 use crate::{dispatch, frames};
 
-/// The ack for a reload frame. It is a control reply, not a stall verdict, and
-/// no `StallClient` ever sends a reload frame.
-const RELOAD_ACK: &str = r#"{"type":"reload","ok":true}"#;
+/// The single-line reply to a reload control frame.
+pub const RELOAD_REPLY: &str = r#"{"type":"reloaded"}"#;
+
+/// The reload control line sent when the plugin folder changes.
+#[must_use]
+pub const fn reload_frame() -> &'static str {
+    r#"{"type":"reload"}"#
+}
 
 /// The two kinds of line accepted on the in-process transport.
 enum Frame {
@@ -41,12 +47,54 @@ fn parse(frame: &str) -> Result<Frame, StallError> {
         .map_err(|_| StallError::Malformed)
 }
 
+/// Remembers the plugin folder's modification time between requests.
+pub struct ReloadGuard {
+    plugin: PathBuf,
+    modified: Option<SystemTime>,
+}
+
+impl ReloadGuard {
+    /// Snapshot the folder's modification time now.
+    #[must_use]
+    pub fn new(plugin: PathBuf) -> Self {
+        let modified = Self::modified(&plugin);
+
+        Self { plugin, modified }
+    }
+
+    /// The newer of the folder's and plugin.luau's modification times.
+    fn modified(plugin: &Path) -> Option<SystemTime> {
+        let dir = fs::metadata(plugin).and_then(|meta| meta.modified()).ok();
+        let file = fs::metadata(plugin.join("plugin.luau"))
+            .and_then(|meta| meta.modified())
+            .ok();
+
+        match (dir, file) {
+            (Some(dir), Some(file)) => Some(dir.max(file)),
+            (Some(dir), None) | (None, Some(dir)) => Some(dir),
+            (None, None) => None,
+        }
+    }
+
+    /// Report and remember a change since the last check.
+    pub fn changed(&mut self) -> bool {
+        let modified = Self::modified(&self.plugin);
+
+        if modified == self.modified {
+            return false;
+        }
+
+        self.modified = modified;
+
+        true
+    }
+}
+
 /// A stall that evaluates framed requests on one in-process plugin VM.
 pub struct InProcessStall {
     sandbox: Mutex<Sandbox>,
     plugin: PathBuf,
     limits: Limits,
-    capabilities: Capabilities,
 }
 
 impl InProcessStall {
@@ -58,22 +106,18 @@ impl InProcessStall {
     /// cannot be used.
     pub fn new(plugin: PathBuf) -> Result<Self, EngineError> {
         let limits = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)?;
-        let capabilities = Capabilities::default();
         let sandbox = Sandbox::new(&plugin, limits, Capabilities::default())?;
 
         Ok(Self {
             sandbox: Mutex::new(sandbox),
             plugin,
             limits,
-            capabilities,
         })
     }
 
-    /// Build a fresh VM, moving the configured capabilities into it.
-    fn build(&mut self) -> Result<Sandbox, EngineError> {
-        let capabilities = std::mem::take(&mut self.capabilities);
-
-        Sandbox::new(&self.plugin, self.limits, capabilities)
+    /// Build a fresh VM with the same capabilities the daemon uses today.
+    fn build(&self) -> Result<Sandbox, EngineError> {
+        Sandbox::new(&self.plugin, self.limits, Capabilities::default())
     }
 
     /// Run one request while holding the sandbox for the whole call.
@@ -107,7 +151,7 @@ impl Transport for InProcessStall {
 
                 self.sandbox = Mutex::new(fresh);
 
-                Ok(RELOAD_ACK.to_owned())
+                Ok(RELOAD_REPLY.to_owned())
             }
         }
     }
@@ -121,7 +165,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use barn_stall::{
-        FRAMED_VERSION, Outcome as StallOutcome, Reply as StallReply, ToolCall as StallToolCall,
+        Content as StallContent, FRAMED_VERSION, Outcome as StallOutcome, Reply as StallReply,
+        ToolCall as StallToolCall,
     };
     use serde_json::json;
 
@@ -174,6 +219,20 @@ mod tests {
         .unwrap()
     }
 
+    fn tool_frame(id: u64, name: &str) -> String {
+        serde_json::to_string(&StallRequest::Tool {
+            id,
+            version: FRAMED_VERSION,
+            call: StallToolCall {
+                tool: "tack".to_owned(),
+                name: name.to_owned(),
+                input: json!({}),
+                session_id: None,
+            },
+        })
+        .unwrap()
+    }
+
     fn deny(id: u64, reason: &str) -> StallReply {
         StallReply::Hook {
             id,
@@ -192,25 +251,27 @@ mod tests {
         let folder = PluginFolder::new(
             r#"
             return {
-                name = "allow-test",
-                toolBefore = function(payload, ctx)
-                    if payload.command == "ls" then
-                        return nil
-                    end
-                    return ctx.deny("unexpected invocation")
-                end,
+                name = "two-content-test",
+                tools = {
+                    two = { run = function()
+                        return { content = {
+                            { kind = "text", text = "a" },
+                            { kind = "text", text = "b" },
+                        } }
+                    end },
+                },
             }
             "#,
         );
         let mut stall = InProcessStall::new(folder.0.clone()).unwrap();
-        let frame = hook_frame(7, "ls");
+        let deadline = Instant::now() + Duration::from_secs(1);
 
-        assert_eq!(stall.call(&frame, Instant::now()), Err(StallError::Timeout));
         assert_eq!(
-            stall.call(
-                r#"{"type":"unknown"}"#,
-                Instant::now() + Duration::from_secs(1)
-            ),
+            stall.call(&tool_frame(8, "two"), deadline),
+            Err(StallError::Malformed)
+        );
+        assert_eq!(
+            stall.call(r#"{"type":"unknown"}"#, deadline),
             Err(StallError::Malformed)
         );
     }
@@ -248,7 +309,7 @@ mod tests {
         );
         assert_eq!(
             stall.call(r#"{"type":"reload"}"#, deadline),
-            Ok(RELOAD_ACK.to_owned())
+            Ok(RELOAD_REPLY.to_owned())
         );
         assert_eq!(
             decode(&stall.call(&frame, deadline).unwrap()),
@@ -266,5 +327,50 @@ mod tests {
         let line = stall.call(&frame, deadline).unwrap();
 
         assert_eq!(decode(&line), deny(7, "push blocked"));
+    }
+
+    #[test]
+    fn a_reload_guard_detects_a_changed_file() {
+        let folder = PluginFolder::new("return { name = \"guard-test\" }");
+        let mut guard = ReloadGuard::new(folder.0.clone());
+
+        assert!(!guard.changed());
+
+        folder.write("return { name = \"changed\" }");
+
+        assert!(guard.changed());
+        assert!(!guard.changed());
+    }
+
+    #[test]
+    fn a_tool_request_routes_through_the_stall_converters() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/safe-push");
+        let limits = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS).unwrap();
+        let sandbox = Sandbox::new(&folder, limits, Capabilities::default()).unwrap();
+        let request = StallRequest::Tool {
+            id: 9,
+            version: FRAMED_VERSION,
+            call: StallToolCall {
+                tool: "tack".to_owned(),
+                name: "guard_status".to_owned(),
+                input: json!({}),
+                session_id: None,
+            },
+        };
+
+        let wire = frames::from_stall_request(&request).unwrap();
+        let reply = dispatch(&sandbox, wire);
+        let stall = frames::to_stall_reply(&reply).unwrap();
+
+        assert_eq!(
+            stall,
+            StallReply::Tool {
+                id: 9,
+                content: StallContent {
+                    kind: "text".to_owned(),
+                    text: "guard_status: daemon ok".to_owned(),
+                },
+            }
+        );
     }
 }

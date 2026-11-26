@@ -152,6 +152,40 @@ impl<C: Clock, T: Transport> StallClient<C, T> {
 
         Ok(reply)
     }
+
+    /// Send one control frame and return its single-line JSON object reply.
+    ///
+    /// Control frames have no stall verdict to decode: the caller checks the
+    /// reply's tag itself. One call is made, with no retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Timeout` when the clock is at or past the deadline before or
+    /// after the call, `Malformed` when the reply is not one line or not a
+    /// JSON object, and the transport's error when the call fails.
+    pub fn control(&mut self, frame: &str, deadline: Instant) -> Result<String, StallError> {
+        if self.clock.now() >= deadline {
+            return Err(StallError::Timeout);
+        }
+
+        let wire = self.transport.call(frame, deadline)?;
+
+        if self.clock.now() >= deadline {
+            return Err(StallError::Timeout);
+        }
+
+        if wire.lines().count() != 1 {
+            return Err(StallError::Malformed);
+        }
+
+        let value: serde_json::Value =
+            serde_json::from_str(&wire).map_err(|_| StallError::Malformed)?;
+        if !value.is_object() {
+            return Err(StallError::Malformed);
+        }
+
+        Ok(wire)
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +213,8 @@ mod tests {
     const TOOL_REQUEST: &str = r#"{"type":"tool","id":6,"version":1,"call":{"tool":"notes","name":"read","input":{"path":"/tmp/note.txt"}}}"#;
     const TOOL_REPLY: &str =
         r#"{"type":"tool","id":6,"content":{"kind":"text","text":"buy milk"}}"#;
+    const RELOAD_FRAME: &str = r#"{"type":"reload"}"#;
+    const RELOADED: &str = r#"{"type":"reloaded"}"#;
 
     /// A clock whose instant advances by a handle shared with the fake stall.
     #[derive(Clone)]
@@ -568,5 +604,58 @@ mod tests {
         assert_eq!(client.call(&request), Ok(expected));
         assert_eq!(client.transport.frames(), &[TOOL_REQUEST.to_owned()]);
         assert_eq!(encoded_reply, TOOL_REPLY);
+    }
+
+    #[test]
+    fn control_returns_a_single_object_reply() {
+        let clock = FakeClock::new(Instant::now());
+        let stall = FakeStall::reply(clock.clone(), RELOADED);
+        let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
+
+        assert_eq!(
+            client.control(RELOAD_FRAME, Instant::now() + Duration::from_secs(1)),
+            Ok(RELOADED.to_owned())
+        );
+        assert_eq!(client.transport.frames(), &[RELOAD_FRAME.to_owned()]);
+    }
+
+    #[test]
+    fn control_rejects_a_reply_that_is_not_a_json_object() {
+        let clock = FakeClock::new(Instant::now());
+        let stall = FakeStall::reply(clock.clone(), "[1,2]");
+        let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
+
+        assert_eq!(
+            client.control(RELOAD_FRAME, Instant::now() + Duration::from_secs(1)),
+            Err(StallError::Malformed)
+        );
+        assert_eq!(client.transport.frames(), &[RELOAD_FRAME.to_owned()]);
+    }
+
+    #[test]
+    fn control_rejects_a_multi_line_reply() {
+        let clock = FakeClock::new(Instant::now());
+        let stall = FakeStall::reply(clock.clone(), "first\nsecond");
+        let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
+
+        assert_eq!(
+            client.control(RELOAD_FRAME, Instant::now() + Duration::from_secs(1)),
+            Err(StallError::Malformed)
+        );
+        assert_eq!(client.transport.frames(), &[RELOAD_FRAME.to_owned()]);
+    }
+
+    #[test]
+    fn control_times_out_before_calling() {
+        let clock = FakeClock::new(Instant::now());
+        let stall = FakeStall::reply(clock.clone(), RELOADED);
+        let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
+        let no_frames: &[String] = &[];
+
+        assert_eq!(
+            client.control(RELOAD_FRAME, Instant::now()),
+            Err(StallError::Timeout)
+        );
+        assert_eq!(client.transport.frames(), no_frames);
     }
 }

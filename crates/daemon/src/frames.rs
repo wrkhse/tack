@@ -254,8 +254,9 @@ fn stall_error_name(error: ReplyError) -> Result<String, ConvertError> {
 
 /// Translate a wire reply into the frame a stall reads.
 ///
-/// All five hook outcomes have a stall form. A stall's tool reply holds one
-/// piece of content, and an error keeps its wire name and message.
+/// All five hook outcomes have a stall form. Tack's tool verdict carries
+/// exactly one content item today, so a stall's tool reply holds one piece
+/// of content; an error keeps its wire name and message.
 ///
 /// # Errors
 ///
@@ -808,6 +809,27 @@ mod tests {
                 Err(ConvertError::UnsupportedOutcome)
             );
         }
+    }
+
+    #[test]
+    fn two_tool_content_items_are_unsupported() {
+        assert_eq!(
+            to_stall_reply(&Reply::Tool {
+                id: 8,
+                version: PROTOCOL_VERSION,
+                content: vec![
+                    Content {
+                        kind: "text".to_owned(),
+                        text: "a".to_owned(),
+                    },
+                    Content {
+                        kind: "text".to_owned(),
+                        text: "b".to_owned(),
+                    },
+                ],
+            }),
+            Err(ConvertError::UnsupportedOutcome)
+        );
     }
 
     #[test]
