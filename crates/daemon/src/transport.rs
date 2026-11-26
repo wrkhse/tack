@@ -748,6 +748,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
 
@@ -952,6 +953,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
         let allow = Reply::Hook {
@@ -1048,6 +1050,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
 
@@ -1112,6 +1115,7 @@ mod tests {
                     input: serde_json::json!({ "command": "ls" }),
                     session_id: None,
                 },
+                _meta: None,
             })
             .unwrap()
         };
@@ -1166,6 +1170,7 @@ mod tests {
                     input: serde_json::json!({ "command": "ls" }),
                     session_id: None,
                 },
+                _meta: None,
             })
             .unwrap()
         };
@@ -1273,6 +1278,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
 
@@ -1370,6 +1376,7 @@ mod tests {
                     input: serde_json::json!({ "command": "ls" }),
                     session_id: None,
                 },
+                _meta: None,
             })
             .unwrap()
         };
@@ -1420,6 +1427,7 @@ mod tests {
                     input: serde_json::json!({ "command": "ls" }),
                     session_id: None,
                 },
+                _meta: None,
             })
             .unwrap()
         };
@@ -1489,6 +1497,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
 
@@ -1540,6 +1549,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
 
@@ -1592,6 +1602,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
         let busy = wire::encode_line(&Reply::Error {
@@ -1767,6 +1778,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
         let busy = Reply::Error {
@@ -1862,6 +1874,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
         let busy = Reply::Error {
@@ -1937,6 +1950,7 @@ mod tests {
                 input: serde_json::json!({ "command": "ls" }),
                 session_id: None,
             },
+            _meta: None,
         })
         .unwrap();
         let partial = line.get(..line.len().div_ceil(2)).unwrap().to_vec();

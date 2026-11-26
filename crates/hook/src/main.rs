@@ -176,6 +176,7 @@ mod tests {
                 input: serde_json::json!({ "command": "git push" }),
                 session_id: Some("s-1".into()),
             },
+            _meta: None,
         })
         .unwrap()
     }

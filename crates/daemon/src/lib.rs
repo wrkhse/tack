@@ -1,6 +1,7 @@
 //! The per-user daemon that evaluates hooks and runs tools inside an mlua
 //! sandbox with memory and deadline limits.
 
+pub mod frames;
 pub mod stall;
 pub mod transport;
 
@@ -267,6 +268,7 @@ mod tests {
                 input,
                 session_id: Some("s-1".into()),
             },
+            _meta: None,
         }
     }
 

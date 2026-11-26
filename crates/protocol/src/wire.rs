@@ -47,6 +47,8 @@ pub enum Request {
         version: u32,
         hook: String,
         call: ToolCall,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        _meta: Option<Meta>,
     },
     Tool {
         id: u64,
@@ -82,12 +84,31 @@ pub struct ToolCall {
     pub session_id: Option<String>,
 }
 
+/// Trace context from the caller. It is data only, never a permission.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct Meta {
+    /// A W3C trace parent, when the caller sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traceparent: Option<String>,
+    /// The W3C trace state, when the caller sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outcome {
     Allow,
-    Deny { reason: String },
-    Rewrite { input: Value },
+    Deny {
+        reason: String,
+    },
+    Rewrite {
+        input: Value,
+    },
+    Annotate {
+        fields: serde_json::Map<String, Value>,
+    },
+    Drop,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -284,6 +305,7 @@ mod tests {
                 input: serde_json::json!({ "command": "git push" }),
                 session_id: None,
             },
+            _meta: None,
         }
     }
 
