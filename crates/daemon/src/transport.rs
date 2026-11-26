@@ -1973,6 +1973,13 @@ mod tests {
             "the daemon closed a progressing peer after {elapsed:?}, before its lifetime"
         );
 
+        // A generous upper bound, not a tight timing check: twice the lifetime
+        // and more still catches a daemon that lets a trickle run on.
+        assert!(
+            elapsed <= Duration::from_secs(3),
+            "the daemon kept a progressing peer open for {elapsed:?}"
+        );
+
         // The daemon closes with trickled bytes still unread, which the peer
         // may see as a reset rather than a clean end. Either way it closed.
         if let Err(error) = outcome {
