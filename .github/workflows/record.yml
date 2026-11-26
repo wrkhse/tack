@@ -65,7 +65,12 @@ jobs:
           export PATH="$zigdir:$PATH"
           zig version
 
-          cargo install --locked --version 1.2.1 terminal-control
+          curl -fsSLO \
+            https://static.crates.io/crates/terminal-control/terminal-control-1.2.1.crate
+          sha='d5467b4786c3eb69d0aa9668c9aebc4b66e6a20b0605427d45fdeaa4816cedd4'
+          echo "$sha  terminal-control-1.2.1.crate" | sha256sum -c -
+          tar -xzf terminal-control-1.2.1.crate
+          cargo install --locked --path terminal-control-1.2.1
           termctrl --version
 
           {
@@ -358,7 +363,12 @@ jobs:
           export PATH="$zigdir:$PATH"
           zig version
 
-          cargo install --locked --version 1.2.1 terminal-control
+          curl -fsSLO \
+            https://static.crates.io/crates/terminal-control/terminal-control-1.2.1.crate
+          sha='d5467b4786c3eb69d0aa9668c9aebc4b66e6a20b0605427d45fdeaa4816cedd4'
+          echo "$sha  terminal-control-1.2.1.crate" | sha256sum -c -
+          tar -xzf terminal-control-1.2.1.crate
+          cargo install --locked --path terminal-control-1.2.1
           termctrl --version
 
           {
@@ -646,7 +656,12 @@ jobs:
           export PATH="$zigdir:$PATH"
           zig version
 
-          cargo install --locked --version 1.2.1 terminal-control
+          curl -fsSLO \
+            https://static.crates.io/crates/terminal-control/terminal-control-1.2.1.crate
+          sha='d5467b4786c3eb69d0aa9668c9aebc4b66e6a20b0605427d45fdeaa4816cedd4'
+          echo "$sha  terminal-control-1.2.1.crate" | sha256sum -c -
+          tar -xzf terminal-control-1.2.1.crate
+          cargo install --locked --path terminal-control-1.2.1
           termctrl --version
 
           {
@@ -916,7 +931,12 @@ jobs:
           export PATH="$zigdir:$PATH"
           zig version
 
-          cargo install --locked --version 1.2.1 terminal-control
+          curl -fsSLO \
+            https://static.crates.io/crates/terminal-control/terminal-control-1.2.1.crate
+          sha='d5467b4786c3eb69d0aa9668c9aebc4b66e6a20b0605427d45fdeaa4816cedd4'
+          echo "$sha  terminal-control-1.2.1.crate" | sha256sum -c -
+          tar -xzf terminal-control-1.2.1.crate
+          cargo install --locked --path terminal-control-1.2.1
           termctrl --version
 
           {
