@@ -1946,6 +1946,7 @@ mod tests {
         // Half a frame, then a space every millisecond: never a newline, and
         // never a stall long enough for the frame budget. The write half stays
         // open until a write fails, so only the daemon can end the connection.
+        let start = Instant::now();
         let trickle = tokio::spawn(async move {
             if writer.write_all(&partial).await.is_err() {
                 return;
@@ -1956,11 +1957,21 @@ mod tests {
             }
         });
 
+        // The 5 s bound is only a hang guard, not the lifetime's upper bound.
         let mut received = Vec::new();
         let outcome =
             tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut received))
                 .await
                 .expect("the daemon ends a trickling peer at its I/O lifetime");
+        let elapsed = start.elapsed();
+
+        // Bytes keep flowing, so only the lifetime can end the connection: it
+        // must not close before CONNECTION_LIFETIME, less a little for the
+        // admission that preceded `start`.
+        assert!(
+            elapsed >= CONNECTION_LIFETIME.saturating_sub(Duration::from_millis(100)),
+            "the daemon closed a progressing peer after {elapsed:?}, before its lifetime"
+        );
 
         // The daemon closes with trickled bytes still unread, which the peer
         // may see as a reset rather than a clean end. Either way it closed.
