@@ -1941,6 +1941,9 @@ mod tests {
         .unwrap();
         let partial = line.get(..line.len().div_ceil(2)).unwrap().to_vec();
 
+        // The clock starts before the connect, so the daemon's admission, where
+        // the lifetime starts, cannot come before it.
+        let start = Instant::now();
         let (mut reader, mut writer) = UnixStream::connect(&socket).await.unwrap().into_split();
 
         // Half a frame, then a space every millisecond: never a newline, and
@@ -1956,11 +1959,29 @@ mod tests {
             }
         });
 
+        // The 5 s bound is only a hang guard, not the lifetime's upper bound.
         let mut received = Vec::new();
         let outcome =
             tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut received))
                 .await
                 .expect("the daemon ends a trickling peer at its I/O lifetime");
+        let elapsed = start.elapsed();
+
+        // Bytes keep flowing, so only the lifetime can end the connection: it
+        // must not close before CONNECTION_LIFETIME, less 100 ms of timer and
+        // scheduling slack.
+        assert!(
+            elapsed >= CONNECTION_LIFETIME.saturating_sub(Duration::from_millis(100)),
+            "the daemon closed a progressing peer after {elapsed:?}, before its lifetime"
+        );
+
+        // The upper bound is the lifetime plus a 1 s margin for the daemon to
+        // notice it and close under load, so a daemon that lets a trickle run on
+        // past its lifetime fails.
+        assert!(
+            elapsed <= CONNECTION_LIFETIME.saturating_add(Duration::from_secs(1)),
+            "the daemon kept a progressing peer open for {elapsed:?}, past its lifetime and a 1 s margin"
+        );
 
         // The daemon closes with trickled bytes still unread, which the peer
         // may see as a reset rather than a clean end. Either way it closed.
