@@ -238,6 +238,150 @@ fn state_merge_keeps_a_state_table_from_another_source_that_shares_the_prefix() 
     );
 }
 
+const HASHES_HEADER: &str = "# The hashes tack's Codex hooks were trusted under, newest last.\n";
+
+fn hash(index: usize) -> String {
+    format!("sha256:{index:064x}")
+}
+
+#[test]
+fn state_merge_uses_recorded_old_tack_hashes_when_no_tack_group_remains() {
+    let scratch = Scratch::new();
+    let [pre, start] = handlers("/out/codex");
+    let source = scratch.root.join(HOOKS_FILE).display().to_string();
+    let old = format!("sha256:{}", "0123456789abcdef".repeat(4));
+
+    // No tack group is left in hooks.json, so no old hash comes from it. Only
+    // tack-hashes marks the table at group 1 as tack's.
+    fs::write(scratch.root.join(HOOKS_FILE), "{}\n").expect("hooks");
+    fs::write(
+        scratch.root.join(CONFIG_FILE),
+        format!(
+            "model = \"o3\"\n\n[hooks.state.\"{source}:pre_tool_use:1:0\"]\n\
+             enabled = true\ntrusted_hash = \"{old}\"\n"
+        ),
+    )
+    .expect("config");
+    fs::write(scratch.root.join(HASHES_FILE), format!("{old}\n")).expect("hashes");
+
+    let installed = install(&scratch.root, &handlers("/out/codex")).expect("install");
+
+    // config.toml holds only its tables: no record of any hash.
+    assert_eq!(
+        fs::read_to_string(&installed.config).expect("config"),
+        format!(
+            "model = \"o3\"\n\n\
+             [hooks.state.\"{source}:pre_tool_use:0:0\"]\nenabled = true\n\
+             trusted_hash = \"{pre}\"\n\n\
+             [hooks.state.\"{source}:session_start:0:0\"]\nenabled = true\n\
+             trusted_hash = \"{start}\"\n",
+            pre = pre.trusted_hash(),
+            start = start.trusted_hash()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(&installed.hashes).expect("hashes"),
+        format!(
+            "{HASHES_HEADER}{old}\n{}\n{}\n",
+            pre.trusted_hash(),
+            start.trusted_hash()
+        )
+    );
+}
+
+#[test]
+fn a_rebuild_records_each_hash_once_beside_the_config() {
+    let scratch = Scratch::new();
+    let [pre, start] = handlers("/out/codex");
+
+    let first = install(&scratch.root, &handlers("/out/codex")).expect("first install");
+    let config = fs::read_to_string(&first.config).expect("config");
+    let second = install(&scratch.root, &handlers("/out/codex")).expect("rebuild");
+
+    assert_eq!(first.hashes, scratch.root.join(HASHES_FILE));
+    assert_eq!(
+        fs::read_to_string(&second.hashes).expect("hashes"),
+        format!(
+            "{HASHES_HEADER}{}\n{}\n",
+            pre.trusted_hash(),
+            start.trusted_hash()
+        )
+    );
+    assert_eq!(fs::read_to_string(&second.config).expect("config"), config);
+}
+
+#[test]
+fn a_malformed_hash_record_is_refused_and_nothing_is_written() {
+    let scratch = Scratch::new();
+    let hashes = scratch.root.join(HASHES_FILE);
+    fs::write(&hashes, "sha256:not-hex\n").expect("hashes");
+
+    let error = install(&scratch.root, &handlers("/out/codex")).expect_err("refused");
+
+    assert_eq!(
+        error,
+        CodexError::Config("a malformed tack-hashes line".into())
+    );
+    assert_eq!(
+        fs::read_to_string(&hashes).expect("hashes"),
+        "sha256:not-hex\n"
+    );
+    assert!(!scratch.root.join(HOOKS_FILE).exists());
+    assert!(!scratch.root.join(CONFIG_FILE).exists());
+}
+
+#[test]
+fn only_exact_hashes_comments_and_blank_lines_are_read() {
+    let a = format!("sha256:{}", "0123456789abcdef".repeat(4));
+    let b = hash(7);
+
+    assert_eq!(
+        parse_hashes(&format!("# note\n\n  # indented\n{a}\n   \n{b}\n{a}\n")),
+        Ok(vec![a.clone(), b])
+    );
+
+    for line in [
+        format!(" {a}"),
+        format!("{a} "),
+        format!("sha256:{}", "a".repeat(63)),
+        format!("sha256:{}", "a".repeat(65)),
+        format!("sha256:{}", "A".repeat(64)),
+        format!("sha256:{}g", "a".repeat(63)),
+        format!("md5:{}", "a".repeat(64)),
+        "sha256:".to_owned(),
+    ] {
+        assert_eq!(
+            parse_hashes(&format!("{a}\n{line}\n")),
+            Err(CodexError::Config("a malformed tack-hashes line".into())),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn the_hash_record_keeps_the_newest_and_never_drops_one_in_use() {
+    let recorded: Vec<String> = (0..40).map(hash).collect();
+    let trust = [
+        ("a".to_owned(), hash(3)),
+        ("b".to_owned(), hash(100)),
+        ("c".to_owned(), String::new()),
+    ];
+
+    let rendered = render_hashes(&recorded, &trust);
+
+    // 38 earlier hashes and the two in use: the oldest are dropped down to 32,
+    // and hash 3, still in use, moves to the newest end instead.
+    let mut expected: Vec<String> = (10..40).map(hash).collect();
+    expected.push(hash(3));
+    expected.push(hash(100));
+
+    assert_eq!(
+        rendered,
+        format!("{HASHES_HEADER}{}\n", expected.join("\n"))
+    );
+    assert_eq!(rendered.lines().count(), MAX_HASHES + 1);
+}
+
 #[test]
 fn state_merge_refuses_what_it_cannot_place() {
     let trust = [(
