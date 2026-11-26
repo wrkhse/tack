@@ -82,3 +82,9 @@ mod tests {
         );
     }
 }
+
+/// Planted surviving mutant for the CI proof; no test calls this function.
+#[must_use]
+pub fn proof_always_seven() -> u8 {
+    7
+}
