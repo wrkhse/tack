@@ -17,4 +17,4 @@ clippy, compile or tests. The tidy pins are plain data in .github/tidy.env; the
 binary is verified by SHA-256 on first use and the cached archive is verified on
 every run at `~/.cache/wrkhse/tidy-<sha>/`. CI runs the hook selftest on Ubuntu and
 macOS on pull requests that change hook paths, on pushes to main, daily on main, and
-on demand.
+on demand. The hook is opt-in; it never runs unless you enable it as above.
