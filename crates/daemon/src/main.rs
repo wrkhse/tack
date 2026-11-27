@@ -352,13 +352,14 @@ fn launch_stall_with(
     Ok(Stall::Host { client, child })
 }
 
-#[tokio::main]
-async fn main() {
+/// Return a code instead of exiting here so `client` and its live `Stall`
+/// are dropped first; `Stall::drop` then reaps the barn child on every exit.
+async fn run() -> i32 {
     let args = match parse_args() {
         Ok(args) => args,
         Err(message) => {
             eprintln!("tack-daemon: {message}");
-            std::process::exit(EXIT_USAGE);
+            return EXIT_USAGE;
         }
     };
 
@@ -366,7 +367,7 @@ async fn main() {
         Ok(state) => state,
         Err(message) => {
             eprintln!("tack-daemon: {message}");
-            std::process::exit(EXIT_USAGE);
+            return EXIT_USAGE;
         }
     };
     if !socket_in_state_dir(&state, &args.socket) {
@@ -375,7 +376,7 @@ async fn main() {
             state.join(SOCKET_NAME).display(),
             args.socket.display()
         );
-        std::process::exit(EXIT_USAGE);
+        return EXIT_USAGE;
     }
 
     let stall = match launch_stall(&args.plugin, &state) {
@@ -391,19 +392,25 @@ async fn main() {
         Ok(server) => server,
         Err(TransportError::LockBusy) => {
             eprintln!("tack-daemon: lock_busy");
-            std::process::exit(EXIT_LOCK_BUSY);
+            return EXIT_LOCK_BUSY;
         }
         Err(error) => {
             eprintln!("tack-daemon: bind: {error}");
-            drop(client);
-            std::process::exit(EXIT_ENGINE);
+            return EXIT_ENGINE;
         }
     };
 
     if let Err(error) = server.serve(move |request| handle(&request, &client)).await {
         eprintln!("tack-daemon: serve: {error}");
-        std::process::exit(EXIT_ENGINE);
+        return EXIT_ENGINE;
     }
+
+    0
+}
+
+#[tokio::main]
+async fn main() {
+    std::process::exit(run().await);
 }
 
 #[cfg(test)]
