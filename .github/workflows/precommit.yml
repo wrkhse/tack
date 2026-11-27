@@ -36,7 +36,7 @@ jobs:
             exit 0
           fi
           git diff --name-only "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/changed"
-          if grep -qE '^(.githooks/|.github/tidy.env$|.github/scripts/test-pre-commit.sh$|.github/workflows/precommit.yml$|rust-toolchain\.toml)' "$RUNNER_TEMP/changed"; then
+          if grep -qE '^(.githooks/|.github/tidy.env$|.github/scripts/test-pre-commit.sh$|.github/workflows/precommit.yml$|rust-toolchain\.toml|tidy\.json|rustfmt\.toml|\.rustfmt\.toml)' "$RUNNER_TEMP/changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"

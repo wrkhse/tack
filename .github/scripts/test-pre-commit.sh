@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ -z "${CI:-}" ]]; then
-  echo 'hook selftest runs only in CI' >&2
-  exit 0
+  echo '::error::hook selftest must run in CI' >&2
+  exit 1
 fi
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
