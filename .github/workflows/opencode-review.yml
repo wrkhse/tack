@@ -3,9 +3,21 @@ name: OpenCode review
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request to review in a proof run
+        required: false
+        default: ""
+        type: string
+      primary_model:
+        description: Proof-only primary model (current primary, opencode/hy4-flash-free or test/unreachable)
+        required: false
+        default: ""
+        type: string
 
 concurrency:
-  group: opencode-review-${{ github.event.pull_request.number }}
+  group: opencode-review-${{ github.event_name == 'pull_request' && github.event.pull_request.number || format('{0}-{1}', github.event_name, github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -28,12 +40,17 @@ jobs:
 
   review:
     # Pull requests from forks get no secrets, so they can't sign in.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository ||
+      (github.event_name == 'workflow_dispatch' && inputs.pr_number != '')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Nobody answers prompts in CI, so nothing may ask. The reviewer only
       # reads files in the checkout: no shell, no edits, no web.
+      PRIMARY_MODEL: opencode-go/deepseek-v4.1-flash
+      REVIEW_FALLBACK_MODEL: opencode/hy4-flash-free
+      REVIEW_TIMEOUT_SEC: 450
       OPENCODE_CONFIG_CONTENT: >-
         {"small_model":"opencode-go/deepseek-v4.1-flash",
         "agents":{"build":{"steps":150}},
@@ -47,6 +64,35 @@ jobs:
       pull-requests: write
       issues: write
     steps:
+      - name: Resolve proof-run inputs
+        id: dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_MODEL: ${{ inputs.primary_model }}
+          PR: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
+          ALLOWED_MODEL: ${{ env.PRIMARY_MODEL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PR:?pr_number is required for a proof run}"
+          model="$INPUT_MODEL"
+          case "$model" in
+            ''|"$ALLOWED_MODEL"|opencode/hy4-flash-free|test/unreachable) ;;
+            *)
+              echo "::error::Refusing proof-run primary model '$model': use $ALLOWED_MODEL, opencode/hy4-flash-free or test/unreachable." >&2
+              exit 1
+              ;;
+          esac
+          if [ -z "$model" ]; then
+            model="$ALLOWED_MODEL"
+          fi
+          echo "primary_model=$model" >> "$GITHUB_OUTPUT"
+          info=$(gh api "repos/$REPO/pulls/$PR" --jq '"\(.head.sha) \(.base.sha)"')
+          read -r head base <<< "$info"
+          echo "pr_head=$head" >> "$GITHUB_OUTPUT"
+          echo "pr_base=$base" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -89,9 +135,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number || inputs.pr_number }}
+          BASE: ${{ github.event_name == 'workflow_dispatch' && steps.dispatch.outputs.pr_base || github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event_name == 'workflow_dispatch' && steps.dispatch.outputs.pr_head || github.event.pull_request.head.sha }}
           PR_JSON: ${{ runner.temp }}/pr.json
         shell: bash
         run: |
@@ -102,11 +148,13 @@ jobs:
           bash .github/scripts/gather-review-input.sh
       # One run, no GitHub access. The JSONL event stream is the reviewer's
       # whole output; post-review.sh reads the review from it.
-      - name: Review
+      - name: Review (primary)
+        id: review_primary
+        timeout-minutes: 8
         env:
-          MODEL: opencode-go/deepseek-v4.1-flash
+          MODEL: ${{ steps.dispatch.outputs.primary_model || env.PRIMARY_MODEL }}
           PROMPT: |
-            You review pull request #${{ github.event.pull_request.number }} in
+            You review pull request #${{ github.event.pull_request.number || inputs.pr_number }} in
             ${{ github.repository }}. You have no shell. Everything you need is in
             review-input/ in the checkout:
             - rules/AGENTS.md, rules/CONTRIBUTING.md: the rules as they stand on
@@ -199,18 +247,53 @@ jobs:
             After gathering material, write the review immediately. Never end your reply with a tool call, a plan, or a description of what you read; your reply must always end with the findings JSON block. If you are asked to summarize, output exactly that review text starting with the marker, not a description of your work.
         shell: bash
         run: |
-          set -euo pipefail
-          printf '%s' "$PROMPT" \
-            | opencode run --model "$MODEL" --variant low --format json \
-            > "$RUNNER_TEMP/review-events.jsonl"
+          set -uo pipefail
+          events="$RUNNER_TEMP/review-events.jsonl"
+          printf '%s' "$PROMPT" > "$RUNNER_TEMP/review-prompt.txt"
+          status=0
+          timeout --kill-after=10s "${REVIEW_TIMEOUT_SEC}s" \
+            opencode run --model "$MODEL" --variant low --format json \
+            < "$RUNNER_TEMP/review-prompt.txt" > "$events" || status=$?
+          if [ "$status" -eq 0 ] && [ -s "$events" ] && \
+             jq -es 'any(.[]; .type == "error") | not' "$events" > /dev/null; then
+            echo "REVIEW_MODEL=$MODEL" >> "$GITHUB_ENV"
+          else
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Primary review with $MODEL failed (status $status); retrying once with $REVIEW_FALLBACK_MODEL."
+          fi
+      - name: Review (fallback)
+        id: review_fallback
+        if: >-
+          always() && steps.review_primary.outputs.failed == 'true'
+        timeout-minutes: 8
+        env:
+          MODEL: ${{ env.REVIEW_FALLBACK_MODEL }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          events="$RUNNER_TEMP/review-events.jsonl"
+          status=0
+          timeout --kill-after=10s "${REVIEW_TIMEOUT_SEC}s" \
+            opencode run --model "$MODEL" --variant low --format json \
+            < "$RUNNER_TEMP/review-prompt.txt" > "$events" || status=$?
+          if [ "$status" -eq 0 ] && [ -s "$events" ] && \
+             jq -es 'any(.[]; .type == "error") | not' "$events" > /dev/null; then
+            echo "REVIEW_MODEL=$MODEL" >> "$GITHUB_ENV"
+          else
+            echo "::error::Primary and fallback reviews both failed (fallback status $status for $MODEL)."
+            exit 1
+          fi
       # Posts the marker comment and inline review, then removes or
       # minimizes earlier ones.
       - name: Post review
+        if: >-
+          always() && (steps.review_primary.outcome == 'success' ||
+           steps.review_fallback.outcome == 'success')
         env:
-          MODEL: opencode-go/deepseek-v4.1-flash
+          MODEL: ${{ env.REVIEW_MODEL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.pull_request.number || inputs.pr_number }}
           DIFF: review-input/diff.patch
           EVENTS: ${{ runner.temp }}/review-events.jsonl
         shell: bash
