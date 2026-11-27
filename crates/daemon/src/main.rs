@@ -354,22 +354,7 @@ fn launch_stall_with(
 
 /// Return a code instead of exiting here so `client` and its live `Stall`
 /// are dropped first; `Stall::drop` then reaps the barn child on every exit.
-async fn run() -> i32 {
-    let args = match parse_args() {
-        Ok(args) => args,
-        Err(message) => {
-            eprintln!("tack-daemon: {message}");
-            return EXIT_USAGE;
-        }
-    };
-
-    let state = match state_dir() {
-        Ok(state) => state,
-        Err(message) => {
-            eprintln!("tack-daemon: {message}");
-            return EXIT_USAGE;
-        }
-    };
+async fn run(args: Args, state: PathBuf) -> i32 {
     if !socket_in_state_dir(&state, &args.socket) {
         eprintln!(
             "tack-daemon: {ERR_SOCKET_MISMATCH}: expected {} got {}",
@@ -410,7 +395,23 @@ async fn run() -> i32 {
 
 #[tokio::main]
 async fn main() {
-    std::process::exit(run().await);
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("tack-daemon: {message}");
+            std::process::exit(EXIT_USAGE);
+        }
+    };
+
+    let state = match state_dir() {
+        Ok(state) => state,
+        Err(message) => {
+            eprintln!("tack-daemon: {message}");
+            std::process::exit(EXIT_USAGE);
+        }
+    };
+
+    std::process::exit(run(args, state).await);
 }
 
 #[cfg(test)]
@@ -424,6 +425,18 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_socket_outside_the_state_dir_returns_usage() {
+        let args = Args {
+            socket: PathBuf::from("/tmp/tack-not-in-state.sock"),
+            plugin: PathBuf::from("/tmp"),
+        };
+
+        let result = run(args, PathBuf::from("/tmp/tack-run-test-state")).await;
+
+        assert_eq!(result, EXIT_USAGE);
+    }
 
     #[test]
     fn the_env_override_selects_the_barn_binary() {
