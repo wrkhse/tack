@@ -335,6 +335,10 @@ fn body_within_cap(line: &str) -> Result<(), StallError> {
         message.get("call").and_then(|call| call.get("input")),
         message.get("result"),
         message.get("result").and_then(|result| result.get("body")),
+        message.get("content"),
+        message.get("outcome"),
+        message.get("error"),
+        message.get("message"),
     ];
 
     for body in bodies.into_iter().flatten() {
@@ -475,27 +479,52 @@ fn request_id(request: &str) -> Result<u64, StallError> {
         .ok_or(StallError::Malformed)
 }
 
-/// A reply succeeds only with the request's id and an explicit `result`. An
-/// error reply keeps its named failure, never a pass-through allow.
+/// A framed reply succeeds only with the request's id and exactly one body
+/// key that matches its type. An error reply keeps its named failure, never a
+/// pass-through allow.
 fn refused_frame(answer: &str, id: u64) -> Result<(), StallError> {
-    let message: Value = match serde_json::from_str(answer) {
-        Ok(message) => message,
-        Err(_) => return Err(StallError::Malformed),
-    };
+    let message: Value = serde_json::from_str(answer).map_err(|_| StallError::Malformed)?;
 
     if message.get("id").and_then(Value::as_u64) != Some(id) {
         return Err(StallError::Malformed);
     }
 
-    if let Some(error) = message.get("error") {
-        return Err(host_error(error));
-    }
+    let kind = message
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(StallError::Malformed)?;
 
-    if message.get("result").is_none() {
+    if !matches!(kind, "hook" | "tool" | "error") {
         return Err(StallError::Malformed);
     }
 
-    Ok(())
+    let outcome = message.get("outcome");
+    let content = message.get("content");
+    let error = message.get("error");
+
+    if [outcome, content, error]
+        .iter()
+        .filter(|value| value.is_some())
+        .count()
+        != 1
+    {
+        return Err(StallError::Malformed);
+    }
+
+    match (kind, outcome, content, error) {
+        ("hook", Some(Value::Object(_) | Value::String(_)), _, _)
+        | ("tool", _, Some(Value::Object(_)), _) => Ok(()),
+        ("error", _, _, Some(error)) => {
+            let name = error.as_str().ok_or(StallError::Malformed)?;
+            let detail = message
+                .get("message")
+                .and_then(Value::as_str)
+                .ok_or(StallError::Malformed)?;
+
+            Err(StallError::Io(format!("host error {name}: {detail}")))
+        }
+        _ => Err(StallError::Malformed),
+    }
 }
 
 #[cfg(test)]
@@ -518,7 +547,7 @@ mod tests {
     const START_REPLY: &str = r#"{"jsonrpc":"2.0","id":21,"result":{"stall":"sourcefed"}}"#;
     const BAD_START_REPLY: &str = r#"{"jsonrpc":"2.0","id":99,"result":{"stall":"sourcefed"}}"#;
     const CALL_FRAME: &str = r#"{"jsonrpc":"2.0","id":22,"method":"stall.call","params":{}}"#;
-    const CALL_REPLY: &str = r#"{"jsonrpc":"2.0","id":22,"result":{"ok":true}}"#;
+    const CALL_REPLY: &str = r#"{"type":"hook","id":22,"outcome":"allow"}"#;
 
     fn wire(message: &Value) -> Vec<u8> {
         let mut line = message.to_string().into_bytes();
@@ -1106,10 +1135,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_call_uses_the_fake_host_endpoint() {
+    async fn a_framed_hook_reply_returns_its_exact_line() {
         let dir = TempDir::new();
         let socket = dir.path().join("host.sock");
-        let host = fake_host(&socket, CALL_REPLY);
+        let reply = r#"{"type":"hook","id":22,"outcome":"allow"}"#;
+        let host = fake_host(&socket, reply);
 
         let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
         let mut transport = HostTransport::new(endpoint);
@@ -1117,7 +1147,7 @@ mod tests {
 
         assert_eq!(
             tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
-            Ok(CALL_REPLY.to_owned())
+            Ok(reply.to_owned())
         );
         host.join().unwrap();
     }
@@ -1370,21 +1400,98 @@ mod tests {
     }
 
     #[test]
-    fn a_non_denial_error_reply_is_not_an_answer() {
-        let answer = json!({
-            "jsonrpc": "2.0",
+    fn an_oversize_framed_error_is_rejected() {
+        let text = "x".repeat(DEFAULT_MAX_BODY_BYTES.saturating_add(1));
+        let line = json!({
+            "type": "error",
             "id": 22,
-            "error": {
-                "code": -32_600,
-                "message": "Method not found",
-            },
+            "error": "limit",
+            "message": text,
         })
         .to_string();
 
         assert_eq!(
-            refused_frame(&answer, 22),
-            Err(StallError::Io("host error -32600: Method not found".into()))
+            body_within_cap(&line),
+            Err(StallError::Io(format!(
+                "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+            )))
         );
+    }
+
+    #[test]
+    fn a_framed_hook_outcome_is_an_answer() {
+        let answer = r#"{"type":"hook","id":1,"outcome":{"deny":{"reason":"push blocked"}}}"#;
+
+        assert_eq!(refused_frame(answer, 1), Ok(()));
+    }
+
+    #[test]
+    fn a_framed_tool_content_is_an_answer() {
+        let answer = r#"{"type":"tool","id":6,"content":{"kind":"text","text":"buy milk"}}"#;
+
+        assert_eq!(refused_frame(answer, 6), Ok(()));
+    }
+
+    #[test]
+    fn a_framed_error_reply_keeps_its_named_failure() {
+        let answer = r#"{"type":"error","id":7,"error":"stall_unavailable","message":"the stall did not answer"}"#;
+
+        assert_eq!(
+            refused_frame(answer, 7),
+            Err(StallError::Io(
+                "host error stall_unavailable: the stall did not answer".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_null_hook_outcome_is_not_an_answer() {
+        let answer = r#"{"type":"hook","id":1,"outcome":null}"#;
+
+        assert_eq!(refused_frame(answer, 1), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_numeric_hook_outcome_is_not_an_answer() {
+        let answer = r#"{"type":"hook","id":1,"outcome":42}"#;
+
+        assert_eq!(refused_frame(answer, 1), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_null_tool_content_is_not_an_answer() {
+        let answer = r#"{"type":"tool","id":6,"content":null}"#;
+
+        assert_eq!(refused_frame(answer, 6), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_non_string_framed_error_is_not_an_answer() {
+        let answer = r#"{"type":"error","id":7,"error":42,"message":"the stall did not answer"}"#;
+
+        assert_eq!(refused_frame(answer, 7), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_framed_reply_with_a_foreign_id_is_not_an_answer() {
+        let answer = r#"{"type":"hook","id":1,"outcome":"allow"}"#;
+
+        assert_eq!(refused_frame(answer, 2), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_framed_reply_without_a_body_key_is_not_an_answer() {
+        let answer = r#"{"type":"hook","id":1}"#;
+
+        assert_eq!(refused_frame(answer, 1), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_framed_reply_with_two_body_keys_is_not_an_answer() {
+        let answer =
+            r#"{"type":"hook","id":1,"outcome":"allow","content":{"kind":"text","text":"x"}}"#;
+
+        assert_eq!(refused_frame(answer, 1), Err(StallError::Malformed));
     }
 
     #[test]
@@ -1415,41 +1522,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_denial_error_reply_keeps_its_named_reason() {
-        let answer = json!({
-            "jsonrpc": "2.0",
-            "id": 22,
-            "error": {
-                "code": DENIED_CODE,
-                "message": "denied",
-                "data": { "reason": deny::TOKEN_MISMATCH },
-            },
-        })
-        .to_string();
-
-        assert_eq!(
-            refused_frame(&answer, 22),
-            Err(StallError::Io(format!(
-                "host.start denied: {}",
-                deny::TOKEN_MISMATCH
-            )))
-        );
-    }
-
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_oversize_nested_reply_body_is_refused_by_call() {
+    async fn an_oversize_framed_content_is_refused_by_call() {
         let dir = TempDir::new();
         let socket = dir.path().join("host.sock");
         let text = "x".repeat(DEFAULT_MAX_BODY_BYTES.saturating_add(1));
         let reply = json!({
-            "jsonrpc": "2.0",
+            "type": "tool",
             "id": 22,
-            "result": {
-                "type": "tool",
-                "id": 22,
-                "content": { "kind": "text", "text": text },
-            },
+            "content": { "kind": "text", "text": text },
         })
         .to_string();
         let host = fake_host(&socket, reply);

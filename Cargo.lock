@@ -11,7 +11,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "barn-stall"
 version = "0.1.0"
-source = "git+https://github.com/wrkhse/barn.git?rev=36e964dbfcbc434a343177134c6e6ec4d357716a#36e964dbfcbc434a343177134c6e6ec4d357716a"
+source = "git+https://github.com/wrkhse/barn.git?rev=328a79ff5193115e7458ad75e0feef8beeb391a7#328a79ff5193115e7458ad75e0feef8beeb391a7"
 dependencies = [
  "serde",
  "serde_json",
