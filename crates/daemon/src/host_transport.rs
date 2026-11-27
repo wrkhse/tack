@@ -6,9 +6,8 @@
 //! an allow.
 
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::{SocketAddr, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use barn_stall::{
@@ -16,6 +15,9 @@ use barn_stall::{
     PROTOCOL_VERSION, deny, method,
 };
 use serde_json::Value;
+use tokio::net::UnixStream as AsyncUnixStream;
+use tokio::runtime::Handle;
+use tokio::time::timeout;
 
 use crate::stall::{StallError, Transport};
 
@@ -77,7 +79,7 @@ impl HostTransport {
         write_line(reader.get_mut(), &request)?;
 
         let mut reply = Vec::new();
-        read_line(reader, &mut reply)?;
+        read_line(reader, &mut reply, deadline)?;
         check_line_len(reply.len())?;
         let text = std::str::from_utf8(&reply).map_err(|_| StallError::Malformed)?;
         body_within_cap(text)?;
@@ -111,7 +113,7 @@ impl HostTransport {
         write_line(reader.get_mut(), &request)?;
 
         let mut reply = Vec::new();
-        read_line(&mut reader, &mut reply)?;
+        read_line(&mut reader, &mut reply, deadline)?;
         let stall = host_start_stall(&reply, id)?;
 
         if stall.is_empty() {
@@ -124,27 +126,27 @@ impl HostTransport {
     }
 }
 
-/// Connect within `budget`: the blocking connect runs on a detached thread and
-/// the caller waits on the channel only until the budget runs out. A timed-out
-/// wait leaves the connector thread to finish on its own.
+/// Connect within `budget` on the current tokio runtime, then return a
+/// blocking std stream. Without a runtime there is no bounded connect to run,
+/// so the failure is named instead of blocking the caller.
 fn connect_bounded(path: &Path, budget: Duration) -> Result<UnixStream, StallError> {
-    let path = path.to_owned();
-    let (sender, receiver) = mpsc::channel();
+    let handle = Handle::try_current()
+        .map_err(|_| StallError::Io("host connect needs a tokio runtime".into()))?;
 
-    std::thread::spawn(move || {
-        let connected = SocketAddr::from_pathname(&path)
-            .map_err(|error| StallError::Io(format!("host socket address: {error}")))
-            .and_then(|address| {
-                UnixStream::connect_addr(&address)
-                    .map_err(|error| StallError::Io(format!("connecting to host socket: {error}")))
-            });
+    let connected =
+        handle.block_on(async { timeout(budget, AsyncUnixStream::connect(path)).await });
 
-        let _ = sender.send(connected);
-    });
+    let stream = connected.map_err(|_| StallError::Timeout)?;
+    let stream = stream
+        .map_err(|error| StallError::Io(format!("connecting to host socket: {error}")))?
+        .into_std()
+        .map_err(|error| StallError::Io(format!("host socket conversion: {error}")))?;
 
-    receiver
-        .recv_timeout(budget)
-        .map_err(|_| StallError::Timeout)?
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| StallError::Io(format!("host socket blocking mode: {error}")))?;
+
+    Ok(stream)
 }
 
 impl Transport for HostTransport {
@@ -244,17 +246,31 @@ fn host_start_stall(line: &[u8], id: u64) -> Result<String, StallError> {
 
 /// Turn a JSON-RPC error into a named failure that keeps barn's reason.
 fn host_error(error: &Value) -> StallError {
-    if error.get("message").and_then(Value::as_str) != Some("denied")
-        || error.get("code").and_then(Value::as_i64) != Some(i64::from(DENIED_CODE))
+    if error.get("message").and_then(Value::as_str) == Some("denied")
+        && error.get("code").and_then(Value::as_i64) == Some(i64::from(DENIED_CODE))
     {
-        return StallError::Io("host.start returned an unknown error".into());
+        return error
+            .get("data")
+            .and_then(|data| data.get("reason"))
+            .and_then(Value::as_str)
+            .map_or(StallError::Malformed, denied);
     }
 
-    error
-        .get("data")
-        .and_then(|data| data.get("reason"))
+    unknown_error(error)
+}
+
+/// Name a non-denial error by its code and message, never as an answer.
+fn unknown_error(error: &Value) -> StallError {
+    let code = error.get("code").and_then(Value::as_i64);
+    let message = error
+        .get("message")
         .and_then(Value::as_str)
-        .map_or(StallError::Malformed, denied)
+        .unwrap_or("missing message");
+
+    code.map_or_else(
+        || StallError::Io(format!("host error: {message}")),
+        |code| StallError::Io(format!("host error {code}: {message}")),
+    )
 }
 
 /// Preserve each named denial reason in the error's text; never allow.
@@ -285,38 +301,56 @@ fn check_line_len(length: usize) -> Result<(), StallError> {
 /// Framed lines carry bodies inline; no body may pass the 4 MiB cap.
 fn body_within_cap(line: &str) -> Result<(), StallError> {
     let message: Value = serde_json::from_str(line).map_err(|_| StallError::Malformed)?;
-    let body = message
-        .get("body")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let bodies = [
+        message.get("body"),
+        message.get("call").and_then(|call| call.get("input")),
+    ];
 
-    if body.len() > DEFAULT_MAX_BODY_BYTES {
-        return Err(StallError::Io(format!(
-            "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
-        )));
-    }
-
-    let input = message
-        .get("call")
-        .and_then(|call| call.get("input"))
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|error| StallError::Io(format!("encoding call.input: {error}")))?;
-
-    if input.is_some_and(|encoded| encoded.len() > DEFAULT_MAX_BODY_BYTES) {
-        return Err(StallError::Io(format!(
-            "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
-        )));
+    for body in bodies.into_iter().flatten() {
+        if serialized_len(body)? > DEFAULT_MAX_BODY_BYTES {
+            return Err(StallError::Io(format!(
+                "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+            )));
+        }
     }
 
     Ok(())
 }
 
-/// Read one bounded line without consuming bytes past its newline.
-fn read_line<R: BufRead>(reader: &mut R, into: &mut Vec<u8>) -> Result<(), StallError> {
+/// Measure a body's serialized JSON, whatever shape its value has.
+fn serialized_len(body: &Value) -> Result<usize, StallError> {
+    let encoded = serde_json::to_string(body)
+        .map_err(|error| StallError::Io(format!("encoding body: {error}")))?;
+
+    Ok(encoded.len())
+}
+
+/// A reader whose blocking waits can be capped to the time left in a call.
+trait ReadTimeout {
+    fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), StallError>;
+}
+
+impl ReadTimeout for BufReader<UnixStream> {
+    fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
+        self.get_mut()
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| StallError::Io(format!("host read timeout: {error}")))
+    }
+}
+
+/// Read one bounded line without consuming bytes past its newline. The wait
+/// for each chunk is capped by the time left in the whole call, so a peer that
+/// drips bytes cannot outlive the deadline.
+fn read_line<R: BufRead + ReadTimeout>(
+    reader: &mut R,
+    into: &mut Vec<u8>,
+    deadline: Instant,
+) -> Result<(), StallError> {
     into.clear();
 
     loop {
+        reader.set_read_timeout(remaining(deadline)?)?;
+
         let available = match reader.fill_buf() {
             Ok(available) => available,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -374,7 +408,7 @@ fn write_line(stream: &mut UnixStream, line: &str) -> Result<(), StallError> {
     Ok(())
 }
 
-/// A framed reply carrying a denial is a failure, never a pass-through allow.
+/// Any JSON-RPC error reply is a failure, never a pass-through allow.
 fn refused_frame(answer: &str) -> Result<(), StallError> {
     let message: Value = match serde_json::from_str(answer) {
         Ok(message) => message,
@@ -384,20 +418,18 @@ fn refused_frame(answer: &str) -> Result<(), StallError> {
         return Ok(());
     };
 
-    if error.get("code").and_then(Value::as_i64) == Some(i64::from(DENIED_CODE)) {
-        return Err(host_error(error));
-    }
-
-    Ok(())
+    Err(host_error(error))
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::io::Cursor;
+    use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -416,6 +448,12 @@ mod tests {
         line.push(b'\n');
 
         line
+    }
+
+    impl ReadTimeout for Cursor<Vec<u8>> {
+        fn set_read_timeout(&mut self, _timeout: Duration) -> Result<(), StallError> {
+            Ok(())
+        }
     }
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -527,13 +565,74 @@ mod tests {
         bytes.push(b'\n');
         let mut reader = Cursor::new(bytes);
         let mut line = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
 
         assert_eq!(
-            read_line(&mut reader, &mut line),
+            read_line(&mut reader, &mut line, deadline),
             Err(StallError::Io(format!(
                 "line exceeds {MAX_LINE_BYTES} bytes"
             )))
         );
+    }
+
+    // A peer that hands out one byte per fill, then reports that the socket
+    // read timed out. Each fill records the timeout it was given.
+    struct DripReader {
+        bytes: Vec<u8>,
+        index: usize,
+        timeouts: Vec<Duration>,
+    }
+
+    impl DripReader {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                index: 0,
+                timeouts: Vec::new(),
+            }
+        }
+    }
+
+    impl ReadTimeout for DripReader {
+        fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
+            self.timeouts.push(timeout);
+
+            Ok(())
+        }
+    }
+
+    impl Read for DripReader {
+        fn read(&mut self, _into: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl BufRead for DripReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.index >= self.bytes.len() {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+
+            Ok(&self.bytes[self.index..self.index.saturating_add(1)])
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.index = self.index.saturating_add(amount);
+        }
+    }
+
+    #[test]
+    fn a_dripping_peer_cannot_outlive_the_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut reader = DripReader::new(b"partial".to_vec());
+        let mut line = Vec::new();
+
+        assert_eq!(
+            read_line(&mut reader, &mut line, deadline),
+            Err(StallError::Timeout)
+        );
+        assert_eq!(reader.timeouts.len(), 8);
+        assert!(reader.timeouts.windows(2).all(|pair| pair[1] <= pair[0]));
     }
 
     #[test]
@@ -586,8 +685,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_call_uses_the_fake_host_endpoint() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_uses_the_fake_host_endpoint() {
         let dir = TempDir::new();
         let socket = dir.path().join("host.sock");
         let host = fake_host(&socket, CALL_REPLY);
@@ -597,7 +696,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
 
         assert_eq!(
-            transport.call(CALL_FRAME, deadline),
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
             Ok(CALL_REPLY.to_owned())
         );
         host.join().unwrap();
@@ -626,8 +725,8 @@ mod tests {
         })
     }
 
-    #[test]
-    fn a_failed_handshake_latches_and_never_reconnects() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_handshake_latches_and_never_reconnects() {
         let dir = TempDir::new();
         let socket = dir.path().join("host.sock");
         let (signal, checked) = mpsc::channel();
@@ -637,11 +736,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
 
         assert_eq!(
-            transport.call(CALL_FRAME, deadline),
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
             Err(StallError::Malformed)
         );
         assert_eq!(
-            transport.call(CALL_FRAME, deadline),
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
             Err(StallError::Io("host handshake failed; no retry".into()))
         );
 
@@ -679,8 +778,8 @@ mod tests {
         })
     }
 
-    #[test]
-    fn a_mid_call_failure_drops_the_stream_and_never_reuses_it() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mid_call_failure_drops_the_stream_and_never_reuses_it() {
         let dir = TempDir::new();
         let socket = dir.path().join("host.sock");
         let (signal, checked) = mpsc::channel();
@@ -690,12 +789,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
 
         assert_eq!(
-            transport.call(CALL_FRAME, deadline),
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
             Err(StallError::Closed)
         );
         assert!(transport.stream.is_none());
         assert_eq!(
-            transport.call(CALL_FRAME, deadline),
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
             Err(StallError::Io("host handshake failed; no retry".into()))
         );
 
@@ -741,6 +840,77 @@ mod tests {
             body_within_cap(&framed_input(input.len())),
             Err(StallError::Io(format!(
                 "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+            )))
+        );
+    }
+
+    #[test]
+    fn an_object_body_at_the_cap_is_accepted() {
+        let empty = json!({ "k": "" });
+        let padding = DEFAULT_MAX_BODY_BYTES.saturating_sub(serialized_len(&empty).unwrap());
+        let body = json!({ "k": "x".repeat(padding) });
+        let measured = serialized_len(&body);
+        let line = json!({ "body": body }).to_string();
+
+        assert_eq!(measured, Ok(DEFAULT_MAX_BODY_BYTES));
+        assert_eq!(body_within_cap(&line), Ok(()));
+    }
+
+    #[test]
+    fn an_object_body_over_the_cap_is_rejected() {
+        let empty = json!({ "k": "" });
+        let padding = DEFAULT_MAX_BODY_BYTES
+            .saturating_add(1)
+            .saturating_sub(serialized_len(&empty).unwrap());
+        let body = json!({ "k": "x".repeat(padding) });
+        let measured = serialized_len(&body);
+        let line = json!({ "body": body }).to_string();
+
+        assert_eq!(measured, Ok(DEFAULT_MAX_BODY_BYTES.saturating_add(1)));
+        assert_eq!(
+            body_within_cap(&line),
+            Err(StallError::Io(format!(
+                "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+            )))
+        );
+    }
+
+    #[test]
+    fn a_non_denial_error_reply_is_not_an_answer() {
+        let answer = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "error": {
+                "code": -32_600,
+                "message": "Method not found",
+            },
+        })
+        .to_string();
+
+        assert_eq!(
+            refused_frame(&answer),
+            Err(StallError::Io("host error -32600: Method not found".into()))
+        );
+    }
+
+    #[test]
+    fn a_denial_error_reply_keeps_its_named_reason() {
+        let answer = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "error": {
+                "code": DENIED_CODE,
+                "message": "denied",
+                "data": { "reason": deny::TOKEN_MISMATCH },
+            },
+        })
+        .to_string();
+
+        assert_eq!(
+            refused_frame(&answer),
+            Err(StallError::Io(format!(
+                "host.start denied: {}",
+                deny::TOKEN_MISMATCH
             )))
         );
     }
