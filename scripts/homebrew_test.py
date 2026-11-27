@@ -46,13 +46,17 @@ class FormulaTests(unittest.TestCase):
         self.assertIn("    on_intel do", block)
         self.assertIn("    end", block)
 
+        intel_opener = block.index("    on_intel do")
+        intel_closing = block.index("    end", intel_opener + 1)
+        intel_block = block[intel_opener + 1:intel_closing]
+
         url = f"/releases/download/v{RELEASE}/{NAMES[2]}"
-        nested_url = [text for text in block if text.startswith("      url ")]
+        nested_url = [text for text in intel_block if text.startswith("      url ")]
         self.assertTrue(
             any(url in text for text in nested_url),
             "Linux url is not indented inside on_intel",
         )
-        self.assertIn(f'      sha256 "{SUMS[2]}"', block)
+        self.assertIn(f'      sha256 "{SUMS[2]}"', intel_block)
 
         for rendered in block:
             self.assertFalse(rendered.startswith("    url "))
