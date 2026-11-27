@@ -170,14 +170,14 @@ fn handle(request: &Request, client: &Mutex<Stall>) -> Reply {
 /// Emit the named verdict line the conformance logs expect for a good reply.
 fn log_verdict(request: &Request, reply: &Reply) {
     match (request, reply) {
-        (_, Reply::Hook { outcome, .. }) => match outcome {
-            Outcome::Allow => eprintln!("tack-daemon: hook toolBefore allow"),
+        (Request::Hook { hook, .. }, Reply::Hook { outcome, .. }) => match outcome {
+            Outcome::Allow => eprintln!("tack-daemon: hook {hook} allow"),
             Outcome::Deny { reason } => {
-                eprintln!("tack-daemon: hook toolBefore deny {reason}");
+                eprintln!("tack-daemon: hook {hook} deny {reason}");
             }
-            Outcome::Rewrite { .. } => eprintln!("tack-daemon: hook toolBefore rewrite"),
-            Outcome::Annotate { .. } => eprintln!("tack-daemon: hook toolBefore annotate"),
-            Outcome::Drop => eprintln!("tack-daemon: hook toolBefore drop"),
+            Outcome::Rewrite { .. } => eprintln!("tack-daemon: hook {hook} rewrite"),
+            Outcome::Annotate { .. } => eprintln!("tack-daemon: hook {hook} annotate"),
+            Outcome::Drop => eprintln!("tack-daemon: hook {hook} drop"),
         },
         (Request::Tool { name, .. }, Reply::Tool { .. }) => {
             eprintln!("tack-daemon: tool {name} ok");
