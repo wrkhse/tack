@@ -337,6 +337,8 @@ fn body_within_cap(line: &str) -> Result<(), StallError> {
         message.get("result").and_then(|result| result.get("body")),
         message.get("content"),
         message.get("outcome"),
+        message.get("error"),
+        message.get("message"),
     ];
 
     for body in bodies.into_iter().flatten() {
@@ -1389,6 +1391,25 @@ mod tests {
         let line = json!({ "body": body }).to_string();
 
         assert_eq!(measured, Ok(DEFAULT_MAX_BODY_BYTES.saturating_add(1)));
+        assert_eq!(
+            body_within_cap(&line),
+            Err(StallError::Io(format!(
+                "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+            )))
+        );
+    }
+
+    #[test]
+    fn an_oversize_framed_error_is_rejected() {
+        let text = "x".repeat(DEFAULT_MAX_BODY_BYTES.saturating_add(1));
+        let line = json!({
+            "type": "error",
+            "id": 22,
+            "error": "limit",
+            "message": text,
+        })
+        .to_string();
+
         assert_eq!(
             body_within_cap(&line),
             Err(StallError::Io(format!(

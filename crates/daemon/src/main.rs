@@ -167,18 +167,38 @@ fn handle(request: &Request, client: &Mutex<Stall>) -> Reply {
     reply
 }
 
+/// Escape control characters in a request-supplied hook name so they cannot
+/// forge or split the single-line verdict log. Ordinary names pass unchanged.
+fn log_safe_hook(hook: &str) -> String {
+    let mut safe = String::with_capacity(hook.len());
+
+    for ch in hook.chars() {
+        if ch.is_control() {
+            safe.push_str(&format!("\\u{{{ch:x}}}"));
+        } else {
+            safe.push(ch);
+        }
+    }
+
+    safe
+}
+
 /// Emit the named verdict line the conformance logs expect for a good reply.
 fn log_verdict(request: &Request, reply: &Reply) {
     match (request, reply) {
-        (Request::Hook { hook, .. }, Reply::Hook { outcome, .. }) => match outcome {
-            Outcome::Allow => eprintln!("tack-daemon: hook {hook} allow"),
-            Outcome::Deny { reason } => {
-                eprintln!("tack-daemon: hook {hook} deny {reason}");
+        (Request::Hook { hook, .. }, Reply::Hook { outcome, .. }) => {
+            let hook = log_safe_hook(hook);
+
+            match outcome {
+                Outcome::Allow => eprintln!("tack-daemon: hook {hook} allow"),
+                Outcome::Deny { reason } => {
+                    eprintln!("tack-daemon: hook {hook} deny {reason}");
+                }
+                Outcome::Rewrite { .. } => eprintln!("tack-daemon: hook {hook} rewrite"),
+                Outcome::Annotate { .. } => eprintln!("tack-daemon: hook {hook} annotate"),
+                Outcome::Drop => eprintln!("tack-daemon: hook {hook} drop"),
             }
-            Outcome::Rewrite { .. } => eprintln!("tack-daemon: hook {hook} rewrite"),
-            Outcome::Annotate { .. } => eprintln!("tack-daemon: hook {hook} annotate"),
-            Outcome::Drop => eprintln!("tack-daemon: hook {hook} drop"),
-        },
+        }
         (Request::Tool { name, .. }, Reply::Tool { .. }) => {
             eprintln!("tack-daemon: tool {name} ok");
         }
@@ -450,6 +470,17 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
+
+    #[test]
+    fn a_control_character_in_a_hook_name_is_escaped_for_the_log() {
+        assert_eq!(log_safe_hook("PreToolUse"), "PreToolUse");
+
+        let escaped = log_safe_hook("Pre\nTool\rUse\u{1b}");
+
+        assert_eq!(escaped, "Pre\\u{a}Tool\\u{d}Use\\u{1b}");
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains('\r'));
+    }
 
     #[tokio::test]
     async fn a_socket_outside_the_state_dir_returns_usage() {
