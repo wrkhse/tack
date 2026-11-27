@@ -1095,6 +1095,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_matching_id_without_a_result_is_not_an_answer() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let reply = r#"{"jsonrpc":"2.0","id":22}"#;
+        let host = fake_host(&socket, reply);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Malformed)
+        );
+        host.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_reply_with_a_foreign_id_is_not_an_answer() {
         let dir = TempDir::new();
         let socket = dir.path().join("host.sock");
