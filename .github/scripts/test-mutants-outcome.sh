@@ -61,7 +61,7 @@ set -e
 
 [ "$c_status" -ne 0 ]
 [ ! -e "$tmp/c/outcomes.json" ]
-grep -Fq 'cargo mutants exited 7 without writing' "$tmp/c.out"
+grep -Fq 'cargo mutants exited 7; its outcome cannot be used' "$tmp/c.out"
 printf 'ok: nonzero exit fails with a named reason\n'
 
 # A missing exact line with no outcomes fails with a named reason.
