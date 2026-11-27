@@ -139,27 +139,43 @@ jobs:
     # The deploy key and the token reach only the steps that use them, so the
     # formula script and Homebrew's audit, install and test never see either.
     steps:
-      - name: Require the tap's dedicated write key
+      - name: Check whether the tap key is available
+        id: tap_key
+        shell: bash
         env:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
-        run: test -n "$TAP_DEPLOY_KEY"
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$TAP_DEPLOY_KEY" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "TAP_DEPLOY_KEY not set; formula left for a tap PR" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.tap_key.outputs.present == 'true'
         with:
           persist-credentials: false
       # The tap is public, so it is read without the key; only the push uses it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.tap_key.outputs.present == 'true'
         with:
           repository: wrkhse/homebrew-tap
           persist-credentials: false
           path: tap
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: steps.tap_key.outputs.present == 'true'
         with:
           python-version: 3.13
       - name: Download the published checksums
+        if: steps.tap_key.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --dir checksums
       - name: Generate the formula from the published checksums
+        if: steps.tap_key.outputs.present == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -167,6 +183,7 @@ jobs:
           python3 scripts/homebrew.py "${GITHUB_REF_NAME#v}" checksums/SHA256SUMS \
             > tap/Formula/tack.rb
       - name: Audit, install and test the real formula
+        if: steps.tap_key.outputs.present == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -180,6 +197,7 @@ jobs:
           brew install --formula wrkhse/tap/tack
           brew test wrkhse/tap/tack
       - name: Publish the formula
+        if: steps.tap_key.outputs.present == 'true'
         working-directory: tap
         env:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
