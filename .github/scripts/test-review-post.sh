@@ -662,7 +662,7 @@ jq -e --arg footer "$footer" '.body
 ' "$tmp/comment-payload.json" > /dev/null
 printf 'ok: marker comment strips an arbitrary trailing run footer\n'
 
-events "$(reply "$fix_first" "$findings" 'Review summary.')" > "$tmp/events.jsonl"
+events "$(reply "$merge_as_is" '[]' 'Review summary.')" > "$tmp/events.jsonl"
 expect_posted 'fixture/reviewer'
 jq -e --arg model 'fixture/reviewer' '
   .body | split("\n")
