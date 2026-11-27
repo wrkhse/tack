@@ -35,6 +35,33 @@ class FormulaTests(unittest.TestCase):
             self.assertIn(f"/releases/download/v{RELEASE}/{name}", ruby)
             self.assertIn(f'sha256 "{SUMS[i]}"', ruby)
 
+    def test_nests_linux_url_inside_on_intel(self):
+        ruby = formula(RELEASE, parse_sums(good_sums()))
+        lines = ruby.splitlines()
+
+        opener = lines.index("  on_linux do")
+        closing = lines.index("  end", opener + 1)
+        block = lines[opener:closing + 1]
+
+        self.assertIn("    on_intel do", block)
+        self.assertIn("    end", block)
+
+        intel_opener = block.index("    on_intel do")
+        intel_closing = block.index("    end", intel_opener + 1)
+        intel_block = block[intel_opener + 1:intel_closing]
+
+        url = f"/releases/download/v{RELEASE}/{NAMES[2]}"
+        nested_url = [text for text in intel_block if text.startswith("      url ")]
+        self.assertTrue(
+            any(url in text for text in nested_url),
+            "Linux url is not indented inside on_intel",
+        )
+        self.assertIn(f'      sha256 "{SUMS[2]}"', intel_block)
+
+        for rendered in block:
+            self.assertFalse(rendered.startswith("    url "))
+            self.assertFalse(rendered.startswith("    sha256 "))
+
     def test_renders_ruby_interpolation_not_javascript(self):
         ruby = formula(RELEASE, parse_sums(good_sums()))
 
