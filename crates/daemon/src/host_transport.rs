@@ -664,8 +664,9 @@ mod tests {
         );
     }
 
-    // A peer that hands out one byte per fill, then reports that the socket
-    // read timed out. Each fill records the timeout it was given.
+    // A peer that hands out one byte per fill, pausing briefly each time,
+    // then reports that the socket read timed out. Each fill records the
+    // timeout it was given.
     struct DripReader {
         bytes: Vec<u8>,
         index: usize,
@@ -702,6 +703,8 @@ mod tests {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
 
+            thread::sleep(Duration::from_millis(10));
+
             Ok(&self.bytes[self.index..self.index.saturating_add(1)])
         }
 
@@ -713,15 +716,16 @@ mod tests {
     #[test]
     fn a_dripping_peer_cannot_outlive_the_deadline() {
         let deadline = Instant::now() + Duration::from_secs(1);
+        let bound = Duration::from_millis(1_100);
         let mut reader = DripReader::new(b"partial".to_vec());
         let mut line = Vec::new();
 
-        assert_eq!(
-            read_line(&mut reader, &mut line, deadline),
-            Err(StallError::Timeout)
-        );
-        assert_eq!(reader.timeouts.len(), 8);
-        assert!(reader.timeouts.windows(2).all(|pair| pair[1] <= pair[0]));
+        let started = Instant::now();
+        let outcome = read_line(&mut reader, &mut line, deadline);
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome, Err(StallError::Timeout));
+        assert!(elapsed <= bound);
     }
 
     // A socket stand-in that records every timeout the transport applies.
@@ -835,24 +839,30 @@ mod tests {
         })
         .to_string();
         let deadline = Instant::now() + Duration::from_millis(250);
+        // Keep the wait tight: one long socket timeout would miss the deadline.
+        let bound = Duration::from_millis(750);
 
         let (result_tx, result_rx) = mpsc::channel();
+        let started = Instant::now();
         let caller = thread::spawn(move || {
             let outcome = transport.call(&frame, deadline);
             let _ = result_tx.send(outcome);
         });
 
-        let outcome = result_rx.recv_timeout(Duration::from_secs(5));
+        let outcome = result_rx.recv_timeout(bound);
+        let elapsed = started.elapsed();
 
         let _ = hold_tx.send(());
         holder.join().unwrap();
         caller.join().unwrap();
 
         assert_eq!(outcome, Ok(Err(StallError::Timeout)));
+        assert!(elapsed <= bound);
     }
 
-    // A writer that fails its first write with a scripted kind, records each
-    // deadline-derived write timeout, then accepts the rest of the line.
+    // A writer that pauses briefly, fails its first write with a scripted
+    // kind, records each deadline-derived write timeout, then accepts the
+    // rest of the line.
     struct FailingWriter {
         written: Vec<u8>,
         first_error: Option<io::ErrorKind>,
@@ -872,6 +882,8 @@ mod tests {
     impl Write for FailingWriter {
         fn write(&mut self, chunk: &[u8]) -> io::Result<usize> {
             if let Some(kind) = self.first_error.take() {
+                thread::sleep(Duration::from_millis(10));
+
                 return Err(kind.into());
             }
 
@@ -912,7 +924,7 @@ mod tests {
                 .iter()
                 .all(|applied| !applied.is_zero() && *applied <= Duration::from_secs(5))
         );
-        assert!(writer.timeouts.windows(2).all(|pair| pair[1] <= pair[0]));
+        assert!(writer.timeouts.windows(2).all(|pair| pair[1] < pair[0]));
     }
 
     #[test]
