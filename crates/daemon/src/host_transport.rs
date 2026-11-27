@@ -5,6 +5,7 @@
 //! latches the transport: no boundary failure is ever retried or turned into
 //! an allow.
 
+use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -23,10 +24,20 @@ use crate::stall::{StallError, Transport};
 
 /// The two plain values barn supplies at stall start: the path of its host
 /// socket and the single-use token tack authenticates with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HostEndpoint {
     pub socket_path: PathBuf,
     pub token: String,
+}
+
+impl fmt::Debug for HostEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostEndpoint")
+            .field("socket_path", &self.socket_path)
+            .field("token", &"[redacted]")
+            .finish()
+    }
 }
 
 impl HostEndpoint {
@@ -62,6 +73,8 @@ impl HostTransport {
 
     /// Run one validated call on the connection, opening it on first use.
     fn call_once(&mut self, request: &str, deadline: Instant) -> Result<String, StallError> {
+        let id = request_id(request)?;
+
         if self.stream.is_none() {
             self.handshake(deadline)?;
         }
@@ -69,7 +82,7 @@ impl HostTransport {
         let reader = self.stream.as_mut().ok_or(StallError::Malformed)?;
         let timeout = remaining(deadline)?;
         set_timeouts(reader.get_mut(), timeout)?;
-        write_line(reader.get_mut(), request)?;
+        write_line(reader.get_mut(), request, deadline)?;
 
         let mut reply = Vec::new();
         read_line(reader, &mut reply, deadline)?;
@@ -77,7 +90,7 @@ impl HostTransport {
         let text = std::str::from_utf8(&reply).map_err(|_| StallError::Malformed)?;
         body_within_cap(text)?;
         let answer = text.strip_suffix('\n').unwrap_or(text);
-        refused_frame(answer)?;
+        refused_frame(answer, id)?;
 
         Ok(answer.to_owned())
     }
@@ -103,7 +116,7 @@ impl HostTransport {
 
         let request = host_start_line(id, &self.endpoint.token)?;
         check_line_len(request.len())?;
-        write_line(reader.get_mut(), &request)?;
+        write_line(reader.get_mut(), &request, deadline)?;
 
         let mut reply = Vec::new();
         read_line(&mut reader, &mut reply, deadline)?;
@@ -320,6 +333,8 @@ fn body_within_cap(line: &str) -> Result<(), StallError> {
     let bodies = [
         message.get("body"),
         message.get("call").and_then(|call| call.get("input")),
+        message.get("result"),
+        message.get("result").and_then(|result| result.get("body")),
     ];
 
     for body in bodies.into_iter().flatten() {
@@ -411,28 +426,76 @@ fn read_error(error: &io::Error) -> StallError {
     }
 }
 
-fn write_line(stream: &mut UnixStream, line: &str) -> Result<(), StallError> {
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|error| StallError::Io(format!("writing host socket: {error}")))?;
-    stream
-        .flush()
-        .map_err(|error| StallError::Io(format!("flushing host socket: {error}")))?;
+/// Write one whole line inside the call's deadline. Every chunk gets a write
+/// timeout sized to the time left, so a slow-draining host cannot hold the
+/// caller past the deadline.
+fn write_line<S: Write + SocketTimeouts>(
+    stream: &mut S,
+    line: &str,
+    deadline: Instant,
+) -> Result<(), StallError> {
+    let bytes = line.as_bytes();
+    let mut written = 0;
+
+    while written < bytes.len() {
+        SocketTimeouts::set_write_timeout(stream, remaining(deadline)?)?;
+
+        let chunk = bytes.get(written..).ok_or(StallError::Malformed)?;
+        let count = match stream.write(chunk) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(write_error(&error)),
+        };
+
+        if count == 0 {
+            return Err(StallError::Closed);
+        }
+
+        written = written.saturating_add(count);
+    }
 
     Ok(())
 }
 
-/// Any JSON-RPC error reply is a failure, never a pass-through allow.
-fn refused_frame(answer: &str) -> Result<(), StallError> {
+fn write_error(error: &io::Error) -> StallError {
+    match error.kind() {
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => StallError::Timeout,
+        _ => StallError::Io(format!("writing host socket: {error}")),
+    }
+}
+
+/// The id a framed request expects on its reply. Requests are checked before
+/// this point, so an unreadable id is a boundary failure.
+fn request_id(request: &str) -> Result<u64, StallError> {
+    let message: Value = serde_json::from_str(request).map_err(|_| StallError::Malformed)?;
+
+    message
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or(StallError::Malformed)
+}
+
+/// A reply succeeds only with the request's id and an explicit `result`. An
+/// error reply keeps its named failure, never a pass-through allow.
+fn refused_frame(answer: &str, id: u64) -> Result<(), StallError> {
     let message: Value = match serde_json::from_str(answer) {
         Ok(message) => message,
         Err(_) => return Err(StallError::Malformed),
     };
-    let Some(error) = message.get("error") else {
-        return Ok(());
-    };
 
-    Err(host_error(error))
+    if message.get("id").and_then(Value::as_u64) != Some(id) {
+        return Err(StallError::Malformed);
+    }
+
+    if let Some(error) = message.get("error") {
+        return Err(host_error(error));
+    }
+
+    if message.get("result").is_none() {
+        return Err(StallError::Malformed);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -503,7 +566,8 @@ mod tests {
 
     // A one-shot fake host: check the start line, answer it, then answer the
     // framed call made on the same connection.
-    fn fake_host(socket: &Path, reply: &'static str) -> thread::JoinHandle<()> {
+    fn fake_host(socket: &Path, reply: impl Into<String>) -> thread::JoinHandle<()> {
+        let reply = reply.into();
         let listener = UnixListener::bind(socket).unwrap();
 
         thread::spawn(move || {
@@ -543,6 +607,17 @@ mod tests {
         );
 
         assert_eq!(host_start_line(HOST_START_ID, TOKEN), Ok(expected));
+    }
+
+    #[test]
+    fn host_endpoint_debug_hides_the_token_but_shows_the_path() {
+        let path = "/tmp/tack-host-redaction.sock";
+        let endpoint = HostEndpoint::new(PathBuf::from(path), TOKEN.to_owned());
+
+        let debug = format!("{endpoint:?}");
+
+        assert!(!debug.contains(TOKEN));
+        assert!(debug.contains(path));
     }
 
     #[test]
@@ -739,6 +814,131 @@ mod tests {
         assert_eq!(outcome, Ok(Err(StallError::Timeout)));
     }
 
+    #[test]
+    fn a_write_that_cannot_finish_returns_timeout() {
+        let (peer, client) = UnixStream::pair().unwrap();
+        let (hold_tx, hold_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let _ = hold_rx.recv();
+            drop(peer);
+        });
+
+        let endpoint = HostEndpoint::new(PathBuf::from("unused.sock"), TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        transport.stream = Some(BufReader::new(client));
+
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "stall.call",
+            "params": { "pad": "x".repeat(DEFAULT_MAX_BODY_BYTES) },
+        })
+        .to_string();
+        let deadline = Instant::now() + Duration::from_millis(250);
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            let outcome = transport.call(&frame, deadline);
+            let _ = result_tx.send(outcome);
+        });
+
+        let outcome = result_rx.recv_timeout(Duration::from_secs(5));
+
+        let _ = hold_tx.send(());
+        holder.join().unwrap();
+        caller.join().unwrap();
+
+        assert_eq!(outcome, Ok(Err(StallError::Timeout)));
+    }
+
+    // A writer that fails its first write with a scripted kind, records each
+    // deadline-derived write timeout, then accepts the rest of the line.
+    struct FailingWriter {
+        written: Vec<u8>,
+        first_error: Option<io::ErrorKind>,
+        timeouts: Vec<Duration>,
+    }
+
+    impl FailingWriter {
+        fn new(first_error: io::ErrorKind) -> Self {
+            Self {
+                written: Vec::new(),
+                first_error: Some(first_error),
+                timeouts: Vec::new(),
+            }
+        }
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, chunk: &[u8]) -> io::Result<usize> {
+            if let Some(kind) = self.first_error.take() {
+                return Err(kind.into());
+            }
+
+            self.written.extend_from_slice(chunk);
+
+            Ok(chunk.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SocketTimeouts for FailingWriter {
+        fn set_read_timeout(&mut self, _timeout: Duration) -> Result<(), StallError> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
+            self.timeouts.push(timeout);
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_interrupted_write_is_retried_with_a_fresh_deadline_budget() {
+        let line = "{\"jsonrpc\":\"2.0\",\"id\":22,\"result\":{}}\n";
+        let mut writer = FailingWriter::new(io::ErrorKind::Interrupted);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(write_line(&mut writer, line, deadline), Ok(()));
+        assert_eq!(writer.written.as_slice(), line.as_bytes());
+        assert_eq!(writer.timeouts.len(), 2);
+        assert!(
+            writer
+                .timeouts
+                .iter()
+                .all(|applied| !applied.is_zero() && *applied <= Duration::from_secs(5))
+        );
+        assert!(writer.timeouts.windows(2).all(|pair| pair[1] <= pair[0]));
+    }
+
+    #[test]
+    fn a_timed_out_write_is_a_named_timeout() {
+        let line = "call\n";
+        let mut writer = FailingWriter::new(io::ErrorKind::TimedOut);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            write_line(&mut writer, line, deadline),
+            Err(StallError::Timeout)
+        );
+    }
+
+    #[test]
+    fn a_would_block_write_is_a_named_timeout() {
+        let line = "call\n";
+        let mut writer = FailingWriter::new(io::ErrorKind::WouldBlock);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            write_line(&mut writer, line, deadline),
+            Err(StallError::Timeout)
+        );
+    }
+
     // A reader that fails one fill with Interrupted, then yields a full line.
     struct InterruptedOnce {
         remaining: Cursor<Vec<u8>>,
@@ -874,6 +1074,56 @@ mod tests {
         assert_eq!(
             tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
             Ok(CALL_REPLY.to_owned())
+        );
+        host.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_without_a_result_is_not_an_answer() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let host = fake_host(&socket, "{}");
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Malformed)
+        );
+        host.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_matching_id_without_a_result_is_not_an_answer() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let reply = r#"{"jsonrpc":"2.0","id":22}"#;
+        let host = fake_host(&socket, reply);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Malformed)
+        );
+        host.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_with_a_foreign_id_is_not_an_answer() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let reply = r#"{"jsonrpc":"2.0","id":99,"result":{"ok":true}}"#;
+        let host = fake_host(&socket, reply);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Malformed)
         );
         host.join().unwrap();
     }
@@ -1088,7 +1338,7 @@ mod tests {
         .to_string();
 
         assert_eq!(
-            refused_frame(&answer),
+            refused_frame(&answer, 22),
             Err(StallError::Io("host error -32600: Method not found".into()))
         );
     }
@@ -1135,11 +1385,40 @@ mod tests {
         .to_string();
 
         assert_eq!(
-            refused_frame(&answer),
+            refused_frame(&answer, 22),
             Err(StallError::Io(format!(
                 "host.start denied: {}",
                 deny::TOKEN_MISMATCH
             )))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oversize_nested_reply_body_is_refused_by_call() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let text = "x".repeat(DEFAULT_MAX_BODY_BYTES.saturating_add(1));
+        let reply = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "result": {
+                "type": "tool",
+                "id": 22,
+                "content": { "kind": "text", "text": text },
+            },
+        })
+        .to_string();
+        let host = fake_host(&socket, reply);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Io(format!(
+                "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+            )))
+        );
+        host.join().unwrap();
     }
 }
