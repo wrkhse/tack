@@ -58,6 +58,8 @@ jobs:
 
           cargo build --workspace --bins --locked
           echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+      - name: Build barn at the pinned rev
+        run: .github/scripts/install-barn.sh debug
       # tack build writes hook trust into Codex's user config, so the build
       # gets its own throwaway CODEX_HOME, never the runner's.
       - name: Build the adapter

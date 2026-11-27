@@ -120,6 +120,8 @@ jobs:
           export PATH="$bin:$PATH"
           opencode --version
       - run: cargo build --workspace --bins --locked
+      - name: Build barn at the pinned rev
+        run: .github/scripts/install-barn.sh debug
       - run: cargo run --locked -p tack-cli -- build fixtures/safe-push --out dist
       - run: node adapters/opencode/wrapper.test.mjs
       - run: node test/e2e/run.mjs
@@ -148,6 +150,8 @@ jobs:
 
           cargo build --release --locked \
             -p tack-cli -p tack_daemon -p tack-hook
+      - name: Build barn at the pinned rev
+        run: .github/scripts/install-barn.sh release
       # The same packaging and smoke test as release.yml, on every change.
       - name: Smoke test the packaged binaries
         run: |
@@ -159,7 +163,8 @@ jobs:
           tarball="$RUNNER_TEMP/tack-smoke.tar.gz"
           tar -czf "$tarball" \
             -C target/release \
-            tack tack-daemon tack-hook
+            tack tack-daemon tack-hook \
+            barn barn-exec barn-luau-stall
 
           node test/smoke/run.mjs \
             "$tarball" \
