@@ -489,6 +489,7 @@ version = "0.1.0-rc.6"
 dependencies = [
  "barn-stall",
  "rustix",
+ "serde",
  "serde_json",
  "tack-luau",
  "tack_protocol",
