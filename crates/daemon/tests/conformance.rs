@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,7 @@ const TOKEN: &str = "conformance-token";
 const START_REPLY: &str = r#"{"jsonrpc":"2.0","id":21,"result":{"stall":"sourcefed"}}"#;
 const CALL_FRAME: &str = r#"{"jsonrpc":"2.0","id":22,"method":"stall.call","params":{}}"#;
 const HOST_WAIT: Duration = Duration::from_secs(5);
+const CALL_WATCHDOG: Duration = Duration::from_secs(10);
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -105,10 +107,26 @@ fn call_with_reply(reply: &str) -> Result<String, StallError> {
     let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
     let mut transport = HostTransport::new(endpoint);
     let deadline = SystemClock.deadline(Duration::from_secs(5));
+    let handle = tokio::runtime::Handle::current();
 
-    let outcome = tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline));
+    let (result_tx, result_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let _guard = handle.enter();
+        let outcome = tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline));
+        let _ = result_tx.send(outcome);
+    });
+
+    let outcome = match result_rx.recv_timeout(CALL_WATCHDOG) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(StallError::Io(format!(
+                "transport call exceeded {CALL_WATCHDOG:?}: {error}"
+            )));
+        }
+    };
 
     host.join().unwrap();
+    worker.join().unwrap();
 
     outcome
 }

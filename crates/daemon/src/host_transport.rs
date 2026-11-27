@@ -728,6 +728,7 @@ mod tests {
         assert_eq!(outcome, Err(StallError::Timeout));
         assert!(elapsed >= Duration::from_secs(1));
         assert!(elapsed < upper);
+        assert!(reader.timeouts.len() >= 2);
         assert!(
             reader
                 .timeouts
@@ -882,6 +883,12 @@ mod tests {
 
     #[test]
     fn timing_proofs_hold_across_fifty_runs_in_ci() {
+        if std::env::var_os("CI").is_none() {
+            eprintln!("50-run timing proof loop is CI-only; skipping locally");
+
+            return;
+        }
+
         for _ in 0..50 {
             write_timeout_proof();
             drip_deadline_proof();
