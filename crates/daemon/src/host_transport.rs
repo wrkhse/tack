@@ -701,6 +701,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn set_timeouts_applies_both_waits_to_a_real_socket() {
+        let (_peer, mut client) = UnixStream::pair().unwrap();
+        let timeout = Duration::from_millis(50);
+
+        set_timeouts(&mut client, timeout).unwrap();
+
+        assert_eq!(client.read_timeout().unwrap(), Some(timeout));
+        assert_eq!(client.write_timeout().unwrap(), Some(timeout));
+    }
+
+    #[test]
+    fn a_real_socket_read_obeys_the_configured_timeout() {
+        let (peer, mut client) = UnixStream::pair().unwrap();
+        set_timeouts(&mut client, Duration::from_millis(50)).unwrap();
+
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let _ = release_rx.recv();
+            drop(peer);
+        });
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut byte = [0u8; 1];
+            let outcome = client.read(&mut byte).map_err(|error| read_error(&error));
+            let _ = result_tx.send(outcome);
+        });
+
+        let outcome = result_rx.recv_timeout(Duration::from_secs(5));
+
+        let _ = release_tx.send(());
+        holder.join().unwrap();
+        let _ = reader.join();
+
+        assert_eq!(outcome, Ok(Err(StallError::Timeout)));
+    }
+
     // A reader that fails one fill with Interrupted, then yields a full line.
     struct InterruptedOnce {
         remaining: Cursor<Vec<u8>>,
