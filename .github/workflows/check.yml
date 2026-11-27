@@ -152,7 +152,8 @@ jobs:
             -p tack-cli -p tack_daemon -p tack-hook
       - name: Build barn at the pinned rev
         run: .github/scripts/install-barn.sh release
-      # The same packaging and smoke test as release.yml, on every change.
+      # The smoke tarball adds barn, barn-exec and barn-luau-stall so the daemon
+      # can launch a stall; release.yml ships barn as its own separate tarball.
       - name: Smoke test the packaged binaries
         run: |
           set -euo pipefail
