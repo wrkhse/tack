@@ -510,8 +510,7 @@ fn refused_frame(answer: &str, id: u64) -> Result<(), StallError> {
     }
 
     match (kind, outcome, content, error) {
-        ("hook", Some(_), _, _) => Ok(()),
-        ("tool", _, Some(_), _) => Ok(()),
+        ("hook", Some(_), _, _) | ("tool", _, Some(_), _) => Ok(()),
         ("error", _, _, Some(error)) => {
             let name = error.as_str().unwrap_or("unknown");
             let detail = message
