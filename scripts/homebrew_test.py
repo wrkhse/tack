@@ -43,6 +43,12 @@ class FormulaTests(unittest.TestCase):
         self.assertNotIn("${version}", ruby)
         self.assertNotIn("${bin}", ruby)
 
+    def test_does_not_declare_version(self):
+        ruby = formula(RELEASE, parse_sums(good_sums()))
+
+        for rendered in ruby.splitlines():
+            self.assertFalse(rendered.startswith("  version"))
+
     def test_installs_all_three_binaries(self):
         ruby = formula(RELEASE, parse_sums(good_sums()))
 

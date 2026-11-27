@@ -102,7 +102,6 @@ def formula(release, sums):
         "class Tack < Formula",
         f'  desc "{DESC}"',
         f'  homepage "{REPOSITORY}"',
-        f'  version "{release}"',
         '  license "MIT"',
         "",
         "  on_macos do",
