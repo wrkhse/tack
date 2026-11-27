@@ -162,7 +162,9 @@ fn handle(request: &Request, client: &Mutex<Stall>) -> Reply {
         Err(error) => return daemon_error(id, error),
     };
 
-    log_verdict(request, &reply);
+    if let Some(line) = verdict_line(request, &reply) {
+        eprintln!("{line}");
+    }
 
     reply
 }
@@ -181,13 +183,6 @@ fn log_safe(text: &str) -> String {
     }
 
     safe
-}
-
-/// Emit the named verdict line the conformance logs expect for a good reply.
-fn log_verdict(request: &Request, reply: &Reply) {
-    if let Some(line) = verdict_line(request, reply) {
-        eprintln!("{line}");
-    }
 }
 
 /// Format one verdict line, escaping every part the peer can supply.
