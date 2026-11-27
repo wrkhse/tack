@@ -3,7 +3,6 @@
 
 pub mod frames;
 pub mod host_transport;
-pub mod in_process;
 pub mod pipe;
 pub mod stall;
 pub mod transport;
