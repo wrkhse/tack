@@ -664,9 +664,9 @@ mod tests {
         );
     }
 
-    // A peer that hands out one byte per fill, pausing long enough that the
-    // whole call must span its deadline, then reports that the socket read
-    // timed out. Each fill records the timeout it was given.
+    // A peer that hands out one byte per fill, pausing long enough that more
+    // bytes remain when the deadline expires. Each fill records the timeout
+    // it was given.
     struct DripReader {
         bytes: Vec<u8>,
         index: usize,
@@ -719,7 +719,7 @@ mod tests {
             .checked_add(Duration::from_secs(1))
             .unwrap_or(started);
         let upper = Duration::from_secs(3);
-        let mut reader = DripReader::new(b"partial".to_vec());
+        let mut reader = DripReader::new(vec![b'x'; 20]);
         let mut line = Vec::new();
 
         let outcome = read_line(&mut reader, &mut line, deadline);
@@ -728,6 +728,13 @@ mod tests {
         assert_eq!(outcome, Err(StallError::Timeout));
         assert!(elapsed >= Duration::from_secs(1));
         assert!(elapsed < upper);
+        assert!(
+            reader
+                .timeouts
+                .iter()
+                .all(|applied| !applied.is_zero() && *applied <= Duration::from_secs(1))
+        );
+        assert!(reader.timeouts.windows(2).all(|pair| pair[1] < pair[0]));
     }
 
     #[test]
@@ -875,10 +882,6 @@ mod tests {
 
     #[test]
     fn timing_proofs_hold_across_fifty_runs_in_ci() {
-        if std::env::var_os("CI").is_none() {
-            return;
-        }
-
         for _ in 0..50 {
             write_timeout_proof();
             drip_deadline_proof();
