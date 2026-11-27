@@ -40,6 +40,11 @@ git -C "$src" checkout --force "$rev"
 
 # Same target dir as tack, so barn and the daemon share the Cargo.lock-keyed
 # rust-cache entry; a pin bump changes that key and rebuilds both.
+# Drop binaries left here by an earlier build so a cached leftover cannot
+# satisfy the post-build proof.
+for name in barn barn-exec barn-luau-stall; do
+  rm -f -- "$GITHUB_WORKSPACE/target/$profile/$name"
+done
 CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
   cargo build --manifest-path "$src/Cargo.toml" --workspace --bins --locked \
     "${build_args[@]}"
@@ -48,7 +53,7 @@ bin_dir="$GITHUB_WORKSPACE/target/$profile"
 missing=0
 for name in barn barn-exec barn-luau-stall; do
   path="$bin_dir/$name"
-  if [ ! -f "$path" ]; then
+  if [ ! -x "$path" ]; then
     missing=1
     if [ "$name" = "barn-luau-stall" ]; then
       echo "::error::barn-luau-stall-missing: barn rev $rev does not build barn-luau-stall; the pinned rev predates the serve-loop binaries" >&2
