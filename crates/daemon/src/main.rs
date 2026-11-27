@@ -1,7 +1,7 @@
 //! Entry point for the per-user tack daemon.
 
 use std::ffi::OsString;
-use std::fmt;
+use std::fmt::{self, Write};
 use std::io::BufReader;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -174,7 +174,7 @@ fn log_safe_hook(hook: &str) -> String {
 
     for ch in hook.chars() {
         if ch.is_control() {
-            safe.push_str(&format!("\\u{{{:x}}}", u32::from(ch)));
+            let _ = write!(safe, "\\u{{{:x}}}", u32::from(ch));
         } else {
             safe.push(ch);
         }
