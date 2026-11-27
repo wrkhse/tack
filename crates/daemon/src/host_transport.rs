@@ -1439,7 +1439,8 @@ mod tests {
 
     #[test]
     fn a_framed_reply_with_two_body_keys_is_not_an_answer() {
-        let answer = r#"{"type":"hook","id":1,"outcome":"allow","content":{"kind":"text","text":"x"}}"#;
+        let answer =
+            r#"{"type":"hook","id":1,"outcome":"allow","content":{"kind":"text","text":"x"}}"#;
 
         assert_eq!(refused_frame(answer, 1), Err(StallError::Malformed));
     }
