@@ -167,12 +167,12 @@ fn handle(request: &Request, client: &Mutex<Stall>) -> Reply {
     reply
 }
 
-/// Escape control characters in a request-supplied hook name so they cannot
-/// forge or split the single-line verdict log. Ordinary names pass unchanged.
-fn log_safe_hook(hook: &str) -> String {
-    let mut safe = String::with_capacity(hook.len());
+/// Escape control characters in request- or reply-supplied log text so it
+/// cannot forge or split the single-line verdict log. Ordinary text is unchanged.
+fn log_safe(text: &str) -> String {
+    let mut safe = String::with_capacity(text.len());
 
-    for ch in hook.chars() {
+    for ch in text.chars() {
         if ch.is_control() {
             let _ = write!(safe, "\\u{{{:x}}}", u32::from(ch));
         } else {
@@ -185,24 +185,33 @@ fn log_safe_hook(hook: &str) -> String {
 
 /// Emit the named verdict line the conformance logs expect for a good reply.
 fn log_verdict(request: &Request, reply: &Reply) {
+    if let Some(line) = verdict_line(request, reply) {
+        eprintln!("{line}");
+    }
+}
+
+/// Format one verdict line, escaping every part the peer can supply.
+fn verdict_line(request: &Request, reply: &Reply) -> Option<String> {
     match (request, reply) {
         (Request::Hook { hook, .. }, Reply::Hook { outcome, .. }) => {
-            let hook = log_safe_hook(hook);
+            let hook = log_safe(hook);
 
-            match outcome {
-                Outcome::Allow => eprintln!("tack-daemon: hook {hook} allow"),
+            Some(match outcome {
+                Outcome::Allow => format!("tack-daemon: hook {hook} allow"),
                 Outcome::Deny { reason } => {
-                    eprintln!("tack-daemon: hook {hook} deny {reason}");
+                    let reason = log_safe(reason);
+                    format!("tack-daemon: hook {hook} deny {reason}")
                 }
-                Outcome::Rewrite { .. } => eprintln!("tack-daemon: hook {hook} rewrite"),
-                Outcome::Annotate { .. } => eprintln!("tack-daemon: hook {hook} annotate"),
-                Outcome::Drop => eprintln!("tack-daemon: hook {hook} drop"),
-            }
+                Outcome::Rewrite { .. } => format!("tack-daemon: hook {hook} rewrite"),
+                Outcome::Annotate { .. } => format!("tack-daemon: hook {hook} annotate"),
+                Outcome::Drop => format!("tack-daemon: hook {hook} drop"),
+            })
         }
         (Request::Tool { name, .. }, Reply::Tool { .. }) => {
-            eprintln!("tack-daemon: tool {name} ok");
+            let name = log_safe(name);
+            Some(format!("tack-daemon: tool {name} ok"))
         }
-        _ => {}
+        _ => None,
     }
 }
 
@@ -473,13 +482,68 @@ mod tests {
 
     #[test]
     fn a_control_character_in_a_hook_name_is_escaped_for_the_log() {
-        assert_eq!(log_safe_hook("PreToolUse"), "PreToolUse");
+        assert_eq!(log_safe("PreToolUse"), "PreToolUse");
 
-        let escaped = log_safe_hook("Pre\nTool\rUse\u{1b}");
+        let escaped = log_safe("Pre\nTool\rUse\u{1b}");
 
         assert_eq!(escaped, "Pre\\u{a}Tool\\u{d}Use\\u{1b}");
         assert!(!escaped.contains('\n'));
         assert!(!escaped.contains('\r'));
+    }
+
+    #[test]
+    fn a_newline_in_a_deny_reason_is_escaped_into_one_log_line() {
+        let request = Request::Hook {
+            id: 1,
+            version: PROTOCOL_VERSION,
+            hook: "PreToolUse".to_owned(),
+            call: tack_protocol::wire::ToolCall {
+                tool: "guard".to_owned(),
+                name: "check".to_owned(),
+                input: serde_json::json!({}),
+                session_id: None,
+            },
+            _meta: None,
+        };
+        let reply = Reply::Hook {
+            id: 1,
+            version: PROTOCOL_VERSION,
+            outcome: Outcome::Deny {
+                reason: "blocked\nforged tack-daemon: hook x allow".to_owned(),
+            },
+        };
+
+        let line = verdict_line(&request, &reply).expect("a hook verdict has a line");
+
+        assert_eq!(
+            line,
+            "tack-daemon: hook PreToolUse deny blocked\\u{a}forged tack-daemon: hook x allow"
+        );
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\r'));
+    }
+
+    #[test]
+    fn a_newline_in_a_tool_name_is_escaped_into_one_log_line() {
+        let request = Request::Tool {
+            id: 2,
+            version: PROTOCOL_VERSION,
+            name: "check\nforged tack-daemon: hook x allow".to_owned(),
+            input: serde_json::json!({}),
+        };
+        let reply = Reply::Tool {
+            id: 2,
+            version: PROTOCOL_VERSION,
+            content: vec![],
+        };
+
+        let line = verdict_line(&request, &reply).expect("a tool verdict has a line");
+
+        assert_eq!(
+            line,
+            "tack-daemon: tool check\\u{a}forged tack-daemon: hook x allow ok"
+        );
+        assert!(!line.contains('\n'));
     }
 
     #[tokio::test]
