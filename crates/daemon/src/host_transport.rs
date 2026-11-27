@@ -5,7 +5,7 @@
 //! latches the transport: no boundary failure is ever retried or turned into
 //! an allow.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -60,15 +60,8 @@ impl HostTransport {
         }
     }
 
-    /// Run one call on the connection, opening it on first use.
-    fn call_once(&mut self, frame: &str, deadline: Instant) -> Result<String, StallError> {
-        let mut request = String::with_capacity(frame.len().saturating_add(1));
-        request.push_str(frame);
-        request.push('\n');
-
-        check_line_len(request.len())?;
-        body_within_cap(&request)?;
-
+    /// Run one validated call on the connection, opening it on first use.
+    fn call_once(&mut self, request: &str, deadline: Instant) -> Result<String, StallError> {
         if self.stream.is_none() {
             self.handshake(deadline)?;
         }
@@ -76,7 +69,7 @@ impl HostTransport {
         let reader = self.stream.as_mut().ok_or(StallError::Malformed)?;
         let timeout = remaining(deadline)?;
         set_timeouts(reader.get_mut(), timeout)?;
-        write_line(reader.get_mut(), &request)?;
+        write_line(reader.get_mut(), request)?;
 
         let mut reply = Vec::new();
         read_line(reader, &mut reply, deadline)?;
@@ -152,8 +145,10 @@ fn connect_bounded(path: &Path, budget: Duration) -> Result<UnixStream, StallErr
 impl Transport for HostTransport {
     /// Send one framed line and return its single-line reply before `deadline`.
     ///
-    /// Any failure latches the transport: the socket is dropped and no later
-    /// call reconnects or reuses it.
+    /// Local frame checks run before the latching boundary: an oversize line
+    /// or body returns its named error and leaves the connection usable. A
+    /// handshake, connect, or socket I/O failure latches the transport: the
+    /// socket is dropped and no later call reconnects or reuses it.
     ///
     /// # Errors
     ///
@@ -165,7 +160,14 @@ impl Transport for HostTransport {
             return Err(StallError::Io("host handshake failed; no retry".into()));
         }
 
-        match self.call_once(frame, deadline) {
+        let mut request = String::with_capacity(frame.len().saturating_add(1));
+        request.push_str(frame);
+        request.push('\n');
+
+        check_line_len(request.len())?;
+        body_within_cap(&request)?;
+
+        match self.call_once(&request, deadline) {
             Ok(answer) => Ok(answer),
             Err(error) => {
                 self.failed = true;
@@ -190,13 +192,27 @@ fn remaining(deadline: Instant) -> Result<Duration, StallError> {
     Ok(left)
 }
 
-fn set_timeouts(stream: &UnixStream, timeout: Duration) -> Result<(), StallError> {
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| StallError::Io(format!("host read timeout: {error}")))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|error| StallError::Io(format!("host write timeout: {error}")))?;
+/// The two blocking waits a host socket applies to each exchange.
+trait SocketTimeouts {
+    fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), StallError>;
+    fn set_write_timeout(&mut self, timeout: Duration) -> Result<(), StallError>;
+}
+
+impl SocketTimeouts for UnixStream {
+    fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
+        Self::set_read_timeout(self, Some(timeout))
+            .map_err(|error| StallError::Io(format!("host read timeout: {error}")))
+    }
+
+    fn set_write_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
+        Self::set_write_timeout(self, Some(timeout))
+            .map_err(|error| StallError::Io(format!("host write timeout: {error}")))
+    }
+}
+
+fn set_timeouts<S: SocketTimeouts>(stream: &mut S, timeout: Duration) -> Result<(), StallError> {
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
 
     Ok(())
 }
@@ -330,11 +346,9 @@ trait ReadTimeout {
     fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), StallError>;
 }
 
-impl ReadTimeout for BufReader<UnixStream> {
+impl<S: Read + SocketTimeouts> ReadTimeout for BufReader<S> {
     fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
-        self.get_mut()
-            .set_read_timeout(Some(timeout))
-            .map_err(|error| StallError::Io(format!("host read timeout: {error}")))
+        SocketTimeouts::set_read_timeout(self.get_mut(), timeout)
     }
 }
 
@@ -635,6 +649,123 @@ mod tests {
         assert!(reader.timeouts.windows(2).all(|pair| pair[1] <= pair[0]));
     }
 
+    // A socket stand-in that records every timeout the transport applies.
+    struct RecordingSocket {
+        waits: Vec<(bool, Duration)>,
+    }
+
+    impl RecordingSocket {
+        fn new() -> Self {
+            Self { waits: Vec::new() }
+        }
+    }
+
+    impl Read for RecordingSocket {
+        fn read(&mut self, _into: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl SocketTimeouts for RecordingSocket {
+        fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
+            self.waits.push((true, timeout));
+
+            Ok(())
+        }
+
+        fn set_write_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
+            self.waits.push((false, timeout));
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn both_socket_waits_are_bounded_on_every_exchange() {
+        let timeout = Duration::from_secs(3);
+        let mut reader = BufReader::new(RecordingSocket::new());
+
+        set_timeouts(reader.get_mut(), timeout).unwrap();
+        ReadTimeout::set_read_timeout(&mut reader, timeout).unwrap();
+
+        assert_eq!(
+            reader.get_mut().waits,
+            vec![(true, timeout), (false, timeout), (true, timeout)]
+        );
+        assert!(
+            reader
+                .get_mut()
+                .waits
+                .iter()
+                .all(|(_, applied)| !applied.is_zero())
+        );
+    }
+
+    // A reader that fails one fill with Interrupted, then yields a full line.
+    struct InterruptedOnce {
+        remaining: Cursor<Vec<u8>>,
+        interrupted: bool,
+    }
+
+    impl InterruptedOnce {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                remaining: Cursor::new(bytes),
+                interrupted: false,
+            }
+        }
+    }
+
+    impl ReadTimeout for InterruptedOnce {
+        fn set_read_timeout(&mut self, _timeout: Duration) -> Result<(), StallError> {
+            Ok(())
+        }
+    }
+
+    impl Read for InterruptedOnce {
+        fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+            self.remaining.read(into)
+        }
+    }
+
+    impl BufRead for InterruptedOnce {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if !self.interrupted {
+                self.interrupted = true;
+
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+
+            self.remaining.fill_buf()
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.remaining.consume(amount);
+        }
+    }
+
+    #[test]
+    fn an_interrupted_fill_is_retried_and_the_line_is_read() {
+        let line = wire(&json!({ "ok": true }));
+        let mut reader = InterruptedOnce::new(line.clone());
+        let mut into = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(read_line(&mut reader, &mut into, deadline), Ok(()));
+        assert_eq!(into, line);
+    }
+
+    #[test]
+    fn closed_socket_kinds_are_named_closed() {
+        for kind in [
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::BrokenPipe,
+        ] {
+            assert_eq!(read_error(&io::Error::from(kind)), StallError::Closed);
+        }
+    }
+
     #[test]
     fn oversize_frame_is_rejected() {
         let frame = "x".repeat(MAX_LINE_BYTES);
@@ -645,6 +776,13 @@ mod tests {
                 "line exceeds {MAX_LINE_BYTES} bytes"
             )))
         );
+    }
+
+    #[test]
+    fn a_frame_at_the_line_cap_is_accepted() {
+        let frame = "x".repeat(MAX_LINE_BYTES);
+
+        assert_eq!(check_line_len(frame.len()), Ok(()));
     }
 
     #[test]
@@ -723,6 +861,30 @@ mod tests {
                 Err(io::ErrorKind::WouldBlock)
             );
         })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oversize_local_frame_does_not_latch_the_connection() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let host = fake_host(&socket, CALL_REPLY);
+
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let oversize = "x".repeat(MAX_LINE_BYTES);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(&oversize, deadline)),
+            Err(StallError::Io(format!(
+                "line exceeds {MAX_LINE_BYTES} bytes"
+            )))
+        );
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Ok(CALL_REPLY.to_owned())
+        );
+        host.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -890,6 +1052,34 @@ mod tests {
         assert_eq!(
             refused_frame(&answer),
             Err(StallError::Io("host error -32600: Method not found".into()))
+        );
+    }
+
+    #[test]
+    fn a_denied_message_alone_is_a_named_unknown_error() {
+        let error = json!({
+            "code": -32_600,
+            "message": "denied",
+            "data": { "reason": deny::TOKEN_MISMATCH },
+        });
+
+        assert_eq!(
+            host_error(&error),
+            StallError::Io("host error -32600: denied".into())
+        );
+    }
+
+    #[test]
+    fn the_denial_code_alone_is_a_named_unknown_error() {
+        let error = json!({
+            "code": DENIED_CODE,
+            "message": "other",
+            "data": { "reason": deny::TOKEN_MISMATCH },
+        });
+
+        assert_eq!(
+            host_error(&error),
+            StallError::Io(format!("host error {DENIED_CODE}: other"))
         );
     }
 
