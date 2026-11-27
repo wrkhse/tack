@@ -20,6 +20,15 @@ for input in "$MUTANTS_LOG" "$MUTANTS_LIST"; do
   fi
 done
 
+# cargo-mutants logs through a colored tracing formatter. Strip ANSI codes,
+# trim each line, then drop a leading log level so the message can be
+# matched exactly as a whole line.
+normalized=$(mktemp)
+trap 'rm -f -- "$normalized"' EXIT
+sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g' "$MUTANTS_LOG" |
+  sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^(INFO|WARN|ERROR|DEBUG|TRACE)[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+  > "$normalized"
+
 # cargo-mutants --list prints one line per mutant. Blank lines and its own
 # no-mutants diagnostic carry no mutant.
 list_has_mutants() {
@@ -32,7 +41,7 @@ list_has_mutants() {
 }
 
 if [ "$MUTANTS_STATUS" -eq 0 ] \
-    && grep -Fxq 'No mutants to filter' "$MUTANTS_LOG" \
+    && grep -Fxq 'No mutants to filter' "$normalized" \
     && ! list_has_mutants; then
   mkdir -p -- "$(dirname -- "$OUTCOMES")"
   jq -n '{total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0}' > "$OUTCOMES"
@@ -46,7 +55,7 @@ fi
 if [ ! -f "$OUTCOMES" ]; then
   if [ "$MUTANTS_STATUS" -ne 0 ]; then
     echo "::error::cargo mutants exited $MUTANTS_STATUS without writing $OUTCOMES" >&2
-  elif ! grep -Fxq 'No mutants to filter' "$MUTANTS_LOG"; then
+  elif ! grep -Fxq 'No mutants to filter' "$normalized"; then
     echo "::error::cargo mutants did not report 'No mutants to filter' and wrote no $OUTCOMES" >&2
   else
     echo "::error::cargo mutants --list found mutants but wrote no $OUTCOMES" >&2

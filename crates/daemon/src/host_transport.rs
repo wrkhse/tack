@@ -856,7 +856,9 @@ mod tests {
         let deadline = started
             .checked_add(Duration::from_millis(250))
             .unwrap_or(started);
-        let upper = Duration::from_secs(3);
+        // One 1 s wait separates the supplied 250 ms deadline from the
+        // old 5 s single socket timeout, without matching 250 ms tightly.
+        let upper = Duration::from_secs(1);
 
         let (result_tx, result_rx) = mpsc::channel();
         let caller = thread::spawn(move || {
@@ -882,13 +884,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "run in CI"]
     fn timing_proofs_hold_across_fifty_runs_in_ci() {
-        if std::env::var_os("CI").is_none() {
-            eprintln!("50-run timing proof loop is CI-only; skipping locally");
-
-            return;
-        }
-
         for _ in 0..50 {
             write_timeout_proof();
             drip_deadline_proof();

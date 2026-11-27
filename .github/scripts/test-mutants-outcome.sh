@@ -23,6 +23,18 @@ run_script "$tmp/a.out" 0 "$tmp/a.log" "$tmp/a.list" \
 grep -Fxq 'zero=true' "$tmp/a.github-output"
 printf 'ok: exact line and empty list write a zero outcome\n'
 
+# The colored INFO prefix that cargo-mutants logs still matches.
+printf '\033[32m INFO\033[0m No mutants to filter\n' > "$tmp/e.log"
+: > "$tmp/e.list"
+run_script "$tmp/e.out" 0 "$tmp/e.log" "$tmp/e.list" \
+  "$tmp/e/outcomes.json" "$tmp/e.github-output"
+
+[ -f "$tmp/e/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/e/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/e.github-output"
+printf 'ok: colored INFO line and empty list write a zero outcome\n'
+
 # A nonempty list with no outcomes fails with a named reason.
 printf 'No mutants to filter\n' > "$tmp/b.log"
 printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/b.list"
