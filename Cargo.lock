@@ -491,7 +491,6 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "tack-luau",
  "tack_protocol",
  "tokio",
 ]
