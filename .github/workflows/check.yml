@@ -39,6 +39,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Run the 50-iteration timing stability proof
+        run: cargo test --workspace --locked -- --ignored timing_proofs_hold_across_fifty_runs_in_ci
 
   # Runs each bounded-I/O transport test 50 times, one exact test per command,
   # when dispatched with stress_tests=bounded-io. Any failed run fails the job.
@@ -224,7 +226,11 @@ jobs:
             git diff "$base"...HEAD -- '*.rs' > pr.diff
             wc -l pr.diff
           fi
+      - name: Check the mutants outcome synthesizer
+        shell: bash
+        run: .github/scripts/test-mutants-outcome.sh
       - name: Run mutants
+        id: run-mutants
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -244,10 +250,31 @@ jobs:
           if [ "$EVENT_NAME" != "push" ]; then
             args+=(--in-diff pr.diff)
           fi
-          cargo mutants "${args[@]}"
+
+          log="$RUNNER_TEMP/mutants-shard.log"
+          list="$RUNNER_TEMP/mutants-shard.list"
+          set +e
+          cargo mutants "${args[@]}" > "$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          echo "cargo mutants exited $status"
+
+          # The --list run is independent evidence that this shard has no
+          # mutants; the run's verbose flags would add noise, so omit them.
+          list_args=(--shard ${{ matrix.shard }}/4 --no-shuffle)
+          if [ "$EVENT_NAME" != "push" ]; then
+            list_args+=(--in-diff pr.diff)
+          fi
+          cargo mutants "${list_args[@]}" --list > "$list"
+
+          MUTANTS_STATUS="$status" MUTANTS_LOG="$log" MUTANTS_LIST="$list" \
+            OUTCOMES=mutants.out/outcomes.json \
+            .github/scripts/mutants-outcome.sh
       # A missed mutant or a timeout fails. One that truly hangs the tests is
       # excluded by name in .cargo/mutants.toml, with its reason.
       - name: Check outcomes
+        if: steps.run-mutants.outputs.zero != 'true'
         shell: bash
         run: |
           set -euo pipefail
