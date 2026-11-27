@@ -19,7 +19,9 @@ use tack_daemon::{
     ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, frames,
     socket_in_state_dir, state_dir,
 };
-use tack_protocol::wire::{DEFAULT_DEADLINE_MS, PROTOCOL_VERSION, Reply, ReplyError, Request};
+use tack_protocol::wire::{
+    DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
+};
 
 const BARN_BIN_ENV: &str = "TACK_BARN_BIN";
 const BARN_BIN_NAME: &str = "barn";
@@ -155,9 +157,32 @@ fn handle(request: &Request, client: &Mutex<Stall>) -> Reply {
         }
     };
 
-    match frames::from_stall(request, reply) {
+    let reply = match frames::from_stall(request, reply) {
         Ok(reply) => reply,
-        Err(error) => daemon_error(id, error),
+        Err(error) => return daemon_error(id, error),
+    };
+
+    log_verdict(request, &reply);
+
+    reply
+}
+
+/// Emit the named verdict line the conformance logs expect for a good reply.
+fn log_verdict(request: &Request, reply: &Reply) {
+    match (request, reply) {
+        (_, Reply::Hook { outcome, .. }) => match outcome {
+            Outcome::Allow => eprintln!("tack-daemon: hook toolBefore allow"),
+            Outcome::Deny { reason } => {
+                eprintln!("tack-daemon: hook toolBefore deny {reason}");
+            }
+            Outcome::Rewrite { .. } => eprintln!("tack-daemon: hook toolBefore rewrite"),
+            Outcome::Annotate { .. } => eprintln!("tack-daemon: hook toolBefore annotate"),
+            Outcome::Drop => eprintln!("tack-daemon: hook toolBefore drop"),
+        },
+        (Request::Tool { name, .. }, Reply::Tool { .. }) => {
+            eprintln!("tack-daemon: tool {name} ok");
+        }
+        _ => {}
     }
 }
 
