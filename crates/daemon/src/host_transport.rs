@@ -429,7 +429,11 @@ fn read_error(error: &io::Error) -> StallError {
 /// Write one whole line inside the call's deadline. Every chunk gets a write
 /// timeout sized to the time left, so a slow-draining host cannot hold the
 /// caller past the deadline.
-fn write_line(stream: &mut UnixStream, line: &str, deadline: Instant) -> Result<(), StallError> {
+fn write_line<S: Write + SocketTimeouts>(
+    stream: &mut S,
+    line: &str,
+    deadline: Instant,
+) -> Result<(), StallError> {
     let bytes = line.as_bytes();
     let mut written = 0;
 
@@ -845,6 +849,94 @@ mod tests {
         caller.join().unwrap();
 
         assert_eq!(outcome, Ok(Err(StallError::Timeout)));
+    }
+
+    // A writer that fails its first write with a scripted kind, records each
+    // deadline-derived write timeout, then accepts the rest of the line.
+    struct FailingWriter {
+        written: Vec<u8>,
+        first_error: Option<io::ErrorKind>,
+        timeouts: Vec<Duration>,
+    }
+
+    impl FailingWriter {
+        fn new(first_error: io::ErrorKind) -> Self {
+            Self {
+                written: Vec::new(),
+                first_error: Some(first_error),
+                timeouts: Vec::new(),
+            }
+        }
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, chunk: &[u8]) -> io::Result<usize> {
+            if let Some(kind) = self.first_error.take() {
+                return Err(kind.into());
+            }
+
+            self.written.extend_from_slice(chunk);
+
+            Ok(chunk.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SocketTimeouts for FailingWriter {
+        fn set_read_timeout(&mut self, _timeout: Duration) -> Result<(), StallError> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&mut self, timeout: Duration) -> Result<(), StallError> {
+            self.timeouts.push(timeout);
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_interrupted_write_is_retried_with_a_fresh_deadline_budget() {
+        let line = "{\"jsonrpc\":\"2.0\",\"id\":22,\"result\":{}}\n";
+        let mut writer = FailingWriter::new(io::ErrorKind::Interrupted);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(write_line(&mut writer, line, deadline), Ok(()));
+        assert_eq!(writer.written.as_slice(), line.as_bytes());
+        assert_eq!(writer.timeouts.len(), 2);
+        assert!(
+            writer
+                .timeouts
+                .iter()
+                .all(|applied| !applied.is_zero() && *applied <= Duration::from_secs(5))
+        );
+        assert!(writer.timeouts.windows(2).all(|pair| pair[1] <= pair[0]));
+    }
+
+    #[test]
+    fn a_timed_out_write_is_a_named_timeout() {
+        let line = "call\n";
+        let mut writer = FailingWriter::new(io::ErrorKind::TimedOut);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            write_line(&mut writer, line, deadline),
+            Err(StallError::Timeout)
+        );
+    }
+
+    #[test]
+    fn a_would_block_write_is_a_named_timeout() {
+        let line = "call\n";
+        let mut writer = FailingWriter::new(io::ErrorKind::WouldBlock);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            write_line(&mut writer, line, deadline),
+            Err(StallError::Timeout)
+        );
     }
 
     // A reader that fails one fill with Interrupted, then yields a full line.
