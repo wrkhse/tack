@@ -94,6 +94,52 @@ tack build fixtures/safe-push --out dist --target codex
 
 This is a pre-release for trying the current slice, not a stable release.
 
+Plugin stalls are supervised by barn, a separate program installed beside
+tack's binaries as three binaries: `barn`, `barn-exec` and
+`barn-luau-stall`. tack finds `barn` beside its own executable, and
+`TACK_BARN_BIN` overrides that path. tack does not search `PATH`. When the
+binary is missing, a hook gets the named deny
+`tack: plugin unavailable: barn not found`.
+
+### Releases
+
+Each tack release notes the compatible barn release. Install both tarballs
+into the same folder and verify each with the `SHA256SUMS` published beside
+it:
+
+```bash
+TAG=v0.1.0-rc.6
+BARN_TAG=v0.1.0
+TARGET=aarch64-apple-darwin
+tack_base="https://github.com/wrkhse/tack/releases/download/$TAG"
+barn_base="https://github.com/wrkhse/barn/releases/download/$BARN_TAG"
+
+curl -fsSLO "$tack_base/tack-$TAG-$TARGET.tar.gz"
+curl -fsSL "$tack_base/SHA256SUMS" -o tack.SHA256SUMS
+curl -fsSLO "$barn_base/barn-$BARN_TAG-$TARGET.tar.gz"
+curl -fsSL "$barn_base/SHA256SUMS" -o barn.SHA256SUMS
+
+grep "tack-$TAG-$TARGET.tar.gz" tack.SHA256SUMS | shasum -a 256 -c -
+grep "barn-$BARN_TAG-$TARGET.tar.gz" barn.SHA256SUMS | shasum -a 256 -c -
+
+tar -xzf "tack-$TAG-$TARGET.tar.gz"
+tar -xzf "barn-$BARN_TAG-$TARGET.tar.gz"
+export PATH="$PWD:$PATH"
+```
+
+### Homebrew
+
+`brew install tack` pulls in the barn formula the way `brew install sourcefed`
+does. Because a formula may install behind a symlink into its Cellar, set
+`TACK_BARN_BIN` to the absolute path of that formula's barn binary. tack does
+not search `PATH`.
+
+### Release plan
+
+The release workflow publishes tack and barn separately. tack's release notes
+name the barn version the wiring was tested with. tack adds no new production
+dependency for this.
+
 ### From source
 
 Clone the repository and build the workspace with the pinned toolchain in
