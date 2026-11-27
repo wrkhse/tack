@@ -7,7 +7,8 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::{SocketAddr, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use barn_stall::{
@@ -57,18 +58,48 @@ impl HostTransport {
         }
     }
 
+    /// Run one call on the connection, opening it on first use.
+    fn call_once(&mut self, frame: &str, deadline: Instant) -> Result<String, StallError> {
+        let mut request = String::with_capacity(frame.len().saturating_add(1));
+        request.push_str(frame);
+        request.push('\n');
+
+        check_line_len(request.len())?;
+        body_within_cap(&request)?;
+
+        if self.stream.is_none() {
+            self.handshake(deadline)?;
+        }
+
+        let reader = self.stream.as_mut().ok_or(StallError::Malformed)?;
+        let timeout = remaining(deadline)?;
+        set_timeouts(reader.get_mut(), timeout)?;
+        write_line(reader.get_mut(), &request)?;
+
+        let mut reply = Vec::new();
+        read_line(reader, &mut reply)?;
+        check_line_len(reply.len())?;
+        let text = std::str::from_utf8(&reply).map_err(|_| StallError::Malformed)?;
+        body_within_cap(text)?;
+        let answer = text.strip_suffix('\n').unwrap_or(text);
+        refused_frame(answer)?;
+
+        Ok(answer.to_owned())
+    }
+
     /// Connect and finish the single `host.start` exchange.
     ///
     /// The reader is kept only once barn has answered with a matching id and a
-    /// stall name. Every failure leaves the transport latched instead.
+    /// stall name. `call` latches the transport on any failure.
     fn handshake(&mut self, deadline: Instant) -> Result<(), StallError> {
-        let timeout = remaining(deadline)?;
-        let address = SocketAddr::from_pathname(&self.endpoint.socket_path)
-            .map_err(|error| StallError::Io(format!("host socket address: {error}")))?;
-        let connected = UnixStream::connect_addr(&address)
-            .map_err(|error| StallError::Io(format!("connecting to host socket: {error}")))?;
+        let connect_budget = remaining(deadline)?;
+        let connected = connect_bounded(&self.endpoint.socket_path, connect_budget)?;
         let mut reader = BufReader::new(connected);
-        set_timeouts(reader.get_mut(), timeout)?;
+
+        // The exchange after the connect gets a budget measured from now, so a
+        // slow connect cannot consume the whole deadline silently.
+        let io_budget = remaining(deadline)?;
+        set_timeouts(reader.get_mut(), io_budget)?;
 
         let id = self.next_id;
         self.next_id = id
@@ -93,49 +124,54 @@ impl HostTransport {
     }
 }
 
+/// Connect within `budget`: the blocking connect runs on a detached thread and
+/// the caller waits on the channel only until the budget runs out. A timed-out
+/// wait leaves the connector thread to finish on its own.
+fn connect_bounded(path: &Path, budget: Duration) -> Result<UnixStream, StallError> {
+    let path = path.to_owned();
+    let (sender, receiver) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let connected = SocketAddr::from_pathname(&path)
+            .map_err(|error| StallError::Io(format!("host socket address: {error}")))
+            .and_then(|address| {
+                UnixStream::connect_addr(&address)
+                    .map_err(|error| StallError::Io(format!("connecting to host socket: {error}")))
+            });
+
+        let _ = sender.send(connected);
+    });
+
+    receiver
+        .recv_timeout(budget)
+        .map_err(|_| StallError::Timeout)?
+}
+
 impl Transport for HostTransport {
     /// Send one framed line and return its single-line reply before `deadline`.
+    ///
+    /// Any failure latches the transport: the socket is dropped and no later
+    /// call reconnects or reuses it.
     ///
     /// # Errors
     ///
     /// Returns a named `StallError` for an oversize frame or reply, a timeout,
     /// a closed socket, a malformed reply, or a denial carrying barn's named
-    /// reason. A failed handshake is never retried.
+    /// reason. Once latched, every call returns the no-retry error.
     fn call(&mut self, frame: &str, deadline: Instant) -> Result<String, StallError> {
         if self.failed {
             return Err(StallError::Io("host handshake failed; no retry".into()));
         }
 
-        let mut request = String::with_capacity(frame.len().saturating_add(1));
-        request.push_str(frame);
-        request.push('\n');
+        match self.call_once(frame, deadline) {
+            Ok(answer) => Ok(answer),
+            Err(error) => {
+                self.failed = true;
+                drop(self.stream.take());
 
-        check_line_len(request.len())?;
-        body_within_cap(&request)?;
-
-        if self.stream.is_none()
-            && let Err(error) = self.handshake(deadline)
-        {
-            self.failed = true;
-
-            return Err(error);
+                Err(error)
+            }
         }
-
-        let reader = self.stream.as_mut().ok_or(StallError::Malformed)?;
-        let timeout = remaining(deadline)?;
-        set_timeouts(reader.get_mut(), timeout)?;
-        write_line(reader.get_mut(), &request)?;
-
-        let mut reply = Vec::new();
-        read_line(reader, &mut reply)?;
-        check_line_len(reply.len())?;
-        body_within_cap(std::str::from_utf8(&reply).map_err(|_| StallError::Malformed)?)?;
-
-        let text = std::str::from_utf8(&reply).map_err(|_| StallError::Malformed)?;
-        let answer = text.strip_suffix('\n').unwrap_or(text);
-        refused_frame(answer)?;
-
-        Ok(answer.to_owned())
     }
 }
 
@@ -260,6 +296,19 @@ fn body_within_cap(line: &str) -> Result<(), StallError> {
         )));
     }
 
+    let input = message
+        .get("call")
+        .and_then(|call| call.get("input"))
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| StallError::Io(format!("encoding call.input: {error}")))?;
+
+    if input.is_some_and(|encoded| encoded.len() > DEFAULT_MAX_BODY_BYTES) {
+        return Err(StallError::Io(format!(
+            "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+        )));
+    }
+
     Ok(())
 }
 
@@ -358,6 +407,7 @@ mod tests {
 
     const TOKEN: &str = "single-use-token";
     const START_REPLY: &str = r#"{"jsonrpc":"2.0","id":21,"result":{"stall":"sourcefed"}}"#;
+    const BAD_START_REPLY: &str = r#"{"jsonrpc":"2.0","id":99,"result":{"stall":"sourcefed"}}"#;
     const CALL_FRAME: &str = r#"{"jsonrpc":"2.0","id":22,"method":"stall.call","params":{}}"#;
     const CALL_REPLY: &str = r#"{"jsonrpc":"2.0","id":22,"result":{"ok":true}}"#;
 
@@ -551,5 +601,147 @@ mod tests {
             Ok(CALL_REPLY.to_owned())
         );
         host.join().unwrap();
+    }
+
+    // A fake host that answers host.start with a mismatched id, then checks
+    // that a latched transport opens no second connection.
+    fn bad_handshake_host(socket: &Path, checked: mpsc::Receiver<()>) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+
+            reader.read_line(&mut line).unwrap();
+            writeln!(stream, "{BAD_START_REPLY}").unwrap();
+
+            checked.recv().unwrap();
+            listener.set_nonblocking(true).unwrap();
+
+            assert_eq!(
+                listener.accept().map(|_| ()).map_err(|error| error.kind()),
+                Err(io::ErrorKind::WouldBlock)
+            );
+        })
+    }
+
+    #[test]
+    fn a_failed_handshake_latches_and_never_reconnects() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let (signal, checked) = mpsc::channel();
+        let host = bad_handshake_host(&socket, checked);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            transport.call(CALL_FRAME, deadline),
+            Err(StallError::Malformed)
+        );
+        assert_eq!(
+            transport.call(CALL_FRAME, deadline),
+            Err(StallError::Io("host handshake failed; no retry".into()))
+        );
+
+        signal.send(()).unwrap();
+        host.join().unwrap();
+    }
+
+    // A fake host that finishes host.start, then closes before answering the
+    // call, and checks that a latched transport opens no second connection.
+    fn mid_call_failure_host(socket: &Path, checked: mpsc::Receiver<()>) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+
+            reader.read_line(&mut line).unwrap();
+            writeln!(stream, "{START_REPLY}").unwrap();
+
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request.trim_end(), CALL_FRAME);
+
+            drop(reader);
+            drop(stream);
+
+            checked.recv().unwrap();
+            listener.set_nonblocking(true).unwrap();
+
+            assert_eq!(
+                listener.accept().map(|_| ()).map_err(|error| error.kind()),
+                Err(io::ErrorKind::WouldBlock)
+            );
+        })
+    }
+
+    #[test]
+    fn a_mid_call_failure_drops_the_stream_and_never_reuses_it() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let (signal, checked) = mpsc::channel();
+        let host = mid_call_failure_host(&socket, checked);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            transport.call(CALL_FRAME, deadline),
+            Err(StallError::Closed)
+        );
+        assert!(transport.stream.is_none());
+        assert_eq!(
+            transport.call(CALL_FRAME, deadline),
+            Err(StallError::Io("host handshake failed; no retry".into()))
+        );
+
+        signal.send(()).unwrap();
+        host.join().unwrap();
+    }
+
+    fn framed_input(bytes: usize) -> String {
+        json!({
+            "type": "hook",
+            "id": 22,
+            "version": 1,
+            "hook": "PreToolUse",
+            "call": {
+                "tool": "bash",
+                "name": "run",
+                "input": "x".repeat(bytes),
+            },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn framed_input_at_the_body_cap_is_accepted() {
+        let input = "x".repeat(DEFAULT_MAX_BODY_BYTES.saturating_sub(2));
+        assert_eq!(
+            serde_json::to_string(&input).unwrap().len(),
+            DEFAULT_MAX_BODY_BYTES
+        );
+
+        assert_eq!(body_within_cap(&framed_input(input.len())), Ok(()));
+    }
+
+    #[test]
+    fn framed_input_over_the_body_cap_is_rejected() {
+        let input = "x".repeat(DEFAULT_MAX_BODY_BYTES.saturating_sub(1));
+        assert_eq!(
+            serde_json::to_string(&input).unwrap().len(),
+            DEFAULT_MAX_BODY_BYTES.saturating_add(1)
+        );
+
+        assert_eq!(
+            body_within_cap(&framed_input(input.len())),
+            Err(StallError::Io(format!(
+                "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+            )))
+        );
     }
 }
