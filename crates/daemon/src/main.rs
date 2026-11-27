@@ -174,7 +174,7 @@ fn log_safe_hook(hook: &str) -> String {
 
     for ch in hook.chars() {
         if ch.is_control() {
-            safe.push_str(&format!("\\u{{{ch:x}}}"));
+            safe.push_str(&format!("\\u{{{:x}}}", u32::from(ch)));
         } else {
             safe.push(ch);
         }
