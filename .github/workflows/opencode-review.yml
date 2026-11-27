@@ -48,7 +48,7 @@ jobs:
     env:
       # Nobody answers prompts in CI, so nothing may ask. The reviewer only
       # reads files in the checkout: no shell, no edits, no web.
-      PRIMARY_MODEL: opencode-go/deepseek-v4.1-flash
+      PRIMARY_MODEL: opencode/deepseek-v4.1-flash-free
       REVIEW_FALLBACK_MODEL: opencode/hy4-flash-free
       REVIEW_TIMEOUT_SEC: 420
       OPENCODE_CONFIG_CONTENT: >-
