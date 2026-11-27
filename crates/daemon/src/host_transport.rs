@@ -175,7 +175,7 @@ fn host_start_line(id: u64, token: &str) -> Result<String, StallError> {
     let method_name = method::HOST_START;
 
     Ok(format!(
-        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":{method_name:?},\"params\":{params}}}}}\n"
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":{method_name:?},\"params\":{params}}}\n"
     ))
 }
 
