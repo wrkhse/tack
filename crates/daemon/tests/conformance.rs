@@ -137,15 +137,15 @@ async fn an_empty_object_reply_is_malformed_through_the_public_transport() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_foreign_result_id_is_malformed_through_the_public_transport() {
-    let reply = r#"{"jsonrpc":"2.0","id":99,"result":{"ok":true}}"#;
+async fn a_foreign_framed_reply_id_is_malformed_through_the_public_transport() {
+    let reply = r#"{"type":"hook","id":99,"outcome":"allow"}"#;
 
     assert_eq!(call_with_reply(reply), Err(StallError::Malformed));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_matching_result_is_returned_through_the_public_transport() {
-    let reply = r#"{"jsonrpc":"2.0","id":22,"result":{"ok":true}}"#;
+async fn a_matching_framed_reply_is_returned_through_the_public_transport() {
+    let reply = r#"{"type":"hook","id":22,"outcome":"allow"}"#;
 
     assert_eq!(call_with_reply(reply), Ok(reply.to_owned()));
 }
