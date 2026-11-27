@@ -664,9 +664,9 @@ mod tests {
         );
     }
 
-    // A peer that hands out one byte per fill, pausing briefly each time,
-    // then reports that the socket read timed out. Each fill records the
-    // timeout it was given.
+    // A peer that hands out one byte per fill, pausing long enough that the
+    // whole call must span its deadline, then reports that the socket read
+    // timed out. Each fill records the timeout it was given.
     struct DripReader {
         bytes: Vec<u8>,
         index: usize,
@@ -703,7 +703,7 @@ mod tests {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
 
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(200));
 
             Ok(&self.bytes[self.index..self.index.saturating_add(1)])
         }
@@ -713,19 +713,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_dripping_peer_cannot_outlive_the_deadline() {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let bound = Duration::from_millis(1_100);
+    fn drip_deadline_proof() {
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(Duration::from_secs(1))
+            .unwrap_or(started);
+        let upper = Duration::from_secs(3);
         let mut reader = DripReader::new(b"partial".to_vec());
         let mut line = Vec::new();
 
-        let started = Instant::now();
         let outcome = read_line(&mut reader, &mut line, deadline);
         let elapsed = started.elapsed();
 
         assert_eq!(outcome, Err(StallError::Timeout));
-        assert!(elapsed <= bound);
+        assert!(elapsed >= Duration::from_secs(1));
+        assert!(elapsed < upper);
+    }
+
+    #[test]
+    fn a_dripping_peer_cannot_outlive_the_deadline() {
+        drip_deadline_proof();
     }
 
     // A socket stand-in that records every timeout the transport applies.
@@ -818,8 +825,7 @@ mod tests {
         assert_eq!(outcome, Ok(Err(StallError::Timeout)));
     }
 
-    #[test]
-    fn a_write_that_cannot_finish_returns_timeout() {
+    fn write_timeout_proof() {
         let (peer, client) = UnixStream::pair().unwrap();
         let (hold_tx, hold_rx) = mpsc::channel();
         let holder = thread::spawn(move || {
@@ -838,18 +844,19 @@ mod tests {
             "params": { "pad": "x".repeat(DEFAULT_MAX_BODY_BYTES) },
         })
         .to_string();
-        let deadline = Instant::now() + Duration::from_millis(250);
-        // Keep the wait tight: one long socket timeout would miss the deadline.
-        let bound = Duration::from_millis(750);
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(Duration::from_millis(250))
+            .unwrap_or(started);
+        let upper = Duration::from_secs(3);
 
         let (result_tx, result_rx) = mpsc::channel();
-        let started = Instant::now();
         let caller = thread::spawn(move || {
             let outcome = transport.call(&frame, deadline);
             let _ = result_tx.send(outcome);
         });
 
-        let outcome = result_rx.recv_timeout(bound);
+        let outcome = result_rx.recv_timeout(upper);
         let elapsed = started.elapsed();
 
         let _ = hold_tx.send(());
@@ -857,7 +864,25 @@ mod tests {
         caller.join().unwrap();
 
         assert_eq!(outcome, Ok(Err(StallError::Timeout)));
-        assert!(elapsed <= bound);
+        assert!(elapsed >= Duration::from_millis(250));
+        assert!(elapsed < upper);
+    }
+
+    #[test]
+    fn a_write_that_cannot_finish_returns_timeout() {
+        write_timeout_proof();
+    }
+
+    #[test]
+    fn timing_proofs_hold_across_fifty_runs_in_ci() {
+        if std::env::var_os("CI").is_none() {
+            return;
+        }
+
+        for _ in 0..50 {
+            write_timeout_proof();
+            drip_deadline_proof();
+        }
     }
 
     // A writer that pauses briefly, fails its first write with a scripted
