@@ -152,9 +152,9 @@ jobs:
           repository: wrkhse/homebrew-tap
           persist-credentials: false
           path: tap
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          node-version: 24.22.3
+          python-version: 3.13
       - name: Download the published checksums
         env:
           GH_TOKEN: ${{ github.token }}
@@ -164,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          node scripts/homebrew.mjs "${GITHUB_REF_NAME#v}" checksums/SHA256SUMS \
+          python3 scripts/homebrew.py "${GITHUB_REF_NAME#v}" checksums/SHA256SUMS \
             > tap/Formula/tack.rb
       - name: Audit, install and test the real formula
         shell: bash
@@ -173,7 +173,7 @@ jobs:
 
           taps="$(brew --repository)/Library/Taps/wrkhse"
           mkdir -p "$taps"
-          ln -s "$PWD/tap" "$taps/tap"
+          ln -s "$PWD/tap" "$taps/homebrew-tap"
           brew trust --formula wrkhse/tap/tack
           brew style wrkhse/tap/tack
           brew audit --strict --online --formula wrkhse/tap/tack
