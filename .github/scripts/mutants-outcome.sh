@@ -13,6 +13,12 @@ if [[ ! "$MUTANTS_STATUS" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+# A failed run is never usable, even if it left an outcomes file behind.
+if [ "$MUTANTS_STATUS" -ne 0 ]; then
+  echo "::error::cargo mutants exited $MUTANTS_STATUS; its outcome cannot be used" >&2
+  exit 1
+fi
+
 for input in "$MUTANTS_LOG" "$MUTANTS_LIST"; do
   if [ ! -f "$input" ]; then
     echo "::error::mutants outcome input is missing: $input" >&2
@@ -50,12 +56,6 @@ if [ "$MUTANTS_STATUS" -eq 0 ] \
     printf 'zero=true\n' >> "$GITHUB_OUTPUT"
   fi
   exit 0
-fi
-
-# A failed run is never usable, even if it left an outcomes file behind.
-if [ "$MUTANTS_STATUS" -ne 0 ]; then
-  echo "::error::cargo mutants exited $MUTANTS_STATUS; its outcome cannot be used" >&2
-  exit 1
 fi
 
 if [ ! -f "$OUTCOMES" ]; then
