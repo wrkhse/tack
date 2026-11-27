@@ -66,6 +66,8 @@ jobs:
 
           cargo build --workspace --bins --locked
           echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+      - name: Build barn at the pinned rev
+        run: .github/scripts/install-barn.sh debug
       - run: tack build fixtures/safe-push --out dist --target claude
       # What Claude Code reads from the mod; a validation failure fails the
       # job. A loadable hooks module gives a `hooks:` line; a refused one

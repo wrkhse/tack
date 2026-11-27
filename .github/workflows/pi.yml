@@ -54,6 +54,8 @@ jobs:
 
           cargo build --workspace --bins --locked
           echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+      - name: Build barn at the pinned rev
+        run: .github/scripts/install-barn.sh debug
       - run: tack build fixtures/safe-push --out dist --target pi
       - run: node adapters/pi/extension.test.mjs
       # The runner supplies a dummy key and a fresh loopback model for each case.
