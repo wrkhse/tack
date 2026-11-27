@@ -5,6 +5,7 @@
 //! latches the transport: no boundary failure is ever retried or turned into
 //! an allow.
 
+use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -23,10 +24,20 @@ use crate::stall::{StallError, Transport};
 
 /// The two plain values barn supplies at stall start: the path of its host
 /// socket and the single-use token tack authenticates with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HostEndpoint {
     pub socket_path: PathBuf,
     pub token: String,
+}
+
+impl fmt::Debug for HostEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostEndpoint")
+            .field("socket_path", &self.socket_path)
+            .field("token", &"[redacted]")
+            .finish()
+    }
 }
 
 impl HostEndpoint {
@@ -62,6 +73,8 @@ impl HostTransport {
 
     /// Run one validated call on the connection, opening it on first use.
     fn call_once(&mut self, request: &str, deadline: Instant) -> Result<String, StallError> {
+        let id = request_id(request)?;
+
         if self.stream.is_none() {
             self.handshake(deadline)?;
         }
@@ -69,7 +82,7 @@ impl HostTransport {
         let reader = self.stream.as_mut().ok_or(StallError::Malformed)?;
         let timeout = remaining(deadline)?;
         set_timeouts(reader.get_mut(), timeout)?;
-        write_line(reader.get_mut(), request)?;
+        write_line(reader.get_mut(), request, deadline)?;
 
         let mut reply = Vec::new();
         read_line(reader, &mut reply, deadline)?;
@@ -77,7 +90,7 @@ impl HostTransport {
         let text = std::str::from_utf8(&reply).map_err(|_| StallError::Malformed)?;
         body_within_cap(text)?;
         let answer = text.strip_suffix('\n').unwrap_or(text);
-        refused_frame(answer)?;
+        refused_frame(answer, id)?;
 
         Ok(answer.to_owned())
     }
@@ -103,7 +116,7 @@ impl HostTransport {
 
         let request = host_start_line(id, &self.endpoint.token)?;
         check_line_len(request.len())?;
-        write_line(reader.get_mut(), &request)?;
+        write_line(reader.get_mut(), &request, deadline)?;
 
         let mut reply = Vec::new();
         read_line(&mut reader, &mut reply, deadline)?;
@@ -320,6 +333,8 @@ fn body_within_cap(line: &str) -> Result<(), StallError> {
     let bodies = [
         message.get("body"),
         message.get("call").and_then(|call| call.get("input")),
+        message.get("result"),
+        message.get("result").and_then(|result| result.get("body")),
     ];
 
     for body in bodies.into_iter().flatten() {
@@ -411,28 +426,72 @@ fn read_error(error: &io::Error) -> StallError {
     }
 }
 
-fn write_line(stream: &mut UnixStream, line: &str) -> Result<(), StallError> {
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|error| StallError::Io(format!("writing host socket: {error}")))?;
-    stream
-        .flush()
-        .map_err(|error| StallError::Io(format!("flushing host socket: {error}")))?;
+/// Write one whole line inside the call's deadline. Every chunk gets a write
+/// timeout sized to the time left, so a slow-draining host cannot hold the
+/// caller past the deadline.
+fn write_line(stream: &mut UnixStream, line: &str, deadline: Instant) -> Result<(), StallError> {
+    let bytes = line.as_bytes();
+    let mut written = 0;
+
+    while written < bytes.len() {
+        SocketTimeouts::set_write_timeout(stream, remaining(deadline)?)?;
+
+        let chunk = bytes.get(written..).ok_or(StallError::Malformed)?;
+        let count = match stream.write(chunk) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(write_error(&error)),
+        };
+
+        if count == 0 {
+            return Err(StallError::Closed);
+        }
+
+        written = written.saturating_add(count);
+    }
 
     Ok(())
 }
 
-/// Any JSON-RPC error reply is a failure, never a pass-through allow.
-fn refused_frame(answer: &str) -> Result<(), StallError> {
+fn write_error(error: &io::Error) -> StallError {
+    match error.kind() {
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => StallError::Timeout,
+        _ => StallError::Io(format!("writing host socket: {error}")),
+    }
+}
+
+/// The id a framed request expects on its reply. Requests are checked before
+/// this point, so an unreadable id is a boundary failure.
+fn request_id(request: &str) -> Result<u64, StallError> {
+    let message: Value = serde_json::from_str(request).map_err(|_| StallError::Malformed)?;
+
+    message
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or(StallError::Malformed)
+}
+
+/// A reply succeeds only with the request's id and an explicit `result`. An
+/// error reply keeps its named failure, never a pass-through allow.
+fn refused_frame(answer: &str, id: u64) -> Result<(), StallError> {
     let message: Value = match serde_json::from_str(answer) {
         Ok(message) => message,
         Err(_) => return Err(StallError::Malformed),
     };
-    let Some(error) = message.get("error") else {
-        return Ok(());
-    };
 
-    Err(host_error(error))
+    if message.get("id").and_then(Value::as_u64) != Some(id) {
+        return Err(StallError::Malformed);
+    }
+
+    if let Some(error) = message.get("error") {
+        return Err(host_error(error));
+    }
+
+    if message.get("result").is_none() {
+        return Err(StallError::Malformed);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1170,7 +1229,7 @@ mod tests {
         .to_string();
 
         assert_eq!(
-            refused_frame(&answer),
+            refused_frame(&answer, 22),
             Err(StallError::Io("host error -32600: Method not found".into()))
         );
     }
@@ -1217,7 +1276,7 @@ mod tests {
         .to_string();
 
         assert_eq!(
-            refused_frame(&answer),
+            refused_frame(&answer, 22),
             Err(StallError::Io(format!(
                 "host.start denied: {}",
                 deny::TOKEN_MISMATCH
