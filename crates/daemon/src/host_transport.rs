@@ -510,14 +510,8 @@ fn refused_frame(answer: &str, id: u64) -> Result<(), StallError> {
     }
 
     match (kind, outcome, content, error) {
-        ("hook", Some(outcome), _, _) => match outcome {
-            Value::Object(_) | Value::String(_) => Ok(()),
-            _ => Err(StallError::Malformed),
-        },
-        ("tool", _, Some(content), _) => match content {
-            Value::Object(_) => Ok(()),
-            _ => Err(StallError::Malformed),
-        },
+        ("hook", Some(Value::Object(_) | Value::String(_)), _, _) => Ok(()),
+        ("tool", _, Some(Value::Object(_)), _) => Ok(()),
         ("error", _, _, Some(error)) => {
             let name = error.as_str().ok_or(StallError::Malformed)?;
             let detail = message
