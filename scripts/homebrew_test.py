@@ -39,22 +39,24 @@ class FormulaTests(unittest.TestCase):
         ruby = formula(RELEASE, parse_sums(good_sums()))
         lines = ruby.splitlines()
 
-        nesting = ["  on_linux do", "    on_intel do"]
-        positions = [
-            i
-            for i in range(len(lines) - 1)
-            if lines[i:i + 2] == nesting
-        ]
-        self.assertTrue(positions, "Linux block is not nested in on_intel")
+        opener = lines.index("  on_linux do")
+        closing = lines.index("  end", opener + 1)
+        block = lines[opener:closing + 1]
 
-        nested = "\n".join(lines[positions[0] + 2:])
-        self.assertIn(
-            f"/releases/download/v{RELEASE}/{NAMES[2]}", nested
+        self.assertIn("    on_intel do", block)
+        self.assertIn("    end", block)
+
+        url = f"/releases/download/v{RELEASE}/{NAMES[2]}"
+        nested_url = [text for text in block if text.startswith("      url ")]
+        self.assertTrue(
+            any(url in text for text in nested_url),
+            "Linux url is not indented inside on_intel",
         )
-        self.assertIn(f'sha256 "{SUMS[2]}"', nested)
+        self.assertIn(f'      sha256 "{SUMS[2]}"', block)
 
-        for rendered in lines:
+        for rendered in block:
             self.assertFalse(rendered.startswith("    url "))
+            self.assertFalse(rendered.startswith("    sha256 "))
 
     def test_renders_ruby_interpolation_not_javascript(self):
         ruby = formula(RELEASE, parse_sums(good_sums()))
