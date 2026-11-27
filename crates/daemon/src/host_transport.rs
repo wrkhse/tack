@@ -503,7 +503,8 @@ mod tests {
 
     // A one-shot fake host: check the start line, answer it, then answer the
     // framed call made on the same connection.
-    fn fake_host(socket: &Path, reply: &'static str) -> thread::JoinHandle<()> {
+    fn fake_host(socket: &Path, reply: impl Into<String>) -> thread::JoinHandle<()> {
+        let reply = reply.into();
         let listener = UnixListener::bind(socket).unwrap();
 
         thread::spawn(move || {
@@ -543,6 +544,17 @@ mod tests {
         );
 
         assert_eq!(host_start_line(HOST_START_ID, TOKEN), Ok(expected));
+    }
+
+    #[test]
+    fn host_endpoint_debug_hides_the_token_but_shows_the_path() {
+        let path = "/tmp/tack-host-redaction.sock";
+        let endpoint = HostEndpoint::new(PathBuf::from(path), TOKEN.to_owned());
+
+        let debug = format!("{endpoint:?}");
+
+        assert!(!debug.contains(TOKEN));
+        assert!(debug.contains(path));
     }
 
     #[test]
@@ -739,6 +751,43 @@ mod tests {
         assert_eq!(outcome, Ok(Err(StallError::Timeout)));
     }
 
+    #[test]
+    fn a_write_that_cannot_finish_returns_timeout() {
+        let (peer, client) = UnixStream::pair().unwrap();
+        let (hold_tx, hold_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let _ = hold_rx.recv();
+            drop(peer);
+        });
+
+        let endpoint = HostEndpoint::new(PathBuf::from("unused.sock"), TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        transport.stream = Some(BufReader::new(client));
+
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "stall.call",
+            "params": { "pad": "x".repeat(DEFAULT_MAX_BODY_BYTES) },
+        })
+        .to_string();
+        let deadline = Instant::now() + Duration::from_millis(250);
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            let outcome = transport.call(&frame, deadline);
+            let _ = result_tx.send(outcome);
+        });
+
+        let outcome = result_rx.recv_timeout(Duration::from_secs(5));
+
+        let _ = hold_tx.send(());
+        holder.join().unwrap();
+        caller.join().unwrap();
+
+        assert_eq!(outcome, Ok(Err(StallError::Timeout)));
+    }
+
     // A reader that fails one fill with Interrupted, then yields a full line.
     struct InterruptedOnce {
         remaining: Cursor<Vec<u8>>,
@@ -874,6 +923,39 @@ mod tests {
         assert_eq!(
             tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
             Ok(CALL_REPLY.to_owned())
+        );
+        host.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_without_a_result_is_not_an_answer() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let host = fake_host(&socket, "{}");
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Malformed)
+        );
+        host.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_with_a_foreign_id_is_not_an_answer() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let reply = r#"{"jsonrpc":"2.0","id":99,"result":{"ok":true}}"#;
+        let host = fake_host(&socket, reply);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Malformed)
         );
         host.join().unwrap();
     }
@@ -1141,5 +1223,34 @@ mod tests {
                 deny::TOKEN_MISMATCH
             )))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oversize_nested_reply_body_is_refused_by_call() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let text = "x".repeat(DEFAULT_MAX_BODY_BYTES.saturating_add(1));
+        let reply = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "result": {
+                "type": "tool",
+                "id": 22,
+                "content": { "kind": "text", "text": text },
+            },
+        })
+        .to_string();
+        let host = fake_host(&socket, reply);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Io(format!(
+                "body exceeds {DEFAULT_MAX_BODY_BYTES} bytes"
+            )))
+        );
+        host.join().unwrap();
     }
 }
