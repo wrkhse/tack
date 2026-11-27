@@ -52,10 +52,14 @@ if [ "$MUTANTS_STATUS" -eq 0 ] \
   exit 0
 fi
 
+# A failed run is never usable, even if it left an outcomes file behind.
+if [ "$MUTANTS_STATUS" -ne 0 ]; then
+  echo "::error::cargo mutants exited $MUTANTS_STATUS; its outcome cannot be used" >&2
+  exit 1
+fi
+
 if [ ! -f "$OUTCOMES" ]; then
-  if [ "$MUTANTS_STATUS" -ne 0 ]; then
-    echo "::error::cargo mutants exited $MUTANTS_STATUS without writing $OUTCOMES" >&2
-  elif ! grep -Fxq 'No mutants to filter' "$normalized"; then
+  if ! grep -Fxq 'No mutants to filter' "$normalized"; then
     echo "::error::cargo mutants did not report 'No mutants to filter' and wrote no $OUTCOMES" >&2
   else
     echo "::error::cargo mutants --list found mutants but wrote no $OUTCOMES" >&2

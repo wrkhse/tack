@@ -77,3 +77,22 @@ set -e
 [ ! -e "$tmp/d/outcomes.json" ]
 grep -Fq "did not report 'No mutants to filter'" "$tmp/d.out"
 printf 'ok: missing exact line fails with a named reason\n'
+
+# A nonzero exit fails even when an outcomes file is already present.
+printf 'No mutants to filter\n' > "$tmp/f.log"
+: > "$tmp/f.list"
+mkdir -p -- "$tmp/f"
+printf '%s\n' '{"total_mutants":1,"caught":1,"missed":0,"timeout":0,"unviable":0}' \
+  > "$tmp/f/outcomes.json"
+
+set +e
+run_script "$tmp/f.out" 9 "$tmp/f.log" "$tmp/f.list" \
+  "$tmp/f/outcomes.json" "$tmp/f.github-output"
+f_status=$?
+set -e
+
+[ "$f_status" -ne 0 ]
+[ -f "$tmp/f/outcomes.json" ]
+grep -Fq 'cargo mutants exited 9' "$tmp/f.out"
+grep -Fq 'its outcome cannot be used' "$tmp/f.out"
+printf 'ok: nonzero exit with an existing outcome fails with a named reason\n'

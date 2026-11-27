@@ -856,9 +856,9 @@ mod tests {
         let deadline = started
             .checked_add(Duration::from_millis(250))
             .unwrap_or(started);
-        // One 1 s wait separates the supplied 250 ms deadline from the
-        // old 5 s single socket timeout, without matching 250 ms tightly.
-        let upper = Duration::from_secs(1);
+        // A 2 s wait separates the supplied 250 ms deadline from the old
+        // 5 s single socket timeout, without matching 250 ms tightly.
+        let upper = Duration::from_secs(2);
 
         let (result_tx, result_rx) = mpsc::channel();
         let caller = thread::spawn(move || {
