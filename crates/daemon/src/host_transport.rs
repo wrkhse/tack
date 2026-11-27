@@ -510,13 +510,20 @@ fn refused_frame(answer: &str, id: u64) -> Result<(), StallError> {
     }
 
     match (kind, outcome, content, error) {
-        ("hook", Some(_), _, _) | ("tool", _, Some(_), _) => Ok(()),
+        ("hook", Some(outcome), _, _) => match outcome {
+            Value::Object(_) | Value::String(_) => Ok(()),
+            _ => Err(StallError::Malformed),
+        },
+        ("tool", _, Some(content), _) => match content {
+            Value::Object(_) => Ok(()),
+            _ => Err(StallError::Malformed),
+        },
         ("error", _, _, Some(error)) => {
-            let name = error.as_str().unwrap_or("unknown");
+            let name = error.as_str().ok_or(StallError::Malformed)?;
             let detail = message
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("missing message");
+                .ok_or(StallError::Malformed)?;
 
             Err(StallError::Io(format!("host error {name}: {detail}")))
         }
@@ -1420,6 +1427,34 @@ mod tests {
                 "host error stall_unavailable: the stall did not answer".into()
             ))
         );
+    }
+
+    #[test]
+    fn a_null_hook_outcome_is_not_an_answer() {
+        let answer = r#"{"type":"hook","id":1,"outcome":null}"#;
+
+        assert_eq!(refused_frame(answer, 1), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_numeric_hook_outcome_is_not_an_answer() {
+        let answer = r#"{"type":"hook","id":1,"outcome":42}"#;
+
+        assert_eq!(refused_frame(answer, 1), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_null_tool_content_is_not_an_answer() {
+        let answer = r#"{"type":"tool","id":6,"content":null}"#;
+
+        assert_eq!(refused_frame(answer, 6), Err(StallError::Malformed));
+    }
+
+    #[test]
+    fn a_non_string_framed_error_is_not_an_answer() {
+        let answer = r#"{"type":"error","id":7,"error":42,"message":"the stall did not answer"}"#;
+
+        assert_eq!(refused_frame(answer, 7), Err(StallError::Malformed));
     }
 
     #[test]
