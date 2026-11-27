@@ -131,6 +131,80 @@ jobs:
             --notes "Rust-built tack CLI, daemon and hook for the three targets; checksums attached; release candidate." \
             "${tarballs[@]}" dist/SHA256SUMS
 
+  tap:
+    needs: publish
+    runs-on: macos-15
+    timeout-minutes: 20
+    environment: release
+    # The deploy key and the token reach only the steps that use them, so the
+    # formula script and Homebrew's audit, install and test never see either.
+    steps:
+      - name: Require the tap's dedicated write key
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: test -n "$TAP_DEPLOY_KEY"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The tap is public, so it is read without the key; only the push uses it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wrkhse/homebrew-tap
+          persist-credentials: false
+          path: tap
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: 3.13
+      - name: Download the published checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --dir checksums
+      - name: Generate the formula from the published checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 scripts/homebrew.py "${GITHUB_REF_NAME#v}" checksums/SHA256SUMS \
+            > tap/Formula/tack.rb
+      - name: Audit, install and test the real formula
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          taps="$(brew --repository)/Library/Taps/wrkhse"
+          mkdir -p "$taps"
+          ln -s "$PWD/tap" "$taps/homebrew-tap"
+          brew trust --formula wrkhse/tap/tack
+          brew style wrkhse/tap/tack
+          brew audit --strict --online --formula wrkhse/tap/tack
+          brew install --formula wrkhse/tap/tack
+          brew test wrkhse/tap/tack
+      - name: Publish the formula
+        working-directory: tap
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          key="$RUNNER_TEMP/tap-key"
+          hosts="$RUNNER_TEMP/tap-known-hosts"
+          trap 'rm -f "$key" "$hosts"' EXIT
+          (umask 077 && printf '%s\n' "$TAP_DEPLOY_KEY" > "$key")
+          # GitHub's published host key, so the push trusts no other host.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$hosts"
+          export GIT_SSH_COMMAND="ssh -i '$key' -o IdentitiesOnly=yes -o UserKnownHostsFile='$hosts' -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tack.rb
+          # A re-run of the same tag generates the formula already published.
+          if git diff --cached --quiet; then
+            echo "::notice::formula unchanged"
+            exit 0
+          fi
+          git commit -m "chore(tack): ${GITHUB_REF_NAME#v}"
+          git push git@github.com:wrkhse/homebrew-tap.git HEAD:refs/heads/main
+
   skip:
     if: startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-rc.')
     runs-on: ubuntu-24.04
