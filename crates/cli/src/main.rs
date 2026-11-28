@@ -101,7 +101,8 @@ fn run_build(
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<Vec<PathBuf>, BuildError> {
     let out = Path::new(args.out);
-    // Validated first: a refused module or name writes nothing.
+    // Validated first: a refused module or name writes nothing. The target
+    // build loads the plugin again, since each build owns its own sandbox.
     let mut written: Vec<PathBuf> = build_sdk(plugin_dir, out)?.into_iter().collect();
 
     match args.target {

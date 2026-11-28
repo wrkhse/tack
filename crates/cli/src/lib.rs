@@ -43,6 +43,7 @@ pub enum BuildError {
     NeedMissing(String),
     ModuleMissing(String),
     PluginName(String),
+    DeclarationPath(String),
     Sandbox(EngineError),
     Manifest(serde_json::Error),
     Render(WrapperError),
@@ -58,6 +59,7 @@ impl fmt::Display for BuildError {
             Self::NeedMissing(name) => write!(f, "need_missing:{name}"),
             Self::ModuleMissing(name) => write!(f, "module_missing:{name}"),
             Self::PluginName(name) => write!(f, "plugin_name:{name}"),
+            Self::DeclarationPath(path) => write!(f, "declaration_path:{path}"),
             Self::Sandbox(error) => write!(f, "sandbox:tack: {error}"),
             Self::Manifest(error) => write!(f, "manifest:{error}"),
             Self::Render(error) => write!(f, "render:{error}"),
@@ -73,7 +75,7 @@ impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NeedMissing(_) => None,
-            Self::ModuleMissing(_) | Self::PluginName(_) => None,
+            Self::ModuleMissing(_) | Self::PluginName(_) | Self::DeclarationPath(_) => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -256,33 +258,102 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
     Ok(extension)
 }
 
-/// Read one plugin and, when it lists the `sdk` module, emit the SDK's typed
-/// declarations to `<out>/sdk/<name>.d.luau`. A plugin that does not list the
-/// module emits nothing and creates no folder.
+/// Read one plugin and sync its declarations under `<out>/sdk/`. A plugin that
+/// lists the `sdk` module gets `<name>.d.luau` written there. A plugin that does
+/// not list it loses the declaration an earlier build wrote, and the folder once
+/// that leaves it empty.
 ///
 /// # Errors
 ///
-/// Returns [`BuildError::Io`] when the output folder or file cannot be
+/// Returns [`BuildError::Io`] when the output folder or file cannot be read or
 /// written, [`BuildError::Sandbox`] when the plugin cannot be loaded or read,
-/// [`BuildError::Manifest`] when the manifest does not match the wire
-/// contract, [`BuildError::NeedMissing`] for an unsupported need,
-/// [`BuildError::ModuleMissing`] for an unknown module, and
-/// [`BuildError::PluginName`] when the name of a plugin that lists the module
-/// is not a plain file name.
+/// [`BuildError::Manifest`] when the manifest does not match the wire contract,
+/// [`BuildError::NeedMissing`] for an unsupported need, [`BuildError::ModuleMissing`]
+/// for an unknown module, [`BuildError::PluginName`] when the name of a plugin
+/// that lists the module is not a plain file name, and
+/// [`BuildError::DeclarationPath`] when the folder or file a declaration goes to
+/// is a symlink or any other entry.
 pub fn build_sdk(plugin_dir: &Path, out: &Path) -> Result<Option<PathBuf>, BuildError> {
     let (_, manifest, modules) = load(plugin_dir)?;
 
     if !modules.iter().any(|module| module == SDK_MODULE) {
+        clear_stale_declarations(out, &manifest.name)?;
         return Ok(None);
     }
 
     let stem = declaration_stem(&manifest.name)?;
-    let dest = out.join("sdk");
-    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    let dest = declarations_folder(out)?;
     let path = dest.join(format!("{stem}.d.luau"));
+    refuse_other_entry(&path)?;
     std::fs::write(&path, declarations()).map_err(BuildError::Io)?;
 
     Ok(Some(path))
+}
+
+/// The entry at `path` as it is, without following a symlink, or `None` when
+/// nothing is there.
+fn entry_at(path: &Path) -> Result<Option<std::fs::Metadata>, BuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BuildError::Io(error)),
+    }
+}
+
+/// The `sdk` folder under `out`, created when missing. A symlink or any other
+/// entry there is refused, so no declaration can land outside `out`.
+fn declarations_folder(out: &Path) -> Result<PathBuf, BuildError> {
+    let dest = out.join("sdk");
+
+    match entry_at(&dest)? {
+        Some(metadata) if metadata.is_dir() => {}
+        Some(_) => return Err(BuildError::DeclarationPath(dest.display().to_string())),
+        None => std::fs::create_dir_all(&dest).map_err(BuildError::Io)?,
+    }
+
+    Ok(dest)
+}
+
+/// Refuse a declaration path that holds anything but a regular file. A regular
+/// file is an earlier build's output, so it is overwritten.
+fn refuse_other_entry(path: &Path) -> Result<(), BuildError> {
+    match entry_at(path)? {
+        Some(metadata) if !metadata.is_file() => {
+            Err(BuildError::DeclarationPath(path.display().to_string()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Remove the declaration an earlier build wrote for `name`, then the `sdk`
+/// folder when it is empty. A symlink or other entry is left as it is, and a
+/// name that is not a plain file name never had a declaration to remove.
+fn clear_stale_declarations(out: &Path, name: &str) -> Result<(), BuildError> {
+    let Ok(stem) = declaration_stem(name) else {
+        return Ok(());
+    };
+    let dest = out.join("sdk");
+
+    let Some(folder) = entry_at(&dest)? else {
+        return Ok(());
+    };
+    if !folder.is_dir() {
+        return Ok(());
+    }
+
+    let path = dest.join(format!("{stem}.d.luau"));
+    if entry_at(&path)?.is_some_and(|metadata| metadata.is_file()) {
+        std::fs::remove_file(&path).map_err(BuildError::Io)?;
+    }
+    if std::fs::read_dir(&dest)
+        .map_err(BuildError::Io)?
+        .next()
+        .is_none()
+    {
+        std::fs::remove_dir(&dest).map_err(BuildError::Io)?;
+    }
+
+    Ok(())
 }
 
 /// A plugin name as a declaration file name: ASCII letters, digits, `-` and
