@@ -29,7 +29,7 @@ pub const DAEMON_BIN: &str = "tack-daemon";
 /// resolves it.
 pub const HOOK_BIN: &str = "tack-hook";
 
-const SUPPORTED: [&str; 4] = ["sandbox", "daemon", "opencode", "sdk"];
+const SUPPORTED: [&str; 4] = ["sandbox", "daemon", "opencode", tack_sdk::SDK_NEED];
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -117,18 +117,27 @@ fn deny_reasons() -> Vec<&'static str> {
         .collect()
 }
 
-/// Emit the SDK's typed Luau declarations only when the plugin opts in.
-fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<(), BuildError> {
+/// Emit the SDK's typed Luau declarations only when the plugin opts in,
+/// returning the path of the emitted file. When the plugin does not opt in,
+/// remove any declarations left by an earlier build so a reused output
+/// directory cannot keep a stale SDK file, and return `None`.
+fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<Option<PathBuf>, BuildError> {
+    let dest = out.join("sdk");
+    let declarations = dest.join("tack.d.luau");
+
     if !manifest.needs.iter().any(|need| need == tack_sdk::SDK_NEED) {
-        return Ok(());
+        if declarations.exists() {
+            std::fs::remove_file(&declarations).map_err(BuildError::Io)?;
+        }
+        // A folder holding other files is left alone.
+        let _ = std::fs::remove_dir(&dest);
+        return Ok(None);
     }
 
-    let dest = out.join("sdk");
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
-    let declarations = dest.join("tack.d.luau");
     std::fs::write(&declarations, tack_sdk::TACK_D_LUAU).map_err(BuildError::Io)?;
 
-    Ok(())
+    Ok(Some(declarations))
 }
 
 /// Read one plugin, check its needs, and emit the `OpenCode` wrapper and manifest.
@@ -174,7 +183,7 @@ pub fn build(
         BuildError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
     std::fs::write(&descriptor, pretty).map_err(BuildError::Io)?;
-    emit_sdk(out, &manifest)?;
+    let _ = emit_sdk(out, &manifest)?;
 
     Ok((index, descriptor))
 }
@@ -221,7 +230,9 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
         written.push(path);
     }
 
-    emit_sdk(out, &manifest)?;
+    if let Some(path) = emit_sdk(out, &manifest)? {
+        written.push(path);
+    }
 
     Ok(written)
 }
@@ -242,7 +253,7 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
     let extension = dest.join(EXTENSION_JS);
     std::fs::write(&extension, script).map_err(BuildError::Io)?;
-    emit_sdk(out, &manifest)?;
+    let _ = emit_sdk(out, &manifest)?;
 
     Ok(extension)
 }
@@ -371,7 +382,9 @@ pub fn build_codex(
     written.push(installed.hooks);
     written.push(installed.config);
     written.push(installed.hashes);
-    emit_sdk(out, &manifest)?;
+    if let Some(path) = emit_sdk(out, &manifest)? {
+        written.push(path);
+    }
 
     Ok(written)
 }
