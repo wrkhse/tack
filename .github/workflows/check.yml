@@ -668,6 +668,7 @@ jobs:
       # Posts the marker comment and inline review, then removes or
       # minimizes earlier ones.
       - name: Post review
+        id: post_review
         if: >-
           always() && steps.carry_forward.outputs.carried != 'true' &&
           ((steps.review_primary.outcome == 'success' &&
@@ -690,7 +691,8 @@ jobs:
       # API, never the model's own words. Only MERGE AS IS and the advisory
       # verdict for a docs-only PR let the review job pass.
       - name: Enforce posted review verdict
-        if: always()
+        if: >-
+          always() && steps.post_review.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -698,3 +700,11 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: bash .github/scripts/enforce-review-verdict.sh
+      - name: Require a fresh posted review
+        if: >-
+          always() && steps.post_review.outcome != 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::error::No fresh review was posted at this head; the merge gate cannot pass."
+          exit 1
