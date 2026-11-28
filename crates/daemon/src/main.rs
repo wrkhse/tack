@@ -555,7 +555,8 @@ async fn run(args: Args, state: PathBuf) -> i32 {
         }
     };
 
-    let stall = match launch_stall(&args.plugin, &state, broker) {
+    let launched = tokio::task::block_in_place(|| launch_stall(&args.plugin, &state, broker));
+    let stall = match launched {
         Ok(stall) => stall,
         Err(reason) => {
             eprintln!("tack-daemon: {reason}");
