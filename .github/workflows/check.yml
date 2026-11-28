@@ -48,9 +48,6 @@ jobs:
           log="$RUNNER_TEMP/launch-spawn-proof.log"
           cargo test --locked -p tack_daemon --bin tack-daemon -- --ignored --exact tests::launching_tests_hold_across_fifty_runs_in_ci 2>&1 | tee "$log"
           grep -Fq 'test result: ok. 1 passed;' "$log" || { echo '::error::launch spawn proof did not run exactly one passing test'; exit 1; }
-      - name: "Proof: deliberate failure"
-        shell: bash
-        run: exit 1
 
   # Runs each bounded-I/O transport test 50 times, one exact test per command,
   # when dispatched with stress_tests=bounded-io. Any failed run fails the job.
