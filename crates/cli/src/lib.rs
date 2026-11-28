@@ -895,4 +895,27 @@ mod tests {
             other => panic!("expected Io, got {other:?}"),
         }
     }
+
+    #[test]
+    fn audit_capabilities_reports_a_file_in_the_output_path() {
+        let scratch = Scratch::new();
+        let file = scratch.root.join("not-a-dir");
+        std::fs::write(&file, "x").expect("file");
+        let out = file.join("child");
+
+        let manifest = PluginManifest {
+            name: "x".into(),
+            needs: Vec::new(),
+            tools: Vec::new(),
+        };
+
+        let error = audit_capabilities(&scratch.root, &out, &manifest).expect_err("refused");
+
+        match error {
+            BuildError::Io(io) => {
+                assert!(io.to_string().contains("Not a directory"));
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
 }
