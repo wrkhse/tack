@@ -645,7 +645,10 @@ mod tests {
         assert_eq!(name, "barn");
         assert_eq!(lines, Vec::<String>::new());
         assert!(!home.join(".codex").exists());
-        assert_eq!(std::fs::read_dir(&home).expect("home stays empty").count(), 0);
+        assert_eq!(
+            std::fs::read_dir(&home).expect("home stays empty").count(),
+            0
+        );
         assert!(!out.exists());
     }
 

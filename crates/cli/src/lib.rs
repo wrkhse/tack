@@ -159,7 +159,8 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest, Modules), BuildEr
         Sandbox::new(&plugin_dir, limits, Capabilities::default()).map_err(BuildError::Sandbox)?;
     let metadata = sandbox.manifest().map_err(BuildError::Sandbox)?;
     let module_data = sandbox.modules().map_err(BuildError::Sandbox)?;
-    let manifest: PluginManifest = serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
+    let manifest: PluginManifest =
+        serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
     let modules = read_modules(&module_data)?;
 
     for need in &manifest.needs {

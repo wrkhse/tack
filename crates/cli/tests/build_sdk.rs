@@ -18,8 +18,7 @@ const EMPTY_MODULES: &str =
     r#"return { name = "sdk-plugin", needs = {}, modules = {}, tools = {} }"#;
 const UNKNOWN_MODULE: &str =
     r#"return { name = "sdk-plugin", needs = {}, modules = { barn = {} }, tools = {} }"#;
-const NONEMPTY_CONFIG: &str =
-    r#"return { name = "sdk-plugin", needs = {}, modules = { sdk = { extra = true } }, tools = {} }"#;
+const NONEMPTY_CONFIG: &str = r#"return { name = "sdk-plugin", needs = {}, modules = { sdk = { extra = true } }, tools = {} }"#;
 const WRONG_CONFIG: &str =
     r#"return { name = "sdk-plugin", needs = {}, modules = { sdk = "yes" }, tools = {} }"#;
 const MODULES_NOT_A_TABLE: &str =
@@ -146,7 +145,10 @@ fn sdk_opt_in_emits_the_existing_declaration_for_every_target() {
         if target == "opencode" {
             let descriptor = std::fs::read_to_string(out.join("opencode/manifest.json"))
                 .expect("wire descriptor");
-            assert!(!descriptor.contains("modules"), "metadata stays off the wire");
+            assert!(
+                !descriptor.contains("modules"),
+                "metadata stays off the wire"
+            );
         }
     }
 }
