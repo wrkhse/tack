@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/mutants-outcome.sh"
+fixture="$(dirname -- "$script")/fixtures/empty-shard.txt"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 
@@ -96,3 +97,45 @@ set -e
 grep -Fq 'cargo mutants exited 9' "$tmp/f.out"
 grep -Fq 'its outcome cannot be used' "$tmp/f.out"
 printf 'ok: nonzero exit with an existing outcome fails with a named reason\n'
+
+# The failing shard's own zero-mutants output with an empty --list writes a zero.
+cp -- "$fixture" "$tmp/g.log"
+: > "$tmp/g.list"
+run_script "$tmp/g.out" 0 "$tmp/g.log" "$tmp/g.list" \
+  "$tmp/g/outcomes.json" "$tmp/g.github-output"
+
+[ -f "$tmp/g/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/g/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/g.github-output"
+printf 'ok: empty-shard fixture and empty list write a zero outcome\n'
+
+# The empty-shard line with a nonempty --list still fails with a named reason.
+cp -- "$fixture" "$tmp/h.log"
+printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/h.list"
+
+set +e
+run_script "$tmp/h.out" 0 "$tmp/h.log" "$tmp/h.list" \
+  "$tmp/h/outcomes.json" "$tmp/h.github-output"
+h_status=$?
+set -e
+
+[ "$h_status" -ne 0 ]
+[ ! -e "$tmp/h/outcomes.json" ]
+grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/h.out"
+printf 'ok: empty-shard line with mutants in the list fails with a named reason\n'
+
+# A nonzero exit still fails even with the empty-shard line and an empty list.
+cp -- "$fixture" "$tmp/i.log"
+: > "$tmp/i.list"
+
+set +e
+run_script "$tmp/i.out" 7 "$tmp/i.log" "$tmp/i.list" \
+  "$tmp/i/outcomes.json" "$tmp/i.github-output"
+i_status=$?
+set -e
+
+[ "$i_status" -ne 0 ]
+[ ! -e "$tmp/i/outcomes.json" ]
+grep -Fq 'cargo mutants exited 7; its outcome cannot be used' "$tmp/i.out"
+printf 'ok: nonzero exit with the empty-shard line fails with a named reason\n'
