@@ -744,6 +744,30 @@ mod audit_tests {
     }
 
     #[test]
+    fn a_concatenated_capability_name_is_refused() {
+        let scratch = Scratch::new();
+        let error = refused(
+            &scratch,
+            &source(
+                "\"control.call.nav\"",
+                "ctx.control.call(\"nav\" .. \"igate\", payload)",
+            ),
+        );
+
+        assert_dynamic(&error);
+
+        let scratch = Scratch::new();
+        scratch.write(
+            "plugin.luau",
+            &source("\"control.call.nav\"", "ctx.control.call(\"nav\", payload)"),
+        );
+        let out = scratch.path().join("dist");
+
+        build(scratch.path(), &out, BuildOptions::default())
+            .expect("the exact literal capability name builds");
+    }
+
+    #[test]
     fn an_undeclared_literal_names_the_capability() {
         let scratch = Scratch::new();
         let error = refused(

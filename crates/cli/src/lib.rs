@@ -159,11 +159,14 @@ fn validate_entry(entry: &str) -> Result<(), BuildError> {
 
 /// A capability call name is nonempty and made only of ASCII letters,
 /// digits and underscores, so a call cannot smuggle syntax through its name.
-fn is_call_name(name: &str) -> bool {
+fn is_call_name(name: &str, rest: &str) -> bool {
+    // The name is one quoted literal; a remainder that is not a comma or
+    // a closing parenthesis is a concatenated or otherwise dynamic name.
     !name.is_empty()
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && (rest.starts_with(',') || rest.starts_with(')'))
 }
 
 /// Whether the text right after `control` indexes a call name, as in
@@ -268,11 +271,11 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
         }
 
         let literal = literal.ok_or(BuildError::DynamicCapability)?;
-        let (name, _) = literal
+        let (name, rest) = literal
             .split_once('"')
             .ok_or(BuildError::DynamicCapability)?;
 
-        if !is_call_name(name) {
+        if !is_call_name(name, rest) {
             return Err(BuildError::DynamicCapability);
         }
 
