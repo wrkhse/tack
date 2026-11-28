@@ -14,6 +14,7 @@ path = "src/main.rs"
 serde_json.workspace = true
 tack_protocol = { path = "../protocol" }
 tack-luau = { path = "../luau" }
+tack_sdk = { path = "../sdk" }
 tack-adapter-opencode = { path = "../../adapters/opencode" }
 tack-adapter-claude = { path = "../../adapters/claude" }
 tack-adapter-pi = { path = "../../adapters/pi" }

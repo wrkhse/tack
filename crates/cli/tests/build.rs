@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
 use tack_cli::{BuildOptions, DAEMON_BIN, build};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest, ToolDef};
+use tack_sdk::TACK_D_LUAU;
 
 const TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -231,4 +232,52 @@ fn the_manifest_json_has_the_plugin_contract() {
     let emitted: PluginManifest = serde_json::from_slice(&bytes).expect("manifest parses");
 
     assert_eq!(emitted, manifest());
+}
+
+#[test]
+fn sdk_declarations_are_absent_when_unlisted() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+
+    build(&fixture(), &out, BuildOptions::default()).expect("fixture builds");
+
+    assert!(!out.join("sdk").join("tack.d.luau").exists());
+}
+
+#[test]
+fn sdk_declarations_are_emitted_when_listed() {
+    let scratch = Scratch::new();
+    let plugin = scratch.path().join("plugin");
+    std::fs::create_dir_all(&plugin).expect("plugin folder");
+    std::fs::write(
+        plugin.join("plugin.luau"),
+        r#"return { name = "sdk-plugin", needs = { "sdk" } }"#,
+    )
+    .expect("plugin manifest");
+    let out = scratch.path().join("dist");
+
+    build(&plugin, &out, BuildOptions::default()).expect("plugin builds");
+
+    let declarations = std::fs::read_to_string(out.join("sdk").join("tack.d.luau"))
+        .expect("SDK declarations are readable");
+    assert_eq!(declarations, TACK_D_LUAU);
+    assert!(declarations.starts_with("--!strict"));
+    assert!(declarations.contains("export type Plugin"));
+}
+
+#[test]
+fn an_unknown_need_still_fails() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"return { name = "unknown-plugin", needs = { "not-a-module" } }"#,
+    );
+    let out = scratch.path().join("dist");
+
+    let result = build(scratch.path(), &out, BuildOptions::default());
+
+    assert!(matches!(
+        result,
+        Err(tack_cli::BuildError::NeedMissing(name)) if name == "not-a-module"
+    ));
 }

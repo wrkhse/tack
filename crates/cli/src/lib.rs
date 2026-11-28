@@ -29,7 +29,7 @@ pub const DAEMON_BIN: &str = "tack-daemon";
 /// resolves it.
 pub const HOOK_BIN: &str = "tack-hook";
 
-const SUPPORTED: [&str; 3] = ["sandbox", "daemon", "opencode"];
+const SUPPORTED: [&str; 4] = ["sandbox", "daemon", "opencode", "sdk"];
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -91,7 +91,7 @@ impl Default for BuildOptions {
 }
 
 /// Canonicalize a plugin folder, read its manifest in the sandbox, and check
-/// its needs.
+/// its needs. `sdk` is an opt-in need that emits typed Luau declarations.
 fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
     let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
@@ -115,6 +115,20 @@ fn deny_reasons() -> Vec<&'static str> {
         .iter()
         .map(|reason| reason.as_str())
         .collect()
+}
+
+/// Emit the SDK's typed Luau declarations only when the plugin opts in.
+fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<(), BuildError> {
+    if !manifest.needs.iter().any(|need| need == tack_sdk::SDK_NEED) {
+        return Ok(());
+    }
+
+    let dest = out.join("sdk");
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    let declarations = dest.join("tack.d.luau");
+    std::fs::write(&declarations, tack_sdk::TACK_D_LUAU).map_err(BuildError::Io)?;
+
+    Ok(())
 }
 
 /// Read one plugin, check its needs, and emit the `OpenCode` wrapper and manifest.
@@ -160,6 +174,7 @@ pub fn build(
         BuildError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
     std::fs::write(&descriptor, pretty).map_err(BuildError::Io)?;
+    emit_sdk(out, &manifest)?;
 
     Ok((index, descriptor))
 }
@@ -206,6 +221,8 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
         written.push(path);
     }
 
+    emit_sdk(out, &manifest)?;
+
     Ok(written)
 }
 
@@ -218,13 +235,14 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
 /// contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderExtension`] when the extension cannot be rendered.
 pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir)?;
     let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
 
     let dest = out.join("pi");
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
     let extension = dest.join(EXTENSION_JS);
     std::fs::write(&extension, script).map_err(BuildError::Io)?;
+    emit_sdk(out, &manifest)?;
 
     Ok(extension)
 }
@@ -319,7 +337,7 @@ pub fn build_codex(
     out: &Path,
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir)?;
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
@@ -353,6 +371,7 @@ pub fn build_codex(
     written.push(installed.hooks);
     written.push(installed.config);
     written.push(installed.hashes);
+    emit_sdk(out, &manifest)?;
 
     Ok(written)
 }

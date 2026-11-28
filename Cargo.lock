@@ -461,6 +461,7 @@ dependencies = [
  "tack-adapter-opencode",
  "tack-adapter-pi",
  "tack-luau",
+ "tack_sdk",
  "tack_protocol",
 ]
 
