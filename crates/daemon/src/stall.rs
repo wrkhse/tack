@@ -169,6 +169,7 @@ mod tests {
     const DENY_REQUEST: &str = r#"{"type":"hook","id":1,"version":1,"hook":"PreToolUse","call":{"tool":"bash","name":"run","input":{"command":"git push"}}}"#;
     const DENY_REPLY: &str =
         r#"{"type":"hook","id":1,"outcome":{"deny":{"reason":"push blocked"}}}"#;
+    const ERROR_REPLY: &str = r#"{"type":"error","id":1,"error":"stall_unavailable","message":"the stall did not answer"}"#;
     const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     const REWRITE_REQUEST: &str = r#"{"type":"hook","id":2,"version":1,"hook":"PostToolUse","call":{"tool":"github","name":"create_issue","input":{"title":"Fix flaky test"},"session_id":"sess-42"},"_meta":{"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","tracestate":"congo=t61rcWkgMzE"}}"#;
     const REWRITE_REPLY: &str = r#"{"type":"hook","id":2,"outcome":{"rewrite":{"input":{"title":"Fix flaky test","labels":["bug","p1"]}}}}"#;
@@ -343,6 +344,22 @@ mod tests {
     }
 
     #[test]
+    fn error_reply_is_accepted_for_a_hook_request() {
+        let clock = FakeClock::new(Instant::now());
+        let stall = FakeStall::reply(clock.clone(), ERROR_REPLY);
+        let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
+
+        let expected = Reply::Error {
+            id: 1,
+            error: "stall_unavailable".to_owned(),
+            message: "the stall did not answer".to_owned(),
+        };
+
+        assert_eq!(client.call(&deny_request()), Ok(expected));
+        assert_eq!(client.transport.frames(), &[DENY_REQUEST.to_owned()]);
+    }
+
+    #[test]
     fn transport_receives_the_deadline_from_the_injected_clock() {
         let start = Instant::now();
         let budget = Duration::from_secs(1);
@@ -394,7 +411,7 @@ mod tests {
     #[test]
     fn multi_line_reply_is_malformed() {
         let clock = FakeClock::new(Instant::now());
-        let stall = FakeStall::reply(clock.clone(), "first\nsecond");
+        let stall = FakeStall::reply(clock.clone(), &format!("{DENY_REPLY}\n{DENY_REPLY}"));
         let mut client = StallClient::new(clock, stall, Duration::from_secs(1));
 
         assert_eq!(client.call(&deny_request()), Err(StallError::Malformed));
