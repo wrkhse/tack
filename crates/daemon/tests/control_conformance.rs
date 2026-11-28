@@ -3,8 +3,8 @@
 //! Drives the actual daemon binary against the actual barn stall. The plugin
 //! reaches a vendor-neutral harness through a computed control key, so the
 //! frame carries no plugin identity: authorization must come from the daemon's
-//! own launch arguments and the host grants file. Each test is inert unless
-//! `TACK_BARN_BIN` names a barn binary; CI supplies one.
+//! own launch arguments and the host grants file. `TACK_BARN_BIN` must name a
+//! barn binary; a missing value panics with a named message rather than skipping.
 
 #![cfg(test)]
 
@@ -26,6 +26,7 @@ use tack_protocol::wire::{
 
 const WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(10);
+const READY_WAIT: Duration = Duration::from_secs(10);
 const HARNESS_CALL: &str = r#"{"call":"navigate","input":{"target":"proof"}}"#;
 const HARNESS_REPLY: &str = "{\"result\":{\"reached\":\"harness\"}}\n";
 const GRANTS: &str = r#"{"grants":{"control-proof":{"control":{"calls":["navigate"]}}}}"#;
@@ -199,6 +200,14 @@ impl Drop for Daemon {
     }
 }
 
+/// The real-stall proof cannot run without a barn binary, so a missing path
+/// fails loudly rather than silently skipping the conformance checks.
+fn barn_bin() -> String {
+    std::env::var("TACK_BARN_BIN").unwrap_or_else(|_| {
+        panic!("TACK_BARN_BIN is required for the real-stall control conformance proof")
+    })
+}
+
 fn start_daemon(barn: &str, sandbox: &Sandbox, plugin: &Path, grants: Option<&Path>) -> Daemon {
     start_daemon_with(barn, sandbox, plugin, grants, true)
 }
@@ -276,6 +285,51 @@ fn wait_for_socket(socket: &Path) -> UnixStream {
     }
 }
 
+/// Wait for a cold stall to leave its startup window. An unknown tool name
+/// is refused without reaching any plugin, so this cannot touch the harness.
+fn wait_until_ready(socket: &Path) {
+    let deadline = Instant::now()
+        .checked_add(READY_WAIT)
+        .unwrap_or_else(Instant::now);
+
+    loop {
+        let mut stream = wait_for_socket(socket);
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        stream.set_write_timeout(Some(WAIT)).unwrap();
+
+        let request = Request::Tool {
+            id: 999,
+            version: PROTOCOL_VERSION,
+            name: "__readiness_probe__".to_owned(),
+            input: json!({}),
+        };
+        stream.write_all(&encode_line(&request).unwrap()).unwrap();
+        stream.flush().unwrap();
+
+        let mut reader = BufReader::new(stream);
+        let line = read_line(&mut reader).unwrap().expect("the daemon replied");
+        let reply: Reply = serde_json::from_slice(&line).unwrap();
+
+        let warming_up = reply
+            == Reply::Error {
+                id: 999,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::DaemonError,
+                message: "timeout".to_owned(),
+            };
+
+        if !warming_up {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "the stall never became ready: timeout"
+        );
+        thread::sleep(POLL);
+    }
+}
+
 fn tool_reply(socket: &Path) -> Reply {
     let mut stream = wait_for_socket(socket);
     stream.set_read_timeout(Some(WAIT)).unwrap();
@@ -297,15 +351,13 @@ fn tool_reply(socket: &Path) -> Reply {
 
 #[test]
 fn a_denied_control_call_never_reaches_the_harness() {
-    let Ok(barn) = std::env::var("TACK_BARN_BIN") else {
-        println!("skipping: TACK_BARN_BIN is not set");
-        return;
-    };
+    let barn = barn_bin();
 
     let sandbox = Sandbox::new();
     let harness = FakeHarness::start(&sandbox.harness_socket());
     let plugin = sandbox.plugin();
     let _daemon = start_daemon(&barn, &sandbox, &plugin, None);
+    wait_until_ready(&sandbox.socket());
 
     assert_eq!(
         tool_reply(&sandbox.socket()),
@@ -323,16 +375,14 @@ fn a_denied_control_call_never_reaches_the_harness() {
 
 #[test]
 fn a_granted_control_call_returns_the_harness_result() {
-    let Ok(barn) = std::env::var("TACK_BARN_BIN") else {
-        println!("skipping: TACK_BARN_BIN is not set");
-        return;
-    };
+    let barn = barn_bin();
 
     let sandbox = Sandbox::new();
     let harness = FakeHarness::start(&sandbox.harness_socket());
     let plugin = sandbox.plugin();
     let grants = sandbox.grants(GRANTS);
     let _daemon = start_daemon(&barn, &sandbox, &plugin, Some(&grants));
+    wait_until_ready(&sandbox.socket());
 
     assert_eq!(
         tool_reply(&sandbox.socket()),
@@ -350,16 +400,14 @@ fn a_granted_control_call_returns_the_harness_result() {
 
 #[test]
 fn a_granted_call_without_a_declared_need_never_reaches_the_harness() {
-    let Ok(barn) = std::env::var("TACK_BARN_BIN") else {
-        println!("skipping: TACK_BARN_BIN is not set");
-        return;
-    };
+    let barn = barn_bin();
 
     let sandbox = Sandbox::new();
     let harness = FakeHarness::start(&sandbox.harness_socket());
     let plugin = sandbox.undeclared_plugin();
     let grants = sandbox.grants(GRANTS);
     let _daemon = start_daemon_undeclared(&barn, &sandbox, &plugin, Some(&grants));
+    wait_until_ready(&sandbox.socket());
 
     assert_eq!(
         tool_reply(&sandbox.socket()),

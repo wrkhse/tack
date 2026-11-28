@@ -37,7 +37,7 @@ jobs:
           key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features tack_daemon/control-conformance --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: Run the 50-iteration timing stability proof
         run: cargo test --workspace --locked -- --ignored timing_proofs_hold_across_fifty_runs_in_ci
@@ -133,7 +133,7 @@ jobs:
       - name: Real-stall control conformance
         env:
           TACK_BARN_BIN: ${{ github.workspace }}/target/debug/barn
-        run: cargo test -p tack_daemon --test control_conformance -- --nocapture
+        run: cargo test -p tack_daemon --features control-conformance --test control_conformance -- --nocapture
       - run: cargo run --locked -p tack-cli -- build fixtures/safe-push --out dist
       - run: node adapters/opencode/wrapper.test.mjs
       - run: node test/e2e/run.mjs
