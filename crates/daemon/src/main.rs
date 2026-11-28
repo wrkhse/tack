@@ -389,10 +389,10 @@ fn launch_from_child(child: &mut Child, deadline: Instant) -> Result<HostClient,
             }
             reaper.disarm();
 
-            if let Some(status) = status {
-                if matches!(status.code(), Some(code) if code != 0) {
-                    return Err(PipeError::Error(reason));
-                }
+            if let Some(status) = status
+                && matches!(status.code(), Some(code) if code != 0)
+            {
+                return Err(PipeError::Error(reason));
             }
 
             return Err(PipeError::Malformed);
