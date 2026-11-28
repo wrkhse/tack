@@ -22,13 +22,14 @@ export type ToolBeforeResult = HookResult
 export type OnError = "deliver" | "deny"
 
 -- Capabilities are injected into hooks by the barn stall later. Today this
--- file only declares them and a build-time audit scans plugin sources; that
--- audit is an early developer-facing check that can be bypassed, not a
--- security boundary. The runtime refusal comes later with the barn engine.
--- No runtime client module is importable, and the default grant is none: a
--- plugin must be granted `control.call.<name>` at build time to call it. The
--- audit scans comments and string literals too, so mentioning a capability
--- counts as a call (conservative fail-closed).
+-- file only declares them, and a build-time audit scans plugin sources. A
+-- plugin declares the capabilities it calls in its `needs` list, such as
+-- `control.call.navigate`. The audit is an early, developer-facing error that
+-- can be bypassed, not a security boundary: host config grants them per plugin
+-- in a later PR, and the daemon's refusal of undeclared or ungranted calls at
+-- run time is the later security boundary. No runtime client module is
+-- importable. The audit scans comments and string literals too, so mentioning
+-- a capability counts as a call (conservative fail-closed).
 export type Control = { call: (name: string, input: any) -> any }
 
 -- Rust-backed helpers passed as the second hook and tool argument.

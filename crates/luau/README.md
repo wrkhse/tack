@@ -72,10 +72,8 @@ directly on `ctx`; another value appears as `ctx.host`. Verdict helpers
 and registered capabilities take precedence over host fields. A hook can
 use `ctx.rewrite(payload)` to replace the entire payload.
 
-The manifest contains the plugin's `name`, `needs`, a bounded `grants`
-array of capability names, and a `tools` array. `grants` defaults to empty,
-so no capability is granted; barn enforces grants at runtime. Tool entries
-carry their name and other non-function fields.
+The manifest contains the plugin's `name`, `needs`, and a `tools` array.
+Tool entries carry their name and other non-function fields.
 
 ## Confinement and limits
 

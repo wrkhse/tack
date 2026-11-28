@@ -75,7 +75,6 @@ fn manifest() -> PluginManifest {
     PluginManifest {
         name: "safe-push".into(),
         needs: vec![],
-        grants: Vec::new(),
         tools: vec![ToolDef {
             name: "guard_status".into(),
             description: "Reports whether the tack daemon is running".into(),
@@ -581,7 +580,7 @@ fn a_table_valued_hook_fixture_still_builds() {
 }
 
 #[test]
-fn an_out_of_grant_control_call_fails_the_build() {
+fn a_control_call_missing_from_needs_fails_the_build() {
     let scratch = Scratch::new();
     scratch.write(
         "plugin.luau",
@@ -597,7 +596,7 @@ fn an_out_of_grant_control_call_fails_the_build() {
     let out = scratch.path().join("dist");
 
     let error = build(scratch.path(), &out, BuildOptions::default())
-        .expect_err("an ungranted control call is refused");
+        .expect_err("an undeclared control call is refused");
 
     assert!(matches!(
         &error,
@@ -607,14 +606,13 @@ fn an_out_of_grant_control_call_fails_the_build() {
 }
 
 #[test]
-fn a_granted_control_call_builds() {
+fn a_declared_control_call_builds() {
     let scratch = Scratch::new();
     scratch.write(
         "plugin.luau",
         r#"return {
     name = "control-plugin",
-    needs = { "sdk" },
-    grants = { "control.call.navigate" },
+    needs = { "sdk", "control.call.navigate" },
     eventBefore = function(payload, ctx)
         ctx.control.call("navigate", payload)
         return ctx.allow()
@@ -623,7 +621,7 @@ fn a_granted_control_call_builds() {
     );
     let out = scratch.path().join("dist");
 
-    build(scratch.path(), &out, BuildOptions::default()).expect("a granted control call builds");
+    build(scratch.path(), &out, BuildOptions::default()).expect("a declared control call builds");
 }
 
 #[test]
@@ -662,12 +660,11 @@ mod audit_tests {
     use super::*;
 
     /// A plugin whose only hook holds the call under test.
-    fn source(grants: &str, body: &str) -> String {
+    fn source(needs: &str, body: &str) -> String {
         format!(
             r#"return {{
     name = "audit-plugin",
-    needs = {{ "sdk" }},
-    grants = {{ {grants} }},
+    needs = {{ "sdk", {needs} }},
     eventBefore = function(payload, ctx)
         {body}
         return ctx.allow()
@@ -740,7 +737,7 @@ mod audit_tests {
     }
 
     #[test]
-    fn an_ungranted_literal_names_the_capability() {
+    fn an_undeclared_literal_names_the_capability() {
         let scratch = Scratch::new();
         let error = refused(
             &scratch,
@@ -751,7 +748,7 @@ mod audit_tests {
     }
 
     #[test]
-    fn an_ungranted_literal_is_refused_beside_a_granted_one() {
+    fn an_undeclared_literal_is_refused_beside_a_declared_one() {
         let scratch = Scratch::new();
         let error = refused(
             &scratch,
@@ -766,12 +763,12 @@ mod audit_tests {
                 &error,
                 tack_cli::BuildError::UngrantedCapability(name) if name == "other"
             ),
-            "expected the ungranted name, got {error:?}"
+            "expected the undeclared name, got {error:?}"
         );
     }
 
     #[test]
-    fn a_granted_literal_in_a_second_source_file_builds() {
+    fn a_declared_literal_in_a_second_source_file_builds() {
         let scratch = Scratch::new();
         scratch.write(
             "plugin.luau",
@@ -791,11 +788,11 @@ mod audit_tests {
         );
         let out = scratch.path().join("dist");
 
-        build(scratch.path(), &out, BuildOptions::default()).expect("granted calls build");
+        build(scratch.path(), &out, BuildOptions::default()).expect("declared calls build");
     }
 
     #[test]
-    fn invalid_grant_entries_are_refused_by_name() {
+    fn invalid_need_entries_are_refused_by_name() {
         let long = format!("control.call.{}", "a".repeat(200));
         for entry in ["control.call.bad-name", "control.call.", long.as_str()] {
             let scratch = Scratch::new();
@@ -812,13 +809,13 @@ mod audit_tests {
     }
 
     #[test]
-    fn more_than_128_grants_are_refused() {
-        let grants = (0..129)
+    fn more_than_128_needs_are_refused() {
+        let needs = (0..129)
             .map(|i| format!("\"control.call.cap{i}\""))
             .collect::<Vec<_>>()
             .join(", ");
         let scratch = Scratch::new();
-        let error = refused(&scratch, &source(&grants, ""));
+        let error = refused(&scratch, &source(&needs, ""));
 
         assert!(
             matches!(&error, tack_cli::BuildError::CapabilityCount),

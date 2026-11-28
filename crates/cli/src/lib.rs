@@ -38,9 +38,9 @@ const MAX_AUDIT_FILES: usize = 64;
 const MAX_AUDIT_BYTES: u64 = 1024 * 1024;
 /// The largest number of capability calls one source may contain.
 const MAX_AUDIT_CALLS: usize = 128;
-/// The largest number of entries a grant or needs list may hold.
+/// The largest number of needs entries a plugin may declare.
 const MAX_CAPABILITY_ENTRIES: usize = 128;
-/// The largest identifier a grant entry may name.
+/// The largest identifier a capability need may name.
 const MAX_IDENT_BYTES: usize = 128;
 /// The member whose calls the audit reports.
 const CONTROL: &str = "control";
@@ -48,7 +48,7 @@ const CONTROL: &str = "control";
 const CONTROL_QUALIFIER: &str = "ctx.";
 /// The member access that follows `control` in a capability call.
 const CALL_PREFIX: &str = ".call(\"";
-/// The prefix of a capability grant entry.
+/// The prefix of a capability need entry.
 const CONTROL_CALL_PREFIX: &str = "control.call.";
 
 #[derive(Debug)]
@@ -127,9 +127,9 @@ impl Default for BuildOptions {
     }
 }
 
-/// A grant entry names one capability. Entries the runtime can grant start
-/// with `control.call.` and carry a short identifier; every other entry is
-/// refused so a typo cannot widen a plugin's privileges.
+/// A capability need names one capability. Declared capabilities start with
+/// `control.call.` and carry a short identifier; every other entry is refused
+/// so a typo cannot widen a plugin's privileges.
 fn validate_entry(entry: &str) -> Result<(), BuildError> {
     let Some(ident) = entry.strip_prefix(CONTROL_CALL_PREFIX) else {
         return Err(BuildError::InvalidCapabilityEntry(entry.to_owned()));
@@ -150,7 +150,7 @@ fn validate_entry(entry: &str) -> Result<(), BuildError> {
 /// Audit one source by scanning every `control` occurrence. A call-shaped
 /// occurrence must be the literal `ctx.control.call("<ident>")` form, so a call
 /// hidden in a comment or string is still checked. A `control` substring in a
-/// plugin name or grant string carries no call and is left alone.
+/// plugin name or need string carries no call and is left alone.
 fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
     let mut cursor = 0usize;
     let mut calls = 0usize;
@@ -232,7 +232,8 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
 }
 
 /// Audit the plugin's Luau sources for capability calls, refusing any call
-/// whose name the manifest does not grant. The walk visits sorted entries,
+/// whose name the manifest does not declare in `needs`. The walk visits sorted
+/// entries,
 /// skips files that are not `.luau`, refuses symlinks and files whose
 /// canonical path leaves the plugin folder, and bounds reads to 64 files of
 /// at most 1 MiB each.
@@ -287,16 +288,18 @@ fn audit_capabilities(plugin_dir: &Path, manifest: &PluginManifest) -> Result<()
         read = read.checked_add(1).ok_or(BuildError::AuditLimit)?;
 
         let source = String::from_utf8_lossy(&bytes);
-        audit_source(&source, &manifest.grants)?;
+        audit_source(&source, &manifest.needs)?;
     }
 
     Ok(())
 }
 
 /// Canonicalize a plugin folder, read its manifest in the sandbox, check its
-/// needs, and audit capability calls against the manifest's grants. The audit
-/// is an early developer-facing check, not the security boundary: the runtime
-/// refuses ungranted calls when the plugin runs. `sdk` is an opt-in need
+/// needs, and audit capability calls against the capabilities declared in
+/// `needs`. A plugin declares the capabilities it uses in `needs`; the host
+/// config grants them per plugin in a later PR, and the daemon refuses
+/// ungranted calls at run time as the security boundary. The build audit is an
+/// early, developer-facing error, not that boundary. `sdk` is an opt-in need
 /// that emits typed Luau declarations.
 fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
@@ -307,14 +310,8 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     let manifest: PluginManifest =
         serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
 
-    if manifest.grants.len() > MAX_CAPABILITY_ENTRIES
-        || manifest.needs.len() > MAX_CAPABILITY_ENTRIES
-    {
+    if manifest.needs.len() > MAX_CAPABILITY_ENTRIES {
         return Err(BuildError::CapabilityCount);
-    }
-
-    for grant in &manifest.grants {
-        validate_entry(grant)?;
     }
 
     for need in &manifest.needs {
@@ -790,7 +787,6 @@ mod tests {
         let manifest = PluginManifest {
             name: "x".into(),
             needs: Vec::new(),
-            grants: Vec::new(),
             tools: Vec::new(),
         };
 

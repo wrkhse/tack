@@ -16,9 +16,7 @@ flowchart LR
 - `mod.rs`: `Sandbox` and its public API (`new`, `hook`, `run`,
   `manifest`), the runners `run_hook` and `run_runnable`, and the manifest
   readers `read_manifest`, `read_needs` and `read_tools`. Declares the
-  modules and re-exports the public types. The manifest readers use one
-  bounded string-array helper for both `needs` and `grants`, with the same
-  entry limit and named errors.
+  modules and re-exports the public types.
 - `errors.rs`: `MAX_DEPTH`, `MAX_ENTRIES`, `LimitCause`, `LoadCause`
   and `EngineError`, with their display, error and `mlua::Error` impls.
 - `deadline.rs`: `Deadline`, the armed clock the VM interrupt polls on

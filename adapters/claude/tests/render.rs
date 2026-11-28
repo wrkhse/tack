@@ -39,7 +39,6 @@ impl<'a> Fixture<'a> {
         let manifest = PluginManifest {
             name: "safe-push".into(),
             needs: vec![],
-            grants: Vec::new(),
             tools,
         };
 

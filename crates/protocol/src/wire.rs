@@ -171,8 +171,6 @@ pub struct PluginManifest {
     pub name: String,
     #[serde(default)]
     pub needs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grants: Vec<String>,
     pub tools: Vec<ToolDef>,
 }
 

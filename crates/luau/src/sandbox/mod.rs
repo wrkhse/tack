@@ -221,7 +221,6 @@ impl Sandbox {
         Ok(json!({
             "name": name,
             "needs": self.read_string_array("needs", "needs")?,
-            "grants": self.read_string_array("grants", "grants")?,
             "tools": self.read_tools()?,
         }))
     }

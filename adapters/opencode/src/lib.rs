@@ -126,7 +126,6 @@ mod tests {
         PluginManifest {
             name: "safe-push".into(),
             needs: vec!["daemon".into()],
-            grants: Vec::new(),
             tools: vec![ToolDef {
                 name: "guard_status".into(),
                 description: "Reports daemon status".into(),
