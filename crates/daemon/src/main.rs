@@ -1299,13 +1299,14 @@ sleep 5"#
             thread::sleep(Duration::from_millis(150));
             writeln!(
                 stream,
+                "{}",
                 r#"{"jsonrpc":"2.0","id":21,"result":{"stall":"sourcefed"}}"#
             )
             .unwrap();
 
             line.clear();
             reader.read_line(&mut line).unwrap();
-            writeln!(stream, r#"{"type":"hook","id":22,"outcome":"allow"}"#).unwrap();
+            writeln!(stream, "{}", r#"{"type":"hook","id":22,"outcome":"allow"}"#).unwrap();
         });
 
         let endpoint = format!(
