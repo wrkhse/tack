@@ -673,4 +673,18 @@ mod tests {
             b"{}\n"
         );
     }
+
+    #[test]
+    fn parse_build_args_accepts_the_maximum_timeout() {
+        let (_, options) = parsed(&[
+            "--out",
+            "/dist",
+            "--call-timeout-ms",
+            "60000",
+            "--start-timeout-ms",
+            "60000",
+        ]);
+        assert_eq!(options.call_timeout_ms, MAX_TIMEOUT_MS);
+        assert_eq!(options.start_timeout_ms, MAX_TIMEOUT_MS);
+    }
 }

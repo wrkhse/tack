@@ -1207,6 +1207,64 @@ mod tests {
         assert_eq!(into, line);
     }
 
+    // A reader that fails one fill with a non-Interrupted error, then would
+    // yield a full line if the failure were wrongly retried.
+    struct FailsOnceWith {
+        remaining: Cursor<Vec<u8>>,
+        failed: bool,
+    }
+
+    impl FailsOnceWith {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                remaining: Cursor::new(bytes),
+                failed: false,
+            }
+        }
+    }
+
+    impl ReadTimeout for FailsOnceWith {
+        fn set_read_timeout(&mut self, _timeout: Duration) -> Result<(), StallError> {
+            Ok(())
+        }
+    }
+
+    impl Read for FailsOnceWith {
+        fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+            self.remaining.read(into)
+        }
+    }
+
+    impl BufRead for FailsOnceWith {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if !self.failed {
+                self.failed = true;
+
+                return Err(io::ErrorKind::ConnectionReset.into());
+            }
+
+            self.remaining.fill_buf()
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.remaining.consume(amount);
+        }
+    }
+
+    #[test]
+    fn a_non_interrupted_fill_error_is_reported_not_retried() {
+        let line = wire(&json!({ "ok": true }));
+        let mut reader = FailsOnceWith::new(line);
+        let mut into = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            read_line(&mut reader, &mut into, deadline),
+            Err(StallError::Closed)
+        );
+        assert_eq!(into, Vec::<u8>::new());
+    }
+
     #[test]
     fn closed_socket_kinds_are_named_closed() {
         for kind in [
