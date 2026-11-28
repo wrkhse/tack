@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tack_cli::{BuildError, BuildOptions, Output, build, build_plugin, build_sdk};
-use tack_sdk::CONTRACT_VERSION;
+use tack_cli::{
+    BuildError, BuildOptions, Output, build, build_codex, build_pi, build_plugin, build_sdk,
+};
+use tack_sdk::{CONTRACT_VERSION, TACK_D_LUAU};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -73,7 +75,10 @@ fn a_listing_plugin_gets_the_declarations_in_its_own_folder() {
     assert_eq!(std::fs::read_dir(&out).expect("output folder").count(), 1);
     let emitted = std::fs::read_to_string(&path).expect("declarations are readable");
     assert_eq!(CONTRACT_VERSION, 1);
-    assert!(emitted.ends_with("}\nexport type ContractVersion = 1\n"));
+    assert_eq!(
+        emitted.strip_prefix(TACK_D_LUAU),
+        Some("export type ContractVersion = 1\n")
+    );
 }
 
 #[test]
@@ -374,6 +379,51 @@ fn the_declarations_are_named_for_the_manifest_the_target_built() {
         serde_json::from_slice(&manifest_bytes).expect("manifest parses");
     assert_eq!(manifest["name"], "guard");
     assert_eq!(written.last(), Some(&out.join("sdk").join("guard.d.luau")));
+}
+
+#[test]
+fn build_pi_returns_the_extension_it_wrote() {
+    let scratch = Scratch::new();
+    scratch.write_plugin(r#"return { name = "guard", tools = {} }"#);
+    let out = scratch.out();
+
+    let written = build_pi(scratch.path(), &out).expect("Pi build succeeds");
+
+    assert_eq!(written, out.join("pi").join("extension.js"));
+    assert!(written.is_file());
+}
+
+#[test]
+fn build_codex_returns_every_output_and_home_path_in_order() {
+    let scratch = Scratch::new();
+    // planned_dir canonicalizes the deepest existing ancestor, so build the
+    // expected paths from the canonical root the build reports.
+    let root = std::fs::canonicalize(scratch.path()).expect("canonical scratch folder");
+    let out = root.join("dist");
+    let home = root.join("codex-home");
+    std::fs::create_dir_all(&home).expect("codex home");
+    std::fs::write(home.join("config.toml"), "").expect("config");
+    std::fs::write(home.join("hooks.json"), "{}\n").expect("hooks");
+    scratch.write_plugin(r#"return { name = "guard", tools = {} }"#);
+
+    let written = build_codex(scratch.path(), &out, &home).expect("Codex build succeeds");
+
+    let expected: Vec<PathBuf> = [
+        out.join("codex").join("hooks.json"),
+        out.join("codex").join("pre-tool-use.js"),
+        out.join("codex").join("session-start.js"),
+        out.join("codex").join("mcp.js"),
+        out.join("codex").join("config.toml"),
+        out.join("codex").join("run-hook.sh"),
+        home.join("hooks.json"),
+        home.join("config.toml"),
+        home.join("tack-hashes"),
+    ]
+    .to_vec();
+    assert_eq!(written, expected);
+    for path in &expected {
+        assert!(path.is_file(), "{}", path.display());
+    }
 }
 
 #[test]

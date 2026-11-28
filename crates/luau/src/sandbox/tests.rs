@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -990,7 +991,7 @@ fn manifest_limits_the_number_of_modules() {
     let scratch = Scratch::new();
     let mut entries = String::new();
     for index in 0..=MAX_ENTRIES {
-        entries.push_str(&format!("m{index} = {{}},\n"));
+        write!(&mut entries, "m{index} = {{}},\n").expect("format module entry");
     }
     scratch.write(
         "plugin.luau",
