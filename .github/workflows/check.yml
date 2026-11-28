@@ -287,6 +287,8 @@ jobs:
 
           # The --list run is independent evidence that this shard has no
           # mutants; the run's verbose flags would add noise, so omit them.
+          # This --list is shard-scoped, matching the run's --shard k/n; the
+          # whole diff may still have mutants in other shards.
           list_args=(--shard ${{ matrix.shard }}/4 --no-shuffle)
           if [ "$EVENT_NAME" != "push" ]; then
             list_args+=(--in-diff pr.diff)

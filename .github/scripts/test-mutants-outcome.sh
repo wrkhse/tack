@@ -108,3 +108,20 @@ run_script "$tmp/g.out" 0 "$tmp/g.log" "$tmp/g.list" \
   '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
 grep -Fxq 'zero=true' "$tmp/g.github-output"
 printf 'ok: empty-shard zero line and empty list write a zero outcome\n'
+
+# An empty shard coexists with a whole diff that has mutants in other shards.
+# The gate only reads MUTANTS_LIST, which the workflow supplies with the same
+# --shard k/n as the run, so this shard-scoped empty list still yields a zero
+# outcome. The whole-diff list is written aside and never passed to the gate.
+printf 'Found 0 mutants to test\n\033[33m WARN\033[0m No mutants found under the active filters\n' > "$tmp/h.log"
+: > "$tmp/h.list"
+printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/h.whole-diff.list"
+[ -s "$tmp/h.whole-diff.list" ]
+run_script "$tmp/h.out" 0 "$tmp/h.log" "$tmp/h.list" \
+  "$tmp/h/outcomes.json" "$tmp/h.github-output"
+
+[ -f "$tmp/h/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/h/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/h.github-output"
+printf 'ok: empty shard with mutants elsewhere writes a zero outcome from its shard-scoped list\n'
