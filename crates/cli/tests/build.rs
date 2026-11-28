@@ -394,3 +394,51 @@ fn build_codex_emits_sdk_declarations() {
     assert_eq!(contents, TACK_D_LUAU);
     assert!(written.contains(&declarations));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_sdk_folder_is_refused() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("out");
+    std::fs::create_dir_all(&out).expect("out folder");
+    let elsewhere = scratch.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere folder");
+    symlink(&elsewhere, out.join("sdk")).expect("sdk symlink");
+
+    let result = build(&plugin, &out, BuildOptions::default());
+
+    assert!(matches!(result, Err(tack_cli::BuildError::Io(_))));
+    assert!(!elsewhere.join("tack.d.luau").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_sdk_declaration_is_replaced_not_followed() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("out");
+    let sdk = out.join("sdk");
+    std::fs::create_dir_all(&sdk).expect("sdk folder");
+    let target = scratch.path().join("target");
+    std::fs::write(&target, "sentinel").expect("target file");
+    symlink(&target, sdk.join("tack.d.luau")).expect("declaration symlink");
+
+    build(&plugin, &out, BuildOptions::default()).expect("plugin builds");
+
+    let declarations = sdk.join("tack.d.luau");
+    let meta = std::fs::symlink_metadata(&declarations).expect("declaration metadata");
+    assert!(meta.file_type().is_file());
+    assert_eq!(
+        std::fs::read_to_string(&declarations).expect("declarations are readable"),
+        TACK_D_LUAU
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("target is readable"),
+        "sentinel"
+    );
+}

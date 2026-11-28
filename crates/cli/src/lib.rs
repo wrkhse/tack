@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::ErrorKind;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 use tack_adapter_claude::{ModConfig, ModError};
@@ -120,36 +121,52 @@ fn deny_reasons() -> Vec<&'static str> {
 /// Emit the SDK's typed Luau declarations only when the plugin opts in,
 /// returning the path of the emitted file. When the plugin does not opt in,
 /// remove any declarations left by an earlier build so a reused output
-/// directory cannot keep a stale SDK file, and return `None`. Symlinked SDK
-/// output paths are refused before any removal or write.
+/// directory cannot keep a stale SDK file, and return `None`. The parent
+/// folder is checked for symlinks, and every metadata error other than a
+/// missing folder is propagated. The declarations file is unlinked and then
+/// created with `create_new`, so the final operation cannot follow a symlink
+/// planted at the leaf between those two steps.
 fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<Option<PathBuf>, BuildError> {
     let dest = out.join("sdk");
     let declarations = dest.join("tack.d.luau");
 
-    for path in [&dest, &declarations] {
-        if let Ok(meta) = std::fs::symlink_metadata(path)
-            && meta.file_type().is_symlink()
-        {
+    match std::fs::symlink_metadata(&dest) {
+        Ok(meta) if meta.file_type().is_symlink() => {
             return Err(BuildError::Io(std::io::Error::new(
                 ErrorKind::InvalidInput,
                 "symlink in SDK output path",
             )));
         }
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(BuildError::Io(err)),
     }
 
-    if !manifest.needs.iter().any(|need| need == tack_sdk::SDK_NEED) {
+    let remove_stale = || -> Result<(), BuildError> {
         match std::fs::remove_file(&declarations) {
             Ok(()) => {}
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => return Err(BuildError::Io(err)),
         }
+        Ok(())
+    };
+
+    if !manifest.needs.iter().any(|need| need == tack_sdk::SDK_NEED) {
+        remove_stale()?;
         // A folder holding other files is left alone.
         let _ = std::fs::remove_dir(&dest);
         return Ok(None);
     }
 
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
-    std::fs::write(&declarations, tack_sdk::TACK_D_LUAU).map_err(BuildError::Io)?;
+    remove_stale()?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&declarations)
+        .map_err(BuildError::Io)?;
+    file.write_all(tack_sdk::TACK_D_LUAU.as_bytes())
+        .map_err(BuildError::Io)?;
 
     Ok(Some(declarations))
 }
