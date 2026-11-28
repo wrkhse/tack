@@ -114,42 +114,65 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     Ok((plugin_dir, manifest))
 }
 
-/// Refuse a symlink at a path the build owns, so a declaration cannot be
-/// written outside the output folder. If the path cannot be inspected, the
-/// file operation that follows reports any real I/O error.
-fn refuse_symlink(path: &Path, subject: &str) -> Result<(), BuildError> {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return Ok(());
-    };
-
-    if metadata.file_type().is_symlink() {
-        return Err(BuildError::Sdk(format!("the SDK {subject} is a symlink")));
-    }
-
-    Ok(())
-}
-
 /// Emit the SDK's strict Luau declarations for a plugin that lists the `sdk`
 /// module, and remove a stale copy for one that does not.
 ///
-/// The build output folder belongs to the build user; a conflicting file or
-/// directory at the declaration path is reported as a build I/O error.
+/// The build output folder belongs to the build user. A symlink at the output
+/// path or declaration, a non-directory output path, or a non-regular
+/// declaration entry is refused with [`BuildError::Sdk`] rather than followed;
+/// other I/O failures are reported as build I/O errors.
 fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
     let dest = out.join("sdk");
     let declaration = dest.join("tack.d.luau");
 
-    refuse_symlink(&dest, "output path")?;
-    refuse_symlink(&declaration, "declaration")?;
-
     if !needs.iter().any(|need| need == SDK_MODULE) {
         match std::fs::remove_file(&declaration) {
-            Ok(()) => {}
+            Ok(()) => match std::fs::remove_dir(&dest) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => return Err(BuildError::Io(error)),
+            },
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(BuildError::Io(error)),
         }
-        // Best effort: the folder may hold files this build does not own.
-        let _ = std::fs::remove_dir(&dest);
         return Ok(());
+    }
+
+    std::fs::create_dir_all(out).map_err(BuildError::Io)?;
+    let root = std::fs::canonicalize(out).map_err(BuildError::Io)?;
+    let dest = root.join("sdk");
+    let declaration = dest.join("tack.d.luau");
+
+    match std::fs::symlink_metadata(&dest) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(BuildError::Sdk("the SDK output path is a symlink".into()));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(BuildError::Sdk(
+                "the SDK output path is not a directory".into(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(BuildError::Io(error)),
+    }
+
+    match std::fs::symlink_metadata(&declaration) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(BuildError::Sdk("the SDK declaration is a symlink".into()));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(BuildError::Sdk(
+                "the SDK declaration is not a regular file".into(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(BuildError::Io(error)),
     }
 
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
@@ -369,7 +392,6 @@ pub fn build_codex(
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
     let (plugin_dir, manifest) = load(plugin_dir)?;
-    emit_sdk(out, &manifest.needs)?;
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
@@ -389,6 +411,8 @@ pub fn build_codex(
             "the output folder changed while building",
         )));
     }
+
+    emit_sdk(out, &manifest.needs)?;
 
     let mut written = Vec::with_capacity(adapter.files.len().saturating_add(3));
 

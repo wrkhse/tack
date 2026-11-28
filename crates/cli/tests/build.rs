@@ -317,13 +317,10 @@ fn an_sdk_output_path_that_is_a_file_fails() {
 
     let result = build(scratch.path(), &out, BuildOptions::default());
 
-    let Err(tack_cli::BuildError::Io(error)) = result else {
-        panic!("an I/O error is reported");
+    let Err(tack_cli::BuildError::Sdk(message)) = result else {
+        panic!("a conflicting SDK folder is refused by name");
     };
-    assert!(matches!(
-        error.kind(),
-        ErrorKind::AlreadyExists | ErrorKind::NotADirectory
-    ));
+    assert_eq!(message, "the SDK output path is not a directory");
     assert!(!out.join("opencode").exists());
 }
 
@@ -337,13 +334,10 @@ fn a_directory_at_the_declaration_path_fails_the_listed_build() {
 
     let result = build(scratch.path(), &out, BuildOptions::default());
 
-    let Err(tack_cli::BuildError::Io(error)) = result else {
-        panic!("an I/O error is reported");
+    let Err(tack_cli::BuildError::Sdk(message)) = result else {
+        panic!("a non-regular declaration is refused by name");
     };
-    assert!(matches!(
-        error.kind(),
-        ErrorKind::IsADirectory | ErrorKind::InvalidInput
-    ));
+    assert_eq!(message, "the SDK declaration is not a regular file");
     assert!(!out.join("opencode").exists());
 }
 
@@ -448,6 +442,79 @@ fn an_unlisted_build_reports_a_file_at_the_sdk_output_path() {
 
     let Err(tack_cli::BuildError::Io(error)) = result else {
         panic!("an I/O error is reported");
+    };
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::NotADirectory | ErrorKind::InvalidInput
+    ));
+    assert!(!out.join("opencode").exists());
+}
+
+#[test]
+fn a_rejected_codex_home_leaves_no_sdk_output() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+    let home = scratch.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join("config.toml"), "hooks = {}\n").expect("config");
+    std::fs::write(home.join("hooks.json"), "{}\n").expect("hooks");
+    sdk_plugin(&scratch, true);
+
+    let result = build_codex(scratch.path(), &out, &home);
+
+    let Err(tack_cli::BuildError::Codex(_)) = result else {
+        panic!("a Codex home tack cannot merge into is refused");
+    };
+    assert!(!out.exists());
+    assert!(!out.join("sdk/tack.d.luau").exists());
+}
+
+#[test]
+fn a_second_listed_build_overwrites_the_declaration() {
+    let scratch = Scratch::new();
+    sdk_plugin(&scratch, true);
+    let out = scratch.path().join("dist");
+    let declaration = out.join("sdk/tack.d.luau");
+
+    build(scratch.path(), &out, BuildOptions::default()).expect("first build");
+    std::fs::write(&declaration, "stale").expect("stale declaration");
+    build(scratch.path(), &out, BuildOptions::default()).expect("second build");
+
+    assert_eq!(std::fs::read_to_string(&declaration).unwrap(), TACK_D_LUAU);
+}
+
+#[test]
+fn an_untouched_empty_sdk_folder_is_preserved_by_an_unlisted_build() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+    std::fs::create_dir_all(out.join("sdk")).expect("empty sdk folder");
+    sdk_plugin(&scratch, false);
+
+    build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
+
+    assert!(out.join("sdk").is_dir());
+    assert!(!out.join("sdk/tack.d.luau").exists());
+    assert!(out.join("opencode/index.js").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unlisted_build_reports_an_unexpected_sdk_folder_error() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+    let target = scratch.path().join("target");
+    std::fs::create_dir_all(&target).expect("target folder");
+    std::fs::write(target.join("tack.d.luau"), "stale").expect("stale declaration");
+    std::fs::create_dir_all(&out).expect("output folder");
+    symlink(&target, out.join("sdk")).expect("sdk symlink");
+    sdk_plugin(&scratch, false);
+
+    let result = build(scratch.path(), &out, BuildOptions::default());
+
+    let Err(tack_cli::BuildError::Io(error)) = result else {
+        panic!("an unexpected cleanup I/O error is reported");
     };
     assert!(matches!(
         error.kind(),
