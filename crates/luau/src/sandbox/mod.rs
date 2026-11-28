@@ -176,6 +176,25 @@ impl Sandbox {
         manifest
     }
 
+    /// Read the plugin's optional build-time `modules` table as JSON.
+    ///
+    /// An absent field is null. This metadata stays out of the manifest so it
+    /// never reaches the wire descriptor or a generated adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidResult`] when the field cannot be
+    /// converted, [`EngineError::Limit`] when reading is bounded, and
+    /// [`EngineError::Poisoned`] when a previous call panicked while holding
+    /// the call lock.
+    pub fn modules(&self) -> Result<Value, EngineError> {
+        let _guard = self.lock_call()?;
+        self.deadline.begin(self.call_deadline_ms);
+        let modules = self.read_modules();
+        self.deadline.disarm();
+        modules
+    }
+
     fn run_hook(&self, invocation: &Invocation) -> Result<Outcome, EngineError> {
         let Some(function) = self
             .plugin
@@ -223,6 +242,13 @@ impl Sandbox {
             "needs": self.read_needs()?,
             "tools": self.read_tools()?,
         }))
+    }
+
+    fn read_modules(&self) -> Result<Value, EngineError> {
+        match self.plugin.get::<Option<LuaValue>>("modules")? {
+            Some(value) => lua_to_json(value, 0),
+            None => Ok(Value::Null),
+        }
     }
 
     fn read_needs(&self) -> Result<Vec<String>, EngineError> {

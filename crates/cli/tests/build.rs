@@ -169,8 +169,8 @@ fn build_emits_exact_constants_and_a_canonical_plugin_dir() {
         start_timeout_ms: 300,
     };
 
-    let (index, _) = build(&messy, &out, options).expect("fixture builds");
-    let script = std::fs::read_to_string(&index).expect("wrapper is readable");
+    let written = build(&messy, &out, options).expect("fixture builds");
+    let script = std::fs::read_to_string(&written[0]).expect("wrapper is readable");
 
     let canonical = std::fs::canonicalize(fixture()).expect("canonical fixture");
     assert_eq!(
@@ -226,8 +226,8 @@ fn the_manifest_json_has_the_plugin_contract() {
     let scratch = Scratch::new();
     let out = scratch.path().join("dist");
 
-    let (_, descriptor) = build(&fixture(), &out, BuildOptions::default()).expect("fixture builds");
-    let bytes = std::fs::read(&descriptor).expect("manifest is readable");
+    let written = build(&fixture(), &out, BuildOptions::default()).expect("fixture builds");
+    let bytes = std::fs::read(&written[1]).expect("manifest is readable");
     let emitted: PluginManifest = serde_json::from_slice(&bytes).expect("manifest parses");
 
     assert_eq!(emitted, manifest());

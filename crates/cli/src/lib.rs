@@ -9,6 +9,7 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
+use serde_json::Value;
 use tack_adapter_claude::{ModConfig, ModError};
 use tack_adapter_codex::CodexError;
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
@@ -34,6 +35,9 @@ const SUPPORTED: [&str; 3] = ["sandbox", "daemon", "opencode"];
 #[derive(Debug)]
 pub enum BuildError {
     NeedMissing(String),
+    UnknownModule(String),
+    InvalidModuleConfig(String),
+    Modules(String),
     Sandbox(EngineError),
     Manifest(serde_json::Error),
     Render(WrapperError),
@@ -47,6 +51,9 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NeedMissing(name) => write!(f, "need_missing:{name}"),
+            Self::UnknownModule(name) => write!(f, "unknown_module:{name}"),
+            Self::InvalidModuleConfig(name) => write!(f, "invalid_module_config:{name}"),
+            Self::Modules(message) => write!(f, "modules:{message}"),
             Self::Sandbox(error) => write!(f, "sandbox:tack: {error}"),
             Self::Manifest(error) => write!(f, "manifest:{error}"),
             Self::Render(error) => write!(f, "render:{error}"),
@@ -62,6 +69,9 @@ impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NeedMissing(_) => None,
+            Self::UnknownModule(_) => None,
+            Self::InvalidModuleConfig(_) => None,
+            Self::Modules(_) => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -90,16 +100,67 @@ impl Default for BuildOptions {
     }
 }
 
-/// Canonicalize a plugin folder, read its manifest in the sandbox, and check
-/// its needs.
-fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
+/// Build-time modules a plugin opts into. Only the SDK declaration exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Modules {
+    sdk: bool,
+}
+
+/// Translate the plugin's optional `modules` table into build-time opt-ins.
+/// An absent or empty table disables every module.
+fn read_modules(value: &Value) -> Result<Modules, BuildError> {
+    if value.is_null() {
+        return Ok(Modules::default());
+    }
+
+    let Value::Object(fields) = value else {
+        return Err(BuildError::Modules("modules must be a table".into()));
+    };
+
+    for name in fields.keys() {
+        if name != "sdk" {
+            return Err(BuildError::UnknownModule(name.clone()));
+        }
+    }
+
+    let Some(config) = fields.get("sdk") else {
+        return Ok(Modules::default());
+    };
+
+    if !matches!(config, Value::Object(entries) if entries.is_empty()) {
+        return Err(BuildError::InvalidModuleConfig("sdk".into()));
+    }
+
+    Ok(Modules { sdk: true })
+}
+
+/// Write the fixed SDK declaration into `<out>/sdk` when the plugin opts in.
+fn emit_sdk(out: &Path, modules: Modules, written: &mut Vec<PathBuf>) -> Result<(), BuildError> {
+    if !modules.sdk {
+        return Ok(());
+    }
+
+    let dest = out.join("sdk");
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    let path = dest.join("tack.d.luau");
+    std::fs::write(&path, tack_sdk::TACK_D_LUAU).map_err(BuildError::Io)?;
+
+    written.push(path);
+    Ok(())
+}
+
+/// Canonicalize a plugin folder, read its manifest and build-time modules in
+/// the sandbox, and check its needs.
+fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest, Modules), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
-    let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
-        .and_then(|limits| Sandbox::new(&plugin_dir, limits, Capabilities::default()))
-        .and_then(|sandbox| sandbox.manifest())
-        .map_err(BuildError::Sandbox)?;
-    let manifest: PluginManifest =
-        serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
+    let limits =
+        Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS).map_err(BuildError::Sandbox)?;
+    let sandbox =
+        Sandbox::new(&plugin_dir, limits, Capabilities::default()).map_err(BuildError::Sandbox)?;
+    let metadata = sandbox.manifest().map_err(BuildError::Sandbox)?;
+    let module_data = sandbox.modules().map_err(BuildError::Sandbox)?;
+    let manifest: PluginManifest = serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
+    let modules = read_modules(&module_data)?;
 
     for need in &manifest.needs {
         if !SUPPORTED.contains(&need.as_str()) {
@@ -107,7 +168,21 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
         }
     }
 
-    Ok((plugin_dir, manifest))
+    Ok((plugin_dir, manifest, modules))
+}
+
+/// Validate a plugin without emitting anything, for callers that resolve
+/// their own environment before writing outputs.
+///
+/// # Errors
+///
+/// Returns the same errors as the builders: [`BuildError::Io`] for an
+/// unreadable folder, [`BuildError::Sandbox`] for an unusable plugin,
+/// [`BuildError::Manifest`] for a broken manifest,
+/// [`BuildError::NeedMissing`] for an unsupported need, and the module
+/// errors for a malformed `modules` table.
+pub fn check_plugin(plugin_dir: &Path) -> Result<(), BuildError> {
+    load(plugin_dir).map(|_| ())
 }
 
 fn deny_reasons() -> Vec<&'static str> {
@@ -117,7 +192,8 @@ fn deny_reasons() -> Vec<&'static str> {
         .collect()
 }
 
-/// Read one plugin, check its needs, and emit the `OpenCode` wrapper and manifest.
+/// Read one plugin, check its needs, and emit the `OpenCode` wrapper and
+/// manifest, plus the SDK declaration when the plugin opts in.
 ///
 /// The plugin folder is canonicalized so the emitted wrapper carries its
 /// absolute path. That is the only host-specific value in the output: the
@@ -129,14 +205,16 @@ fn deny_reasons() -> Vec<&'static str> {
 /// read or written, [`BuildError::Sandbox`] when the host limits are invalid or
 /// the plugin cannot be loaded or read, [`BuildError::Manifest`] when the
 /// manifest does not match the wire contract, [`BuildError::NeedMissing`] for
-/// an unsupported need, and [`BuildError::Render`] when the wrapper cannot be
-/// rendered.
+/// an unsupported need, [`BuildError::Render`] when the wrapper cannot be
+/// rendered, and [`BuildError::UnknownModule`],
+/// [`BuildError::InvalidModuleConfig`] or [`BuildError::Modules`] when the
+/// `modules` table is malformed.
 pub fn build(
     plugin_dir: &Path,
     out: &Path,
     options: BuildOptions,
-) -> Result<(PathBuf, PathBuf), BuildError> {
-    let (plugin_dir, manifest) = load(plugin_dir)?;
+) -> Result<Vec<PathBuf>, BuildError> {
+    let (plugin_dir, manifest, modules) = load(plugin_dir)?;
     let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = WrapperConfig {
@@ -161,12 +239,15 @@ pub fn build(
     })?;
     std::fs::write(&descriptor, pretty).map_err(BuildError::Io)?;
 
-    Ok((index, descriptor))
+    let mut written = vec![index, descriptor];
+    emit_sdk(out, modules, &mut written)?;
+
+    Ok(written)
 }
 
 /// Read one plugin, check its needs, and emit the Claude Code mod into
 /// `<out>/claude`: `.claude-plugin/plugin.json`, `hooks/hooks.json` and
-/// `hooks/register.js`.
+/// `hooks/register.js`, plus the SDK declaration when the plugin opts in.
 ///
 /// The mod runs [`HOOK_BIN`] by its plain name with `--plugin` and the
 /// canonical plugin folder, the only host-specific value in the output.
@@ -176,10 +257,12 @@ pub fn build(
 /// Returns [`BuildError::Io`] when the plugin folder or output files cannot be
 /// read or written, [`BuildError::Sandbox`] when the plugin cannot be loaded
 /// or read, [`BuildError::Manifest`] when the manifest does not match the
-/// wire contract, [`BuildError::NeedMissing`] for an unsupported need, and
-/// [`BuildError::RenderMod`] when the mod cannot be rendered.
+/// wire contract, [`BuildError::NeedMissing`] for an unsupported need,
+/// [`BuildError::RenderMod`] when the mod cannot be rendered, and
+/// [`BuildError::UnknownModule`], [`BuildError::InvalidModuleConfig`] or
+/// [`BuildError::Modules`] when the `modules` table is malformed.
 pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let (plugin_dir, manifest, modules) = load(plugin_dir)?;
     let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = ModConfig {
@@ -206,19 +289,24 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
         written.push(path);
     }
 
+    emit_sdk(out, modules, &mut written)?;
+
     Ok(written)
 }
 
-/// Read one plugin, check its needs, and emit `<out>/pi/extension.js`.
+/// Read one plugin, check its needs, and emit `<out>/pi/extension.js`,
+/// plus the SDK declaration when the plugin opts in.
 ///
 /// # Errors
 /// Returns [`BuildError::Io`] when the plugin folder or output file cannot be
 /// read or written, [`BuildError::Sandbox`] when the plugin cannot be loaded
 /// or read, [`BuildError::Manifest`] when the manifest does not match the wire
 /// contract, [`BuildError::NeedMissing`] for an unsupported need, and
-/// [`BuildError::RenderExtension`] when the extension cannot be rendered.
-pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+/// [`BuildError::RenderExtension`] when the extension cannot be rendered,
+/// and [`BuildError::UnknownModule`], [`BuildError::InvalidModuleConfig`]
+/// or [`BuildError::Modules`] when the `modules` table is malformed.
+pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
+    let (plugin_dir, _, modules) = load(plugin_dir)?;
     let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
 
     let dest = out.join("pi");
@@ -226,7 +314,10 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
     let extension = dest.join(EXTENSION_JS);
     std::fs::write(&extension, script).map_err(BuildError::Io)?;
 
-    Ok(extension)
+    let mut written = vec![extension];
+    emit_sdk(out, modules, &mut written)?;
+
+    Ok(written)
 }
 
 /// Where `path` will resolve once its folders exist, without creating
@@ -304,22 +395,25 @@ fn planned_dir(path: &Path) -> std::io::Result<PathBuf> {
 /// on the first build after an upgrade, before any `tack-hashes` exists, one
 /// whose key names no hook. The home is merged and checked before anything is
 /// created, so a home tack cannot merge into leaves no output behind; the
-/// scripts are written before the home trusts them.
+/// scripts are written before the home trusts them. The SDK declaration, when
+/// opted in, lands beside the adapter in `<out>/sdk`.
 ///
 /// # Errors
 ///
 /// Returns [`BuildError::Io`] when the plugin folder or output files cannot be
 /// read or written, [`BuildError::Sandbox`] when the plugin cannot be loaded
 /// or read, [`BuildError::Manifest`] when the manifest does not match the wire
-/// contract, [`BuildError::NeedMissing`] for an unsupported need, and
+/// contract, [`BuildError::NeedMissing`] for an unsupported need,
 /// [`BuildError::Codex`] when the adapter cannot be rendered or the Codex home
-/// cannot be merged.
+/// cannot be merged, and [`BuildError::UnknownModule`],
+/// [`BuildError::InvalidModuleConfig`] or [`BuildError::Modules`] when the
+/// `modules` table is malformed.
 pub fn build_codex(
     plugin_dir: &Path,
     out: &Path,
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, _, modules) = load(plugin_dir)?;
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
@@ -340,7 +434,7 @@ pub fn build_codex(
         )));
     }
 
-    let mut written = Vec::with_capacity(adapter.files.len().saturating_add(3));
+    let mut written = Vec::with_capacity(adapter.files.len().saturating_add(4));
 
     for file in adapter.files {
         let path = dest.join(file.name);
@@ -348,11 +442,16 @@ pub fn build_codex(
         written.push(path);
     }
 
+    // Write the SDK before the home is changed, but report it last.
+    let mut sdk = Vec::with_capacity(1);
+    emit_sdk(out, modules, &mut sdk)?;
+
     let installed = planned.commit().map_err(BuildError::Codex)?;
 
     written.push(installed.hooks);
     written.push(installed.config);
     written.push(installed.hashes);
+    written.extend(sdk);
 
     Ok(written)
 }

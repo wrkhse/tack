@@ -3,7 +3,9 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use tack_cli::{BuildError, BuildOptions, build, build_claude, build_codex, build_pi};
+use tack_cli::{
+    BuildError, BuildOptions, build, build_claude, build_codex, build_pi, check_plugin,
+};
 
 const MAX_TIMEOUT_MS: u64 = 60_000;
 
@@ -103,13 +105,11 @@ fn run_build(
     let out = Path::new(args.out);
 
     match args.target {
-        Target::OpenCode => {
-            let (index, manifest) = build(plugin_dir, out, args.options)?;
-            Ok(vec![index, manifest])
-        }
+        Target::OpenCode => build(plugin_dir, out, args.options),
         Target::Claude => build_claude(plugin_dir, out),
-        Target::Pi => build_pi(plugin_dir, out).map(|path| vec![path]),
+        Target::Pi => build_pi(plugin_dir, out),
         Target::Codex => {
+            check_plugin(plugin_dir)?;
             let codex_home = env("CODEX_HOME");
             let home = env("HOME");
             let codex_home =
@@ -610,6 +610,42 @@ mod tests {
         };
         assert_eq!(need, "barn");
         assert_eq!(lines, Vec::<String>::new());
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn dispatch_build_codex_refuses_an_unknown_module_before_resolving_the_home() {
+        let scratch = Scratch::new();
+        let plugin = scratch.root.join("plugin");
+        std::fs::create_dir_all(&plugin).expect("plugin folder");
+        std::fs::write(
+            plugin.join("plugin.luau"),
+            r#"return { name = "barn-plugin", needs = {}, modules = { barn = {} }, tools = {} }"#,
+        )
+        .expect("fixture file");
+        let home = scratch.root.join("home");
+        std::fs::create_dir_all(&home).expect("codex home");
+        let out = scratch.root.join("dist");
+
+        let (result, lines) = run_with_env(
+            &[
+                "build",
+                plugin.to_str().expect("UTF-8 plugin path"),
+                "--out",
+                out.to_str().expect("UTF-8 output path"),
+                "--target",
+                "codex",
+            ],
+            &[("HOME", &home)],
+        );
+
+        let Err(CliError::Build(BuildError::UnknownModule(name))) = result else {
+            panic!("unknown module must be refused before the home is resolved");
+        };
+        assert_eq!(name, "barn");
+        assert_eq!(lines, Vec::<String>::new());
+        assert!(!home.join(".codex").exists());
+        assert_eq!(std::fs::read_dir(&home).expect("home stays empty").count(), 0);
         assert!(!out.exists());
     }
 

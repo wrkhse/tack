@@ -462,6 +462,7 @@ dependencies = [
  "tack-adapter-pi",
  "tack-luau",
  "tack_protocol",
+ "tack_sdk",
 ]
 
 [[package]]
