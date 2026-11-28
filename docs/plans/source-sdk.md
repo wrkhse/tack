@@ -69,8 +69,12 @@ reply identity, unknown-hook refusal and malformed-frame refusal.
 `on.poll` receives bounded framed input in `ctx.input`, including source
 config and the due cursor. sourcefed's store owns state and cursor alongside
 the pending queue and passes them on each poll; the stall keeps nothing
-between polls. The store commits new state with the events, so a crash replays
-them without skipping. The cursor is bounded by sourcefed's `MAX_POSITION_LEN`.
+between polls. The store's cursor in `ctx.input` is the only cursor used to
+choose items to poll. `ctx.state.cursor` is a copy for the handler and does
+not advance the store. The only state leaving the stall is `state` on the
+poll reply; the store commits it with the events, so a crash replays them
+without skipping.
+The cursor is bounded by sourcefed's `MAX_POSITION_LEN`.
 `ctx.emit` accepts one bounded event with `id`, `kind`, `subject`,
 `summary?`, `at`, `author?` and `body?`.
 
@@ -86,7 +90,7 @@ return {
     on = {
         poll = function(ctx)
             local repo = ctx.input.config.repo
-            local cursor = ctx.state.cursor
+            local cursor = ctx.input.cursor
 
             for _, issue in ctx.http.get(
                 "https://api.github.com/repos/wrkhse/tack/issues", {
@@ -171,7 +175,7 @@ truncate, and leave the cursor unchanged when a poll is refused.
 | ---------------------- | ------------- | ------------------------- |
 | Events per poll        | 64            | `emit_limit`              |
 | Bytes per event        | 16 KiB        | `emit_event_too_large`    |
-| Emit bytes per poll    | 1 MiB         | `emit_limit`              |
+| Emit bytes per poll    | 896 KiB       | `emit_limit`              |
 | Whole `ctx.state`      | 64 KiB        | `state_limit`             |
 | `ctx.state.cursor`     | 4096 bytes    | `cursor_limit`            |
 | `ctx.input`            | 64 KiB        | `input_limit`             |
@@ -182,8 +186,10 @@ truncate, and leave the cursor unchanged when a poll is refused.
 | HTTP redirects         | None followed | `http_redirect_denied`    |
 | Poll deadline          | 8500 ms       | `poll_timeout`            |
 
-The poll emit-byte cap matches tack's `MAX_FRAME_BYTES`; the cursor cap
-matches sourcefed's `MAX_POSITION_LEN`. The HTTP response cap matches barn's
+64 events at 16 KiB each total 1 MiB, so the 896 KiB poll cap binds first.
+With 64 KiB of state, 896 KiB of events totals 960 KiB, leaving 64 KiB of
+the 1 MiB `MAX_FRAME_BYTES` reply for framing. The cursor cap matches
+sourcefed's `MAX_POSITION_LEN`; the HTTP response cap matches barn's
 `DEFAULT_MAX_BODY_BYTES`.
 
 **Failed poll.** A failed poll returns `Reply::Error` with the named reason
@@ -283,6 +289,7 @@ sourcefed CI proves the P4 table through the pinned daemon.
 | VM ownership  | barn: engine; tack: declaration and wire.   | owner      | 2026-11-28 |
 | Proof runner  | tack CI uses its pinned barn revision.      | supervisor | 2026-11-28 |
 | Cap behaviour | Refuse with a named reason.                 | supervisor | 2026-11-28 |
+| P4 proof      | tack: SDK; sourcefed: P4, pinned daemon.    | supervisor | 2026-11-28 |
 
 ## Open questions
 
@@ -292,24 +299,14 @@ sourcefed CI proves the P4 table through the pinned daemon.
    - `annotate` fields carry `events` and `state`. P3 caps annotations at
      32 entries, 64-byte keys and 512-byte values, so an event list cannot
      ride there; overloading annotations also mixes a verdict with data.
-2. Who owns state and cursor?
-   - **(Recommended)** sourcefed's store commits them with events and keeps
-     the pending queue, so a crash replays without skipping.
-   - The stall holds state, coupling recovery to the stall's lifetime.
-3. Who decides a poll is due?
-   - **(Recommended)** sourcefed's PollEngine, alongside its stored state.
+2. Who decides a poll is due?
+   - **(Recommended)** sourcefed's PollEngine, because the store owns scheduling.
    - A daemon timer moves scheduling into tack.
-4. Which SDK contract major applies?
+3. Which SDK contract major applies?
    - **(Recommended)** Keep major 1 and add declarations additively, since
      `check_contract_major` requires an exact match.
    - Bump to 2 to mark the expanded contract.
-5. How are barn pins aligned?
+4. How are barn pins aligned?
    - **(Recommended)** Use one revision for tack CI proof and the sourcefed P4
      runner, bumped in its own PR, so both prove the same engine.
    - Use independent pins to let each project advance separately.
-6. Where is P4 proven?
-   - **(Recommended)** tack CI proves the SDK with a fixture source; sourcefed
-     CI proves the P4 table with tack's daemon at a pinned commit, and tack
-     launches barn. Each project proves its own artifact with one launch path;
-     sourcefed never launches barn.
-   - One joint proof in chauffeur's CI puts both artifacts in one runner.
