@@ -260,7 +260,7 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             || after.starts_with("\"].call(")
             || bracket_indexed_call(after)
             || trimmed.starts_with('[')
-            || dot.is_some_and(|rest| rest.starts_with("call"));
+            || dot.is_some_and(|rest| rest.starts_with("call("));
         let has_ctx_qualifier = source
             .get(..at)
             .and_then(|head| head.strip_suffix(CONTROL_QUALIFIER))
