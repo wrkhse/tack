@@ -436,7 +436,10 @@ fn a_symlinked_sdk_folder_is_refused() {
 
     let result = build(&plugin, &out, BuildOptions::default());
 
-    assert!(matches!(result, Err(tack_cli::BuildError::Io(_))));
+    assert!(matches!(
+        result,
+        Err(tack_cli::BuildError::Io(_) | tack_cli::BuildError::AuditSymlink)
+    ));
     assert!(!elsewhere.join("tack.d.luau").exists());
 }
 
@@ -887,8 +890,11 @@ mod audit_tests {
             .expect_err("a symlinked source is refused");
 
         assert!(
-            matches!(&error, tack_cli::BuildError::AuditLimit),
-            "expected AuditLimit, got {error:?}"
+            matches!(
+                &error,
+                tack_cli::BuildError::AuditLimit | tack_cli::BuildError::AuditSymlink
+            ),
+            "expected a symlink refusal, got {error:?}"
         );
     }
 
@@ -910,8 +916,11 @@ mod audit_tests {
             .expect_err("a source outside the plugin folder is refused");
 
         assert!(
-            matches!(&error, tack_cli::BuildError::AuditLimit),
-            "expected AuditLimit, got {error:?}"
+            matches!(
+                &error,
+                tack_cli::BuildError::AuditLimit | tack_cli::BuildError::AuditSymlink
+            ),
+            "expected a symlink refusal, got {error:?}"
         );
     }
 
@@ -1136,6 +1145,21 @@ mod audit_tests {
     }
 
     #[test]
+    fn a_spaced_bracket_indexed_control_is_dynamic() {
+        dynamic(&source("", "ctx[ \"control\" ].call(\"navigate\", p)"));
+    }
+
+    #[test]
+    fn a_space_before_the_indexed_call_dot_is_dynamic() {
+        dynamic(&source("", "ctx[\"control\"] .call(\"navigate\", p)"));
+    }
+
+    #[test]
+    fn a_space_before_the_indexed_call_parenthesis_is_dynamic() {
+        dynamic(&source("", "ctx[\"control\"].call (\"navigate\", p)"));
+    }
+
+    #[test]
     fn a_bracket_indexed_call_name_is_refused() {
         dynamic(&source("", "ctx[\"control\"][\"call\"](\"navigate\", p)"));
     }
@@ -1172,22 +1196,114 @@ mod audit_tests {
     }
 
     #[test]
-    fn build_output_and_vendor_folders_are_skipped() {
+    fn an_undeclared_call_in_a_dist_folder_is_refused() {
+        let scratch = Scratch::new();
+        let dist = scratch.path().join("dist");
+        std::fs::create_dir_all(&dist).expect("dist folder");
+        std::fs::write(
+            dist.join("helper.luau"),
+            r#"return {
+    run = function(ctx, p)
+        ctx.control.call("navigate", p)
+    end,
+}"#,
+        )
+        .expect("dist source");
+        scratch.write(
+            "plugin.luau",
+            r#"local helper = require("./dist/helper")
+
+return {
+    name = "dist-plugin",
+    needs = { "sdk" },
+    helper = helper,
+}"#,
+        );
+        let out = scratch.path().join("out");
+
+        let error = build(scratch.path(), &out, BuildOptions::default())
+            .expect_err("a call outside the output folder is audited");
+
+        assert!(
+            matches!(
+                &error,
+                tack_cli::BuildError::UngrantedCapability(name) if name == "navigate"
+            ),
+            "expected the undeclared dist call, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn the_canonical_output_folder_is_skipped() {
+        let scratch = Scratch::new();
+        let out = scratch.path().join("out");
+        std::fs::create_dir_all(&out).expect("output folder");
+        std::fs::write(
+            out.join("helper.luau"),
+            r#"return {
+    run = function(ctx, p)
+        ctx.control.call("navigate", p)
+    end,
+}"#,
+        )
+        .expect("output source");
+        scratch.write(
+            "plugin.luau",
+            r#"local helper = require("./out/helper")
+
+return {
+    name = "output-plugin",
+    needs = { "sdk" },
+    helper = helper,
+}"#,
+        );
+
+        build(scratch.path(), &out, BuildOptions::default())
+            .expect("the canonical output folder is skipped");
+    }
+
+    #[test]
+    fn the_output_folder_is_skipped_but_node_modules_is_audited() {
         let scratch = Scratch::new();
         scratch.write("plugin.luau", &source("", ""));
-
-        for folder in ["dist", "node_modules"] {
-            let dir = scratch.path().join(folder);
-            std::fs::create_dir_all(&dir).expect("vendor folder");
-            std::fs::write(
-                dir.join("evil.luau"),
-                "-- ctx.control.call(\"navigate\", payload)",
-            )
-            .expect("vendor source");
-        }
-
         let out = scratch.path().join("dist");
+        std::fs::create_dir_all(&out).expect("output folder");
+        std::fs::write(
+            out.join("evil.luau"),
+            "-- ctx.control.call(\"navigate\", payload)",
+        )
+        .expect("output source");
 
-        build(scratch.path(), &out, BuildOptions::default()).expect("vendor folders are ignored");
+        build(scratch.path(), &out, BuildOptions::default()).expect("the output folder is skipped");
+
+        let vendor = scratch.path().join("node_modules");
+        std::fs::create_dir_all(&vendor).expect("vendor folder");
+        std::fs::write(
+            vendor.join("evil.luau"),
+            r#"return {
+    run = function(ctx, p)
+        ctx.control.call("navigate", p)
+    end,
+}"#,
+        )
+        .expect("vendor source");
+        scratch.write(
+            "plugin.luau",
+            &format!(
+                "local helper = require(\"./node_modules/evil\")\n\n{}",
+                source("", "")
+            ),
+        );
+
+        let error = build(scratch.path(), &out, BuildOptions::default())
+            .expect_err("node_modules is audited");
+
+        assert!(
+            matches!(
+                &error,
+                tack_cli::BuildError::UngrantedCapability(name) if name == "navigate"
+            ),
+            "expected the undeclared node_modules call, got {error:?}"
+        );
     }
 }
