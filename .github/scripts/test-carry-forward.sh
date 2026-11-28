@@ -7,8 +7,6 @@ set -euo pipefail
 root=$(cd "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 post_review="$root/.github/scripts/post-review.sh"
 script="$root/.github/scripts/carry-forward.sh"
-workflow="$root/.github/workflows/opencode-review.yml"
-workflows=("$workflow" "$root/.github/workflows/check.yml")
 
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
@@ -118,73 +116,66 @@ forged_body=$(body_of '**Verdict: MERGE AS IS**' "$head_sha" "$base_sha" "$body_
 check 'forged finding path cannot add a meta line' true "$(comment 200 41898282 "$forged_body")"
 printf 'ok: forged meta line stripped by post-review.sh\n'
 
-# A body edit keeps head and base unchanged, so every workflow that carries a
-# review verdict must exclude body edits from carry-forward. The review job may
-# live in either workflow; fail only when neither one guards it.
-body_guard=false
-for candidate in "${workflows[@]}"; do
-  if [ -f "$candidate" ] && grep -qF '!github.event.changes.body' "$candidate"; then
-    body_guard=true
-    break
+# The review job lives in exactly one workflow; discover it instead of naming
+# a file. This fixture is shared byte-for-byte across the repos.
+owners=()
+for candidate in "$root"/.github/workflows/*.yml; do
+  [ -f "$candidate" ] || continue
+  if grep -qE '^  review:' "$candidate"; then
+    owners+=("$candidate")
   fi
 done
-if [ "$body_guard" != true ]; then
-  echo 'FAIL: neither workflow excludes body edits from carry-forward' >&2
+if [ "${#owners[@]}" -ne 1 ]; then
+  printf 'FAIL: expected exactly one workflow with a review job, found %s\n' "${#owners[@]}" >&2
   exit 1
 fi
-printf 'ok: a workflow excludes body edits from carry-forward\n'
+workflow="${owners[0]}"
+printf 'ok: review job found in %s\n' "$(basename "$workflow")"
+
+# A body edit keeps head and base unchanged, so the discovered workflow must
+# exclude body edits from carry-forward altogether.
+if ! grep -qF '!github.event.changes.body' "$workflow"; then
+  echo 'FAIL: review workflow does not exclude body edits from carry-forward' >&2
+  exit 1
+fi
+printf 'ok: review workflow excludes body edits from carry-forward\n'
 
 # The reader computes the hash itself: carry_forward must not be handed
-# BODY_HASH before the gather step publishes PR_BODY_HASH. The review job may
-# live in either workflow; only a file with this ordering counts.
-hash_order_ok=false
-for candidate in "${workflows[@]}"; do
-  [ -f "$candidate" ] || continue
-  carry_line=$(awk '/id: carry_forward/{print NR; exit}' "$candidate")
-  hash_line=$(awk '/PR_BODY_HASH=/{print NR; exit}' "$candidate")
-  if [ -z "$carry_line" ] || [ -z "$hash_line" ]; then
-    continue
-  fi
-  if awk -v s="$carry_line" -v e="$hash_line" \
-      'NR>s && NR<e && /BODY_HASH/ { found=1 } END { exit !found }' "$candidate"; then
-    continue
-  fi
-  hash_order_ok=true
-  break
-done
-if [ "$hash_order_ok" != true ]; then
-  echo 'FAIL: neither workflow has carry_forward reading BODY_HASH after gather' >&2
+# BODY_HASH before the gather step publishes PR_BODY_HASH.
+carry_line=$(awk '/id: carry_forward/{print NR; exit}' "$workflow")
+hash_line=$(awk '/PR_BODY_HASH=/{print NR; exit}' "$workflow")
+if [ -z "$carry_line" ] || [ -z "$hash_line" ]; then
+  echo 'FAIL: could not locate carry_forward or PR_BODY_HASH in the review workflow' >&2
+  exit 1
+fi
+if awk -v s="$carry_line" -v e="$hash_line" \
+    'NR>s && NR<e && /BODY_HASH/ { found=1 } END { exit !found }' "$workflow"; then
+  echo 'FAIL: carry_forward reads BODY_HASH before gather computes it' >&2
   exit 1
 fi
 printf 'ok: carry_forward does not read BODY_HASH before gather\n'
 
-# The review job must check out the scripts before it tries to carry forward,
-# with an explicit depth on that first checkout. One workflow keeps it shallow;
-# the other fetches fully so it can pin scripts to the base commit. A file counts
-# only when the ordering holds and its depth is one of those two explicit values.
-checkout_ok=false
-for candidate in "${workflows[@]}"; do
-  [ -f "$candidate" ] || continue
-  review_line=$(awk '/^  review:/{print NR; exit}' "$candidate")
-  [ -n "$review_line" ] || continue
-  checkout_line=$(awk -v s="$review_line" 'NR>s && /- uses: actions\/checkout/{print NR; exit}' "$candidate")
-  carry_line=$(awk '/id: carry_forward/{print NR; exit}' "$candidate")
-  if [ -z "$checkout_line" ] || [ -z "$carry_line" ]; then
-    continue
-  fi
-  if [ "$checkout_line" -ge "$carry_line" ]; then
-    continue
-  fi
-  depth=$(awk -v s="$checkout_line" 'NR>s && NR<=s+4 && /fetch-depth:/{print $2; exit}' "$candidate")
-  case "$depth" in
-    0|1) ;;
-    *) continue ;;
-  esac
-  checkout_ok=true
-  break
-done
-if [ "$checkout_ok" != true ]; then
-  echo 'FAIL: neither workflow checks out the review scripts before carry_forward' >&2
+# The first checkout inside the review job must precede carry_forward and state
+# an explicit fetch-depth; the pin of .github/scripts from BASE_SHA must sit
+# between that checkout and carry_forward.
+review_line=$(awk '/^  review:/{print NR; exit}' "$workflow")
+checkout_line=$(awk -v s="$review_line" 'NR>s && /- uses: actions\/checkout/{print NR; exit}' "$workflow")
+if [ -z "$review_line" ] || [ -z "$checkout_line" ] || [ -z "$carry_line" ]; then
+  echo 'FAIL: could not locate review job, first checkout or carry_forward' >&2
   exit 1
 fi
-printf 'ok: review checkout precedes carry_forward\n'
+if [ "$checkout_line" -ge "$carry_line" ]; then
+  echo 'FAIL: review checkout appears after carry_forward' >&2
+  exit 1
+fi
+depth=$(awk -v s="$checkout_line" 'NR>s && NR<=s+4 && /fetch-depth:/{print $2; exit}' "$workflow")
+case "$depth" in
+  0|1) ;;
+  *) echo 'FAIL: first review checkout has no explicit fetch-depth 0 or 1' >&2; exit 1 ;;
+esac
+pin_line=$(awk -v s="$checkout_line" -v e="$carry_line" 'NR>s && NR<e && $0 !~ /^[[:space:]]*#/ && index($0, "git checkout") && index($0, "BASE_SHA") && index($0, "-- .github/scripts") { print NR; exit }' "$workflow")
+if [ -z "$pin_line" ]; then
+  echo 'FAIL: no base-script pin between review checkout and carry_forward' >&2
+  exit 1
+fi
+printf 'ok: review checkout and base-script pin precede carry_forward\n'

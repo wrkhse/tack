@@ -40,3 +40,6 @@ jobs:
       - name: Test carry-forward verdict lookup on fixtures
         shell: bash
         run: bash .github/scripts/test-carry-forward.sh
+      - name: Test verdict enforcement on fixtures
+        shell: bash
+        run: bash .github/scripts/test-enforce-verdict.sh
