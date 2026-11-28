@@ -166,6 +166,39 @@ fn is_call_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+/// Whether the text right after `control` indexes a call name, as in
+/// `["control"]["call"]("navigate")`, so that call is audited, not skipped.
+fn bracket_indexed_call(after: &str) -> bool {
+    fn quote(text: &str) -> Option<&str> {
+        text.strip_prefix('"').or_else(|| text.strip_prefix('\''))
+    }
+
+    fn space(text: &str) -> &str {
+        text.trim_start_matches(|byte: char| byte.is_ascii_whitespace())
+    }
+
+    let Some(after) = quote(space(after)) else {
+        return false;
+    };
+    let Some(after) = space(after).strip_prefix(']') else {
+        return false;
+    };
+    let Some(after) = space(after).strip_prefix('[') else {
+        return false;
+    };
+    let Some(after) = quote(space(after)) else {
+        return false;
+    };
+    let Some(after) = space(after).strip_prefix("call") else {
+        return false;
+    };
+    let Some(after) = quote(space(after)) else {
+        return false;
+    };
+
+    space(after).starts_with(']')
+}
+
 /// Audit one source by scanning every `control` occurrence. A call-shaped
 /// occurrence must be the literal `ctx.control.call("<ident>")` form, so a call
 /// hidden in a comment or string is still checked. Whitespace-separated member
@@ -198,6 +231,7 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             || after.starts_with(":call(")
             || after.starts_with("\"].call(")
             || after.starts_with("'].call(")
+            || bracket_indexed_call(after)
             || whitespace_after;
         let has_ctx_qualifier = source
             .get(..at)
@@ -301,8 +335,13 @@ fn audit_capabilities(plugin_dir: &Path, manifest: &PluginManifest) -> Result<()
             entries.sort_by_key(std::fs::DirEntry::file_name);
 
             for entry in entries.into_iter().rev() {
-                let child_depth = depth.checked_add(1).ok_or(BuildError::AuditLimit)?;
-                stack.push((entry.path(), child_depth));
+                let is_dir = entry.file_type().map_err(BuildError::Io)?.is_dir();
+                let entry_depth = if is_dir {
+                    depth.checked_add(1).ok_or(BuildError::AuditLimit)?
+                } else {
+                    depth
+                };
+                stack.push((entry.path(), entry_depth));
             }
 
             continue;

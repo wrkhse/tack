@@ -1112,26 +1112,39 @@ mod audit_tests {
     }
 
     #[test]
+    fn a_bracket_indexed_call_name_is_refused() {
+        dynamic(&source("", "ctx[\"control\"][\"call\"](\"navigate\", p)"));
+    }
+
+    #[test]
     fn a_deep_plugin_tree_is_an_audit_limit() {
-        let scratch = Scratch::new();
-        scratch.write("plugin.luau", &source("", ""));
-        let mut nested = scratch.path().to_path_buf();
+        for (folders, ok) in [(8usize, true), (9usize, false)] {
+            let scratch = Scratch::new();
+            scratch.write("plugin.luau", &source("", ""));
+            let mut nested = scratch.path().to_path_buf();
 
-        for i in 0..9 {
-            nested.push(format!("d{i}"));
+            for i in 0..folders {
+                nested.push(format!("d{i}"));
+            }
+
+            std::fs::create_dir_all(&nested).expect("deep folder");
+            std::fs::write(nested.join("deep.luau"), "return true").expect("deep source");
+            let out = scratch.path().join("dist");
+
+            if ok {
+                build(scratch.path(), &out, BuildOptions::default())
+                    .expect("a source eight folders deep builds");
+                continue;
+            }
+
+            let error = build(scratch.path(), &out, BuildOptions::default())
+                .expect_err("a source nine folders deep is refused");
+
+            assert!(
+                matches!(&error, tack_cli::BuildError::AuditLimit),
+                "expected AuditLimit, got {error:?}"
+            );
         }
-
-        std::fs::create_dir_all(&nested).expect("deep folder");
-        std::fs::write(nested.join("deep.luau"), "return true").expect("deep source");
-        let out = scratch.path().join("dist");
-
-        let error = build(scratch.path(), &out, BuildOptions::default())
-            .expect_err("a source deeper than eight folders is refused");
-
-        assert!(
-            matches!(&error, tack_cli::BuildError::AuditLimit),
-            "expected AuditLimit, got {error:?}"
-        );
     }
 
     #[test]
