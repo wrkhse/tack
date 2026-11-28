@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-repo_root="$(git rev-parse --show-toplevel)"
+repo_root="$(pwd -P)"
 
 fail() {
   printf 'pre-commit: FAILED at %s\n' "$1" >&2
@@ -52,6 +52,10 @@ rm -f "$staged_list"
 
 if ((${#staged[@]} > 0)); then
   for file in "${staged[@]}"; do
+    staged_mode="$(git ls-files -s -- "$file" | awk '{print $1}')"
+    if [[ "$staged_mode" == "120000" ]]; then
+      fail 'staged path'
+    fi
     if ! git diff --quiet -- "$file"; then
       printf 'pre-commit: partially staged: %s; stage it fully or stash\n' "$file" >&2
       exit 1

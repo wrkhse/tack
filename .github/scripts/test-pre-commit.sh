@@ -246,7 +246,7 @@ if git commit -qm 'fmt: staged symlink vs regular worktree' > "$work/mode.out" 2
   echo 'staged symlink vs regular worktree commit unexpectedly succeeded' >&2
   exit 1
 fi
-grep -qE 'partially staged: mode-link\.md|FAILED at staged path' "$work/mode.out"
+grep -q 'FAILED at staged path' "$work/mode.out"
 git restore --staged mode-link.md
 rm -f mode-link.md "$work/mode-target.md"
 
