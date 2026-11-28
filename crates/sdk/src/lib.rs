@@ -50,18 +50,22 @@ mod tests {
 
     #[test]
     fn the_current_contract_major_is_accepted() {
+        assert_eq!(SDK_CONTRACT_MAJOR, 1);
         assert_eq!(check_contract_major(SDK_CONTRACT_MAJOR), Ok(()));
     }
 
     #[test]
     fn a_different_contract_major_is_refused_by_name() {
-        let found = SDK_CONTRACT_MAJOR.saturating_add(1);
+        let found = 2u32;
         let error = check_contract_major(found).expect_err("a different major is refused");
 
-        assert_eq!(error, ContractError::WrongMajor { found });
+        assert_eq!(
+            check_contract_major(2),
+            Err(ContractError::WrongMajor { found: 2 })
+        );
         assert_eq!(
             error.to_string(),
-            format!("contract_major_mismatch: found {found}, expected {SDK_CONTRACT_MAJOR}")
+            "contract_major_mismatch: found 2, expected 1"
         );
     }
 }
