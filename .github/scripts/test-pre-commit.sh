@@ -237,4 +237,34 @@ fi
 git restore --staged staged-link.rs
 rm -f staged-link.rs "$work/outside-target.rs"
 
+printf 'probe\n' > "$work/mode-target.md"
+ln -s "$work/mode-target.md" mode-link.md
+git add mode-link.md
+rm mode-link.md
+printf 'plain regular file\n' > mode-link.md
+if git commit -qm 'fmt: staged symlink vs regular worktree' > "$work/mode.out" 2>&1; then
+  echo 'staged symlink vs regular worktree commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -qE 'partially staged: mode-link\.md|FAILED at staged path' "$work/mode.out"
+git restore --staged mode-link.md
+rm -f mode-link.md "$work/mode-target.md"
+
+mkdir -p "$work/real-parent"
+printf 'probe\n' > "$work/real-parent/inside.md"
+mkdir linked-parent
+printf 'probe\n' > linked-parent/inside.md
+git add linked-parent/inside.md
+rm linked-parent/inside.md
+rmdir linked-parent
+ln -s "$work/real-parent" linked-parent
+if git commit -qm 'fmt: symlinked parent' > "$work/parent.out" 2>&1; then
+  echo 'symlinked parent commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at staged path' "$work/parent.out"
+git restore --staged linked-parent/inside.md
+rm -f linked-parent
+rm -rf "$work/real-parent"
+
 echo 'pre-commit hook selftest: all cases passed'
