@@ -37,8 +37,16 @@ impl<'a> Fixture<'a> {
             })
             .collect();
         let manifest = PluginManifest {
-            name: "safe-push".into(),
-            needs: vec![],
+            name: values["PLUGIN_NAME"]
+                .as_str()
+                .expect("fixture plugin name")
+                .into(),
+            needs: values["NEEDS"]
+                .as_array()
+                .expect("fixture needs")
+                .iter()
+                .map(|need| need.as_str().expect("fixture need").into())
+                .collect(),
             tools,
         };
 
@@ -196,6 +204,8 @@ fn register_render_only_fills_the_fixture_slots() {
         ("__TACK_PROTOCOL_VERSION__", "1".to_owned()),
         ("__TACK_BUDGET_MS__", data["BUDGET_MS"].to_string()),
         ("__TACK_TOOL_PREFIX__", data["TOOL_PREFIX"].to_string()),
+        ("__TACK_PLUGIN_NAME__", data["PLUGIN_NAME"].to_string()),
+        ("__TACK_NEEDS__", data["NEEDS"].to_string()),
     ];
 
     let [_, _, register] = render(&fixture.config()).expect("render");
@@ -338,12 +348,33 @@ fn tack_hook_runs_by_its_plain_name_within_the_budget() {
     for expected in [
         "const HOOK_BIN = \"tack-hook\";",
         "const PLUGIN_DIR = \"/plugins/safe-push\";",
+        "const PLUGIN_NAME = \"safe-push\";",
+        "const NEEDS = [];",
         "const BUDGET_MS = 9000;",
-        "done = await $.process.run([HOOK_BIN, \"--plugin\", PLUGIN_DIR], {",
+        "const HOOK_ARGS = [",
+        "\"--plugin\",",
+        "PLUGIN_DIR,",
+        "\"--plugin-name\",",
+        "PLUGIN_NAME,",
+        "...NEEDS.flatMap((need) => [\"--need\", need]),",
+        "];",
+        "done = await $.process.run([HOOK_BIN, ...HOOK_ARGS], {",
         "timeoutMs: BUDGET_MS,",
     ] {
         assert!(lines.contains(&expected), "{expected}");
     }
+}
+
+#[test]
+fn declared_needs_are_rendered_as_hook_arguments() {
+    let values = fixture_values();
+    let mut fixture = Fixture::from_values(&values);
+    fixture.manifest.needs = vec!["daemon".into(), "control.call.navigate".into()];
+
+    let [_, _, register] = render(&fixture.config()).expect("render");
+    let lines: Vec<&str> = register.contents.lines().map(str::trim).collect();
+
+    assert!(lines.contains(&"const NEEDS = [\"daemon\",\"control.call.navigate\"];"));
 }
 
 #[test]
@@ -383,6 +414,26 @@ fn render_refuses_unsafe_values_and_bad_tools() {
     let mut reason = fixture.config();
     reason.deny_reasons = &reasons;
     assert_eq!(render(&reason), Err(ModError::UnsafeValue("deny_reasons")));
+
+    let mut named_plugin = fixture.manifest.clone();
+    named_plugin.name = "__TACK_PLUGIN_NAME__".into();
+    assert_eq!(
+        render(&ModConfig {
+            manifest: &named_plugin,
+            ..fixture.config()
+        }),
+        Err(ModError::UnsafeValue("plugin_name"))
+    );
+
+    let mut needing = fixture.manifest.clone();
+    needing.needs = vec!["daemon\nspawn".into()];
+    assert_eq!(
+        render(&ModConfig {
+            manifest: &needing,
+            ..fixture.config()
+        }),
+        Err(ModError::UnsafeValue("needs"))
+    );
 
     let mut described = fixture.manifest.clone();
     described.tools[0].description = "__TACK_TOOLS__".into();

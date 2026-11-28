@@ -6,13 +6,14 @@ use std::io::{self, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process_group};
-use tack_daemon::grants::Grants;
-use tack_daemon::host_transport::{HostEndpoint, HostTransport};
+use tack_daemon::control;
+use tack_daemon::grants::{Grants, MAX_CALLS, MAX_NAME_BYTES};
+use tack_daemon::host_transport::{ControlBroker, HostEndpoint, HostTransport};
 use tack_daemon::pipe::{self, PipeError};
 use tack_daemon::stall::{Clock, StallClient, SystemClock};
 use tack_daemon::transport::{TransportError, bind};
@@ -24,6 +25,7 @@ use tack_protocol::wire::{
     DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
 };
 
+const GRANTS_ENV: &str = "TACK_GRANTS";
 const BARN_BIN_ENV: &str = "TACK_BARN_BIN";
 const BARN_BIN_NAME: &str = "barn";
 const BARN_STATE_DIR_VAR: &str = "BARN_STATE_DIR";
@@ -33,29 +35,77 @@ fn unavailable(reason: &str) -> String {
     format!("tack: plugin unavailable: {reason}")
 }
 
+/// The daemon's launch settings.
+///
+/// `--grants <path>` names the host grants file. Without it, `TACK_GRANTS`
+/// is read the same way; an explicit argument wins over the environment.
+/// `TACK_HARNESS_SOCK` optionally names the socket granted control calls are
+/// forwarded to. With no name, needs or grants, every call stays denied.
 struct Args {
     socket: PathBuf,
     plugin: PathBuf,
     grants: Grants,
+    identity: control::LaunchIdentity,
+    harness_socket: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
+    parse_args_with(
+        std::env::args().skip(1),
+        std::env::var(GRANTS_ENV).ok(),
+        std::env::var(control::HARNESS_SOCK_ENV).ok(),
+    )
+}
+
+/// Parse the launch settings from an explicit argument list and environment.
+fn parse_args_with<I>(
+    args: I,
+    env_grants: Option<String>,
+    env_harness: Option<String>,
+) -> Result<Args, String>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut socket = None;
     let mut plugin = None;
     let mut grants: Option<PathBuf> = None;
-    let mut args = std::env::args().skip(1);
+    let mut name = None;
+    let mut needs = Vec::new();
+    let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--socket" => socket = Some(args.next().ok_or("--socket needs a path")?.into()),
             "--plugin" => plugin = Some(args.next().ok_or("--plugin needs a dir")?.into()),
             "--grants" => grants = Some(args.next().ok_or("--grants needs a path")?.into()),
+            "--plugin-name" => {
+                if name.is_some() {
+                    return Err("--plugin-name given more than once".to_owned());
+                }
+                let value = args.next().ok_or("--plugin-name needs a name")?;
+                if !launch_name_ok(&value) {
+                    return Err(format!("invalid plugin name {value}"));
+                }
+                name = Some(value);
+            }
+            "--need" => {
+                let value = args.next().ok_or("--need needs a capability")?;
+                if !launch_name_ok(&value) {
+                    return Err(format!("invalid need {value}"));
+                }
+                if needs.len() >= MAX_CALLS {
+                    return Err(format!("too many --need flags (limit {MAX_CALLS})"));
+                }
+                needs.push(value);
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
 
-    let grants = match grants {
-        Some(path) => Grants::from_file(&path).map_err(|error| format!("grants: {error}"))?,
+    let grants = match grants.or_else(|| env_grants.map(PathBuf::from)) {
+        Some(path) => {
+            Grants::from_file(&PathBuf::from(path)).map_err(|error| format!("grants: {error}"))?
+        }
         None => Grants::default(),
     };
 
@@ -63,7 +113,21 @@ fn parse_args() -> Result<Args, String> {
         socket: socket.ok_or("missing --socket <path>")?,
         plugin: plugin.ok_or("missing --plugin <dir>")?,
         grants,
+        identity: control::LaunchIdentity {
+            name: name.unwrap_or_default(),
+            needs,
+        },
+        harness_socket: env_harness.map(PathBuf::from),
     })
+}
+
+/// Names are non-empty ASCII `[a-z0-9_.-]` within the grants name bound.
+fn launch_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_NAME_BYTES
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+        })
 }
 
 /// A named error reply for a request that never reached a verdict.
@@ -345,16 +409,20 @@ fn barn_launch(binary: &Path, plugin: &Path, daemon_pid: u32, state: &Path) -> B
 }
 
 /// Build the client that talks to the endpoint barn printed.
-const fn host_client(endpoint: HostEndpoint) -> HostClient {
+fn host_client(endpoint: HostEndpoint, broker: Arc<dyn ControlBroker>) -> HostClient {
     StallClient::new(
         SystemClock,
-        HostTransport::new(endpoint),
+        HostTransport::with_broker(endpoint, broker),
         Duration::from_millis(DEFAULT_DEADLINE_MS),
     )
 }
 
 /// Read the endpoint on a worker so an open stdout cannot block the daemon.
-fn launch_from_child(child: &mut Child, deadline: Instant) -> Result<HostClient, PipeError> {
+fn launch_from_child(
+    child: &mut Child,
+    deadline: Instant,
+    broker: Arc<dyn ControlBroker>,
+) -> Result<HostClient, PipeError> {
     let mut reaper = Reaper { child, armed: true };
     let stdout = reaper.child.stdout.take().ok_or(PipeError::Missing)?;
     let (sender, receiver) = mpsc::channel();
@@ -413,12 +481,21 @@ fn launch_from_child(child: &mut Child, deadline: Instant) -> Result<HostClient,
 
     reaper.disarm();
 
-    Ok(host_client(endpoint))
+    Ok(host_client(endpoint, broker))
 }
 
 /// Start barn, read its one endpoint line and bind the host transport.
-fn launch_stall(plugin: &Path, state: &Path) -> Result<Stall, String> {
-    launch_stall_with(std::env::var(BARN_BIN_ENV).ok().as_deref(), plugin, state)
+fn launch_stall(
+    plugin: &Path,
+    state: &Path,
+    broker: Arc<dyn ControlBroker>,
+) -> Result<Stall, String> {
+    launch_stall_with(
+        std::env::var(BARN_BIN_ENV).ok().as_deref(),
+        plugin,
+        state,
+        broker,
+    )
 }
 
 /// The launch with an explicit barn override, so the named deny is testable.
@@ -426,6 +503,7 @@ fn launch_stall_with(
     override_bin: Option<&str>,
     plugin: &Path,
     state: &Path,
+    broker: Arc<dyn ControlBroker>,
 ) -> Result<Stall, String> {
     let plugin = plugin_path(plugin)?;
     let exe = std::env::current_exe().map_err(|_| unavailable("barn not found"))?;
@@ -435,7 +513,8 @@ fn launch_stall_with(
         .spawn()
         .map_err(|error| unavailable(&format!("barn launch failed: {}", error.kind())))?;
     let deadline = SystemClock.deadline(Duration::from_millis(DEFAULT_DEADLINE_MS));
-    let client = launch_from_child(&mut child, deadline).map_err(|error| error.to_string())?;
+    let client = launch_from_child(&mut child, deadline, broker)
+        .map_err(|error| error.to_string())?;
 
     Ok(Stall::Host { client, child })
 }
@@ -443,9 +522,13 @@ fn launch_stall_with(
 /// Return a code instead of exiting here so `client` and its live `Stall`
 /// are dropped first; `Stall::drop` then reaps the barn child on every exit.
 async fn run(args: Args, state: PathBuf) -> i32 {
-    // Grants are parsed and validated at startup; keep the field read without
-    // logging its contents, which can name configured plugins and calls.
-    let _ = &args.grants;
+    // The broker is the only place a control frame can be authorized. It
+    // carries the launch identity, host grants and optional harness socket.
+    let broker: Arc<dyn ControlBroker> = Arc::new(control::ControlBroker::new(
+        args.identity,
+        args.grants.clone(),
+        args.harness_socket,
+    ));
 
     if !socket_in_state_dir(&state, &args.socket) {
         eprintln!(
@@ -468,7 +551,7 @@ async fn run(args: Args, state: PathBuf) -> i32 {
         }
     };
 
-    let stall = match launch_stall(&args.plugin, &state) {
+    let stall = match launch_stall(&args.plugin, &state, broker) {
         Ok(stall) => stall,
         Err(reason) => {
             eprintln!("tack-daemon: {reason}");
@@ -594,11 +677,91 @@ mod tests {
             socket: PathBuf::from("/tmp/tack-not-in-state.sock"),
             plugin: PathBuf::from("/tmp"),
             grants: Grants::default(),
+            identity: control::LaunchIdentity::default(),
+            harness_socket: None,
         };
 
         let result = run(args, PathBuf::from("/tmp/tack-run-test-state")).await;
 
         assert_eq!(result, EXIT_USAGE);
+    }
+
+    #[test]
+    fn explicit_grants_win_over_the_env_fallback() {
+        let dir = Script::new("exit 0");
+        let granted = dir.0.join("grants.json");
+        fs::write(
+            &granted,
+            r#"{"grants":{"host-grants":{"control":{"calls":["navigate"]}}}}"#,
+        )
+        .unwrap();
+        let granted = granted.to_string_lossy().into_owned();
+        let missing = dir.0.join("absent.json").to_string_lossy().into_owned();
+        let base = || {
+            [
+                "--socket".to_owned(),
+                "/tmp/tack-test.sock".to_owned(),
+                "--plugin".to_owned(),
+                "/tmp".to_owned(),
+            ]
+        };
+        let needs = ["control.call.navigate".to_owned()];
+
+        let explicit = parse_args_with(base(), Some(missing.clone()), None).unwrap();
+        assert_eq!(
+            explicit.grants.authorize("host-grants", &needs, "navigate"),
+            Ok(())
+        );
+        assert!(parse_args_with(base(), None, Some(missing)).is_err());
+
+        let fallback = parse_args_with(base(), None, Some(granted)).unwrap();
+        assert_eq!(
+            fallback.grants.authorize("host-grants", &needs, "navigate"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_plugin_name_is_declared_once_and_needs_are_bounded() {
+        let base = || {
+            [
+                "--socket".to_owned(),
+                "/tmp/tack-test.sock".to_owned(),
+                "--plugin".to_owned(),
+                "/tmp".to_owned(),
+            ]
+        };
+        let mut args = base().to_vec();
+        args.extend(["--plugin-name".to_owned(), "plugin".to_owned()]);
+        args.extend(["--need".to_owned(), "control.call.navigate".to_owned()]);
+        args.extend(["--need".to_owned(), "control.call.other".to_owned()]);
+
+        let parsed = parse_args_with(args, None, None).unwrap();
+
+        assert_eq!(parsed.identity.name, "plugin");
+        assert_eq!(parsed.identity.needs.len(), 2);
+        assert_eq!(parsed.harness_socket, None);
+
+        let mut duplicate = base().to_vec();
+        duplicate.extend(["--plugin-name".to_owned(), "plugin".to_owned()]);
+        duplicate.extend(["--plugin-name".to_owned(), "other".to_owned()]);
+
+        assert_eq!(
+            parse_args_with(duplicate, None, None).err(),
+            Some("--plugin-name given more than once".to_owned())
+        );
+
+        let mut invalid = base().to_vec();
+        invalid.extend(["--need".to_owned(), "Bad Name".to_owned()]);
+
+        assert!(parse_args_with(invalid, None, None).is_err());
+
+        let mut overflow = base().to_vec();
+        for index in 0..=MAX_CALLS {
+            overflow.extend(["--need".to_owned(), format!("cap-{index}")]);
+        }
+
+        assert!(parse_args_with(overflow, None, None).is_err());
     }
 
     #[test]
@@ -638,6 +801,7 @@ mod tests {
             Some("/nonexistent/tack-test-barn"),
             &std::env::temp_dir(),
             Path::new("/state/tack"),
+            test_broker(),
         )
         .map(|_| ());
 
@@ -773,6 +937,14 @@ mod tests {
             .expect("the test budget is representable")
     }
 
+    fn test_broker() -> Arc<dyn ControlBroker> {
+        Arc::new(control::ControlBroker::new(
+            control::LaunchIdentity::default(),
+            Grants::default(),
+            None,
+        ))
+    }
+
     fn assert_reaped(child: &mut Child) {
         assert!(child.try_wait().unwrap().is_some());
     }
@@ -840,7 +1012,7 @@ mod tests {
         let mut child = script.child();
         let start = Instant::now();
 
-        let result = launch_from_child(&mut child, short_deadline()).map(|_| ());
+        let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
         assert_eq!(result, Err(PipeError::Missing));
         assert!(start.elapsed() < Duration::from_secs(2));
@@ -860,7 +1032,7 @@ sleep 5"#,
             .process_group(0);
         let mut child = Script::spawn(&mut command);
 
-        let result = launch_from_child(&mut child, short_deadline()).map(|_| ());
+        let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
         assert_eq!(result, Err(PipeError::Missing));
 
@@ -875,7 +1047,7 @@ sleep 5"#,
         let mut child = script.child();
         let start = Instant::now();
 
-        let result = launch_from_child(&mut child, short_deadline()).map(|_| ());
+        let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
         assert_eq!(result, Err(PipeError::Missing));
         assert!(start.elapsed() < Duration::from_secs(2));
@@ -888,7 +1060,7 @@ sleep 5"#,
         let mut child = script.child();
         let start = Instant::now();
 
-        let result = launch_from_child(&mut child, short_deadline());
+        let result = launch_from_child(&mut child, short_deadline(), test_broker());
 
         assert!(result.is_ok());
         assert!(child.try_wait().unwrap().is_none());
@@ -901,7 +1073,7 @@ sleep 5"#,
         let script = Script::new(&format!("echo '{ERROR_LINE}'\nexit 0"));
         let mut child = script.child();
 
-        let result = launch_from_child(&mut child, short_deadline()).map(|_| ());
+        let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
         assert_eq!(result, Err(PipeError::Malformed));
         assert_reaped(&mut child);
@@ -912,7 +1084,7 @@ sleep 5"#,
         let script = Script::new(&format!("echo '{ERROR_LINE}'\nexit 7"));
         let mut child = script.child();
 
-        let result = launch_from_child(&mut child, short_deadline()).map(|_| ());
+        let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
         assert_eq!(
             result,
@@ -930,10 +1102,10 @@ sleep 5"#,
         let child = script.child();
 
         let stall = Stall::Host {
-            client: host_client(HostEndpoint::new(
-                PathBuf::from("/tmp/host.sock"),
-                "t".to_owned(),
-            )),
+            client: host_client(
+                HostEndpoint::new(PathBuf::from("/tmp/host.sock"), "t".to_owned()),
+                test_broker(),
+            ),
             child,
         };
         drop(stall);
@@ -952,7 +1124,7 @@ exit 7"#
         ));
         let mut child = script.child();
 
-        let result = launch_from_child(&mut child, short_deadline()).map(|_| ());
+        let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
         assert_eq!(
             result,
@@ -973,7 +1145,7 @@ sleep 5"#
         ));
         let mut child = script.child();
 
-        let result = launch_from_child(&mut child, short_deadline()).map(|_| ());
+        let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
         assert_eq!(result, Err(PipeError::Malformed));
 

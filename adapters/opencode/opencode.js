@@ -6,6 +6,8 @@ const os = require("node:os");
 const { spawn } = require("node:child_process");
 
 const MANIFEST = __TACK_MANIFEST__;
+const PLUGIN_NAME = MANIFEST.name;
+const NEEDS = MANIFEST.needs;
 const DAEMON_BIN = __TACK_DAEMON_BIN__;
 const PLUGIN_DIR = __TACK_PLUGIN_DIR__;
 const DENY_REASONS = __TACK_DENY_REASONS__;
@@ -123,7 +125,15 @@ function startDaemon() {
         const log = fs.openSync(DAEMON_LOG, "a");
         child = spawn(
           daemonBin(),
-          ["--socket", SOCKET, "--plugin", PLUGIN_DIR],
+          [
+            "--socket",
+            SOCKET,
+            "--plugin",
+            PLUGIN_DIR,
+            "--plugin-name",
+            PLUGIN_NAME,
+            ...NEEDS.flatMap((need) => ["--need", need]),
+          ],
           {
             detached: true,
             stdio: ["ignore", log, log],

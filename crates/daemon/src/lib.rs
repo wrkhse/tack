@@ -4,6 +4,7 @@
 //! transport and returns the stall's verdict. A boundary failure becomes a
 //! named reply; no request turns into an implicit allow.
 
+pub mod control;
 pub mod frames;
 pub mod grants;
 pub mod host_transport;

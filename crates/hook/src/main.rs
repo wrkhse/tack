@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use tack_hook::locate::{self, SOCKET_NAME};
 use tack_hook::start::Launch;
-use tack_hook::{Budget, Call, Failure, Limits, forward, plugin_dir, read_request};
+use tack_hook::{Budget, Call, Failure, HookArgs, Limits, forward, parse_args, read_request};
 use tack_protocol::wire::ReplyError;
 
 fn main() {
@@ -34,8 +34,8 @@ where
     S: FnOnce() -> Result<PathBuf, Failure>,
     R: FnOnce() -> Result<Vec<u8>, Failure> + Send + 'static,
 {
-    let plugin = match plugin_dir(args) {
-        Ok(plugin) => plugin,
+    let launch_args = match parse_args(args) {
+        Ok(args) => args,
         Err(failure) => return failure.into_line(0),
     };
 
@@ -54,7 +54,7 @@ where
         }
     };
 
-    let line = runtime.block_on(handle(plugin, state, budget, read));
+    let line = runtime.block_on(handle(launch_args, state, budget, read));
 
     // A stdin read that never ends must not hold the process open.
     runtime.shutdown_background();
@@ -62,7 +62,7 @@ where
     line
 }
 
-async fn handle<S, R>(plugin: Option<PathBuf>, state: S, budget: Budget, read: R) -> Vec<u8>
+async fn handle<S, R>(args: HookArgs, state: S, budget: Budget, read: R) -> Vec<u8>
 where
     S: FnOnce() -> Result<PathBuf, Failure>,
     R: FnOnce() -> Result<Vec<u8>, Failure> + Send + 'static,
@@ -71,6 +71,12 @@ where
         Ok(call) => call,
         Err(failure) => return failure.into_line(0),
     };
+
+    let HookArgs {
+        plugin,
+        name,
+        needs,
+    } = args;
 
     let reply = match state() {
         Ok(state) => {
@@ -86,6 +92,8 @@ where
                         socket,
                         plugin,
                         state,
+                        name,
+                        needs,
                     };
 
                     launch.spawn()
