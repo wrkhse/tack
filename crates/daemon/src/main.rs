@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fmt::{self, Write};
-use std::io::BufReader;
+use std::io::{self, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -100,22 +100,35 @@ fn kill_and_wait(child: &mut Child) {
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(500))
         .unwrap_or_else(Instant::now);
-    if wait_bounded(child, deadline).is_err() {
+    if let Reaped::Timeout = wait_bounded(|| child.try_wait(), deadline) {
         eprintln!("tack-daemon: child reap timed out");
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Reaped {
+    Exited(ExitStatus),
+    Timeout,
+}
+
 /// Wait for an exit inside the budget; an absent exit is not a success.
-fn wait_bounded(child: &mut Child, deadline: Instant) -> Result<ExitStatus, ()> {
+fn wait_bounded(
+    mut poll: impl FnMut() -> io::Result<Option<ExitStatus>>,
+    deadline: Instant,
+) -> Reaped {
     loop {
-        if let Some(status) = child.try_wait().map_err(|_| ())? {
-            return Ok(status);
+        match poll() {
+            Ok(Some(status)) => return Reaped::Exited(status),
+            Ok(None) => {}
+            Err(_) => return Reaped::Timeout,
         }
 
-        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(())?;
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Reaped::Timeout;
+        };
         let pause = remaining.min(Duration::from_millis(5));
         if pause.is_zero() {
-            return Err(());
+            return Reaped::Timeout;
         }
         thread::sleep(pause);
     }
@@ -350,7 +363,7 @@ fn launch_from_child(child: &mut Child, deadline: Instant) -> Result<HostClient,
                 .ok()
                 .and_then(Pid::from_raw);
 
-            if let Ok(status) = wait_bounded(reaper.child, deadline) {
+            if let Reaped::Exited(status) = wait_bounded(|| reaper.child.try_wait(), deadline) {
                 // Barn is reaped by `wait_bounded`; sweep any helpers left
                 // in its group. The PGID stays reserved while any group
                 // member is alive, so the only residual exposure is a new
@@ -367,15 +380,15 @@ fn launch_from_child(child: &mut Child, deadline: Instant) -> Result<HostClient,
                     return Err(PipeError::Error(reason));
                 }
                 return Err(PipeError::Malformed);
-            }
+            } else {
+                if let Some(group) = group {
+                    let _ = kill_process_group(group, Signal::KILL);
+                }
+                kill_and_wait(reaper.child);
+                reaper.disarm();
 
-            if let Some(group) = group {
-                let _ = kill_process_group(group, Signal::KILL);
+                return Err(PipeError::Malformed);
             }
-            kill_and_wait(reaper.child);
-            reaper.disarm();
-
-            return Err(PipeError::Malformed);
         }
         Err(error) => return Err(error),
     };
@@ -476,6 +489,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::fs::{self, Permissions};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -746,7 +760,42 @@ mod tests {
         kill_and_wait(&mut child);
 
         assert!(start.elapsed() < Duration::from_secs(2));
-        assert!(child.try_wait().unwrap().is_some());
+        assert_reaped(&mut child);
+    }
+
+    #[test]
+    fn a_never_exiting_poll_times_out_at_the_deadline() {
+        let start = Instant::now();
+        let deadline = start
+            .checked_add(Duration::from_millis(500))
+            .unwrap_or_else(Instant::now);
+
+        let reaped = wait_bounded(|| -> io::Result<Option<ExitStatus>> { Ok(None) }, deadline);
+        let elapsed = start.elapsed();
+
+        assert_eq!(reaped, Reaped::Timeout);
+        assert!(elapsed >= Duration::from_millis(500));
+        assert!(elapsed < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_exit_after_two_empty_polls_is_reaped() {
+        let status = ExitStatusExt::from_raw(0);
+        let mut polls = 0;
+
+        let reaped = wait_bounded(
+            || -> io::Result<Option<ExitStatus>> {
+                polls += 1;
+                if polls < 3 {
+                    Ok(None)
+                } else {
+                    Ok(Some(status))
+                }
+            },
+            short_deadline(),
+        );
+
+        assert_eq!(reaped, Reaped::Exited(status));
     }
 
     #[test]
