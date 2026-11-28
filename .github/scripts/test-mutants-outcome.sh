@@ -97,10 +97,8 @@ grep -Fq 'cargo mutants exited 9' "$tmp/f.out"
 grep -Fq 'its outcome cannot be used' "$tmp/f.out"
 printf 'ok: nonzero exit with an existing outcome fails with a named reason\n'
 
-# An empty shard prints cargo-mutants' own warning instead of
-# 'No mutants to filter'; the real output is kept as a fixture.
-fixture="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fixtures/mutants-empty-shard.txt"
-cp -- "$fixture" "$tmp/g.log"
+# An empty shard reports "Found 0 mutants to test" plus a WARN line and exits 0.
+printf 'Found 0 mutants to test\n\033[33m WARN\033[0m No mutants found under the active filters\n' > "$tmp/g.log"
 : > "$tmp/g.list"
 run_script "$tmp/g.out" 0 "$tmp/g.log" "$tmp/g.list" \
   "$tmp/g/outcomes.json" "$tmp/g.github-output"
@@ -109,18 +107,34 @@ run_script "$tmp/g.out" 0 "$tmp/g.log" "$tmp/g.list" \
 [ "$(jq -c -S . "$tmp/g/outcomes.json")" = \
   '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
 grep -Fxq 'zero=true' "$tmp/g.github-output"
-printf 'ok: empty-shard fixture writes a zero outcome\n'
+printf 'ok: empty-shard zero line and empty list write a zero outcome\n'
 
-# The same recognised line still fails when the independent --list has mutants.
-cp -- "$fixture" "$tmp/h.log"
-printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/h.list"
-set +e
+# Two-sided proof for an empty shard that coexists with mutants elsewhere.
+# The gate reads MUTANTS_LIST, which the workflow supplies with the same
+# --shard k/n as the run. The shard-scoped empty list is accepted as a zero
+# outcome, while the same shard's empty-shard log paired with a nonempty
+# whole-diff list is rejected, so the gate is driven by the shard-scoped list.
+printf 'Found 0 mutants to test\n\033[33m WARN\033[0m No mutants found under the active filters\n' > "$tmp/h.log"
+: > "$tmp/h.list"
+printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/h.whole-diff.list"
+[ -s "$tmp/h.whole-diff.list" ]
 run_script "$tmp/h.out" 0 "$tmp/h.log" "$tmp/h.list" \
   "$tmp/h/outcomes.json" "$tmp/h.github-output"
+
+[ -f "$tmp/h/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/h/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/h.github-output"
+printf 'ok: empty shard with mutants elsewhere writes a zero outcome from its shard-scoped list\n'
+
+# The same empty-shard log paired with the nonempty whole-diff list is rejected.
+set +e
+run_script "$tmp/h2.out" 0 "$tmp/h.log" "$tmp/h.whole-diff.list" \
+  "$tmp/h2/outcomes.json" "$tmp/h2.github-output"
 h_status=$?
 set -e
 
 [ "$h_status" -ne 0 ]
-[ ! -e "$tmp/h/outcomes.json" ]
-grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/h.out"
-printf 'ok: empty-shard line with mutants in list still fails\n'
+[ ! -e "$tmp/h2/outcomes.json" ]
+grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/h2.out"
+printf 'ok: whole-diff list is not accepted as an empty shard\n'
