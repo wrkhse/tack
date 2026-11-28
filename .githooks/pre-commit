@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
+repo_root="$(pwd -P)"
 
 fail() {
   printf 'pre-commit: FAILED at %s\n' "$1" >&2
@@ -51,6 +52,16 @@ rm -f "$staged_list"
 
 if ((${#staged[@]} > 0)); then
   for file in "${staged[@]}"; do
+    staged_mode="$(git ls-files -s -- "$file" | awk '{print $1}')"
+    if [[ "$staged_mode" == "120000" ]]; then
+      fail 'staged path'
+    fi
+    parent="$(dirname "./$file")"
+    resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)" || fail 'staged path'
+    case "$resolved_parent/" in
+      "$repo_root"/*) ;;
+      *) fail 'staged path' ;;
+    esac
     if ! git diff --quiet -- "$file"; then
       printf 'pre-commit: partially staged: %s; stage it fully or stash\n' "$file" >&2
       exit 1
@@ -73,6 +84,16 @@ fi
 if ((${#rust_files[@]} > 0)); then
   printf 'pre-commit: rustfmt: formatting %s staged Rust file(s)\n' "${#rust_files[@]}"
   for file in "${rust_files[@]}"; do
+    staged_mode="$(git ls-files -s -- "$file" | awk '{print $1}')"
+    if [[ "$staged_mode" == "120000" || -L "$file" || ! -f "$file" ]]; then
+      fail 'staged path'
+    fi
+    parent="$(dirname "./$file")"
+    resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)" || fail 'staged path'
+    case "$resolved_parent/" in
+      "$repo_root"/*) ;;
+      *) fail 'staged path' ;;
+    esac
     if ! rustfmt --edition 2024 --config skip_children=true "./$file"; then
       fail 'rustfmt'
     fi
@@ -156,6 +177,16 @@ if ((${#other_files[@]} > 0)); then
   printf 'pre-commit: tidy: cached binary %s\n' "$tidy_bin"
   printf 'pre-commit: tidy: formatting %s staged file(s)\n' "${#other_files[@]}"
   for file in "${other_files[@]}"; do
+    staged_mode="$(git ls-files -s -- "$file" | awk '{print $1}')"
+    if [[ "$staged_mode" == "120000" || -L "$file" || ! -f "$file" ]]; then
+      fail 'staged path'
+    fi
+    parent="$(dirname "./$file")"
+    resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)" || fail 'staged path'
+    case "$resolved_parent/" in
+      "$repo_root"/*) ;;
+      *) fail 'staged path' ;;
+    esac
     if ! "$tidy_bin" up --skip-unknown "./$file"; then
       fail 'tidy format'
     fi

@@ -207,4 +207,64 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 fi
 git commit -qm 'fmt: system bash probe'
 
+printf 'probe\n' > "$work/outside-target.md"
+ln -s "$work/outside-target.md" staged-link.md
+git add staged-link.md
+if git commit -qm 'fmt: staged symlink md' > "$work/symlink-md.out" 2>&1; then
+  echo 'staged symlink md commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at staged path' "$work/symlink-md.out"
+if [[ "$(cat "$work/outside-target.md")" != 'probe' ]]; then
+  echo 'tidy wrote through staged symlink md' >&2
+  exit 1
+fi
+git restore --staged staged-link.md
+rm -f staged-link.md "$work/outside-target.md"
+
+printf 'probe\n' > "$work/outside-target.rs"
+ln -s "$work/outside-target.rs" staged-link.rs
+git add staged-link.rs
+if git commit -qm 'fmt: staged symlink rs' > "$work/symlink-rs.out" 2>&1; then
+  echo 'staged symlink rs commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at staged path' "$work/symlink-rs.out"
+if [[ "$(cat "$work/outside-target.rs")" != 'probe' ]]; then
+  echo 'rustfmt wrote through staged symlink rs' >&2
+  exit 1
+fi
+git restore --staged staged-link.rs
+rm -f staged-link.rs "$work/outside-target.rs"
+
+printf 'probe\n' > "$work/mode-target.md"
+ln -s "$work/mode-target.md" mode-link.md
+git add mode-link.md
+rm mode-link.md
+printf 'plain regular file\n' > mode-link.md
+if git commit -qm 'fmt: staged symlink vs regular worktree' > "$work/mode.out" 2>&1; then
+  echo 'staged symlink vs regular worktree commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at staged path' "$work/mode.out"
+git restore --staged mode-link.md
+rm -f mode-link.md "$work/mode-target.md"
+
+mkdir -p "$work/real-parent"
+printf 'probe\n' > "$work/real-parent/inside.md"
+mkdir linked-parent
+printf 'probe\n' > linked-parent/inside.md
+git add linked-parent/inside.md
+rm linked-parent/inside.md
+rmdir linked-parent
+ln -s "$work/real-parent" linked-parent
+if git commit -qm 'fmt: symlinked parent' > "$work/parent.out" 2>&1; then
+  echo 'symlinked parent commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at staged path' "$work/parent.out"
+git restore --staged linked-parent/inside.md
+rm -f linked-parent
+rm -rf "$work/real-parent"
+
 echo 'pre-commit hook selftest: all cases passed'
