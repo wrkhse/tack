@@ -107,7 +107,9 @@ impl FakeHarness {
         let halted = Arc::clone(&stop);
 
         let worker = thread::spawn(move || {
-            let deadline = Instant::now().checked_add(WAIT).unwrap_or_else(Instant::now);
+            let deadline = Instant::now()
+                .checked_add(WAIT)
+                .unwrap_or_else(Instant::now);
 
             loop {
                 if halted.load(Ordering::SeqCst) {
@@ -171,7 +173,9 @@ struct Daemon(Child);
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.0.kill();
-        let deadline = Instant::now().checked_add(WAIT).unwrap_or_else(Instant::now);
+        let deadline = Instant::now()
+            .checked_add(WAIT)
+            .unwrap_or_else(Instant::now);
 
         while let Ok(None) = self.0.try_wait() {
             if Instant::now() >= deadline {
@@ -214,7 +218,9 @@ fn start_daemon(barn: &str, sandbox: &Sandbox, plugin: &Path, grants: Option<&Pa
 }
 
 fn wait_for_socket(socket: &Path) -> UnixStream {
-    let deadline = Instant::now().checked_add(WAIT).unwrap_or_else(Instant::now);
+    let deadline = Instant::now()
+        .checked_add(WAIT)
+        .unwrap_or_else(Instant::now);
 
     loop {
         match UnixStream::connect(socket) {
@@ -223,7 +229,10 @@ fn wait_for_socket(socket: &Path) -> UnixStream {
                 if error.kind() == ErrorKind::NotFound
                     || error.kind() == ErrorKind::ConnectionRefused =>
             {
-                assert!(Instant::now() < deadline, "tack.sock never appeared: {error}");
+                assert!(
+                    Instant::now() < deadline,
+                    "tack.sock never appeared: {error}"
+                );
                 thread::sleep(POLL);
             }
             Err(error) => panic!("tack.sock connect failed: {error}"),

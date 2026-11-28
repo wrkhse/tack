@@ -69,10 +69,7 @@ pub fn render(plugin_dir: &Path, manifest: &PluginManifest) -> Result<String, Ex
             "__TACK_PLUGIN_NAME__",
             json!(manifest.name.as_str()).to_string(),
         ),
-        (
-            "__TACK_NEEDS__",
-            json!(&manifest.needs).to_string(),
-        ),
+        ("__TACK_NEEDS__", json!(&manifest.needs).to_string()),
         ("__TACK_PROTOCOL_VERSION__", PROTOCOL_VERSION.to_string()),
         ("__TACK_BUDGET_MS__", BUDGET_MS.to_string()),
         ("__TACK_MAX_FRAME_BYTES__", MAX_FRAME_BYTES.to_string()),

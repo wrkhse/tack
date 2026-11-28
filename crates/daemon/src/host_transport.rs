@@ -578,9 +578,9 @@ mod tests {
     use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::path::Path;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
-    use std::sync::Mutex;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1594,8 +1594,7 @@ mod tests {
 
     const CONTROL_REQUEST: &str =
         r#"{"kind":"control","id":99,"version":1,"call":"navigate","input":{}}"#;
-    const CONTROL_REPLY: &str =
-        r#"{"kind":"control","id":99,"version":1,"result":{"ok":true}}"#;
+    const CONTROL_REPLY: &str = r#"{"kind":"control","id":99,"version":1,"result":{"ok":true}}"#;
 
     struct RecordingBroker {
         seen: Arc<Mutex<Vec<Vec<u8>>>>,

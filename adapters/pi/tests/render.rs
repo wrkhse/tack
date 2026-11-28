@@ -182,10 +182,7 @@ fn declared_needs_are_embedded_in_the_extension() {
 fn extension_errors_display_their_machine_readable_messages() {
     for (error, expected) in [
         (ExtensionError::UnsafePluginDir, "unsafe_value:plugin_dir"),
-        (
-            ExtensionError::UnsafeValue("needs"),
-            "unsafe_value:needs",
-        ),
+        (ExtensionError::UnsafeValue("needs"), "unsafe_value:needs"),
         (
             ExtensionError::MissingToken("__TACK_PLUGIN_DIR__"),
             "missing_token:__TACK_PLUGIN_DIR__",

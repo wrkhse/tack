@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tack_protocol::wire::{self as wire, MAX_FRAME_BYTES, PROTOCOL_VERSION, Reply, ReplyError, Request, WireError};
+use tack_protocol::wire::{
+    self as wire, MAX_FRAME_BYTES, PROTOCOL_VERSION, Reply, ReplyError, Request, WireError,
+};
 use tokio::net::UnixStream as AsyncUnixStream;
 use tokio::runtime::Handle;
 use tokio::time::timeout;
@@ -98,16 +100,15 @@ impl ControlBroker {
             return error_line(fallback_id, ERR_CONTROL_FRAME);
         }
 
-        let (id, version, call, input) =
-            match serde_json::from_slice::<Request>(line) {
-                Ok(Request::Control {
-                    id,
-                    version,
-                    call,
-                    input,
-                }) => (id, version, call, input),
-                _ => return error_line(fallback_id, ERR_MALFORMED),
-            };
+        let (id, version, call, input) = match serde_json::from_slice::<Request>(line) {
+            Ok(Request::Control {
+                id,
+                version,
+                call,
+                input,
+            }) => (id, version, call, input),
+            _ => return error_line(fallback_id, ERR_MALFORMED),
+        };
 
         if version != PROTOCOL_VERSION {
             return error_line(id, ERR_VERSION);
@@ -185,7 +186,9 @@ fn connect_bounded(path: &Path, deadline: Instant) -> Result<UnixStream, &'stati
     let budget = remaining(deadline)?;
     let handle = Handle::try_current().map_err(|_| ERR_RUNTIME)?;
     let connected = handle.block_on(timeout(budget, AsyncUnixStream::connect(path)));
-    let stream = connected.map_err(|_| ERR_TIMEOUT)?.map_err(|_| ERR_CONNECT)?;
+    let stream = connected
+        .map_err(|_| ERR_TIMEOUT)?
+        .map_err(|_| ERR_CONNECT)?;
     let stream = stream.into_std().map_err(|_| ERR_CONNECT)?;
 
     stream.set_nonblocking(false).map_err(|_| ERR_CONNECT)?;
@@ -208,8 +211,7 @@ fn remaining(deadline: Instant) -> Result<Duration, &'static str> {
 /// One infallible error frame. `encode_line` could only fail on the short
 /// static messages used here, so a fixed fallback keeps the reply total.
 fn error_line(id: u64, message: &str) -> Vec<u8> {
-    let encoded =
-        serde_json::to_string(message).unwrap_or_else(|_| "\"daemon_error\"".to_owned());
+    let encoded = serde_json::to_string(message).unwrap_or_else(|_| "\"daemon_error\"".to_owned());
 
     format!(
         "{{\"kind\":\"error\",\"id\":{id},\"version\":{PROTOCOL_VERSION},\"error\":\"daemon_error\",\"message\":{encoded}}}\n"
@@ -334,7 +336,11 @@ mod tests {
         let broker = ControlBroker::new(LaunchIdentity::default(), Grants::default(), None);
         let line = control_line(1, PROTOCOL_VERSION, "navigate", json!({}));
 
-        let reply = reply_from(broker.try_handle(&line).expect("a control frame gets a reply"));
+        let reply = reply_from(
+            broker
+                .try_handle(&line)
+                .expect("a control frame gets a reply"),
+        );
 
         assert_eq!(reply, error("grant_denied"));
     }
@@ -342,14 +348,13 @@ mod tests {
     #[test]
     fn a_wrong_version_is_refused_before_authorization() {
         let broker = granted_broker(None);
-        let line = control_line(
-            1,
-            PROTOCOL_VERSION.saturating_add(1),
-            "navigate",
-            json!({}),
-        );
+        let line = control_line(1, PROTOCOL_VERSION.saturating_add(1), "navigate", json!({}));
 
-        let reply = reply_from(broker.try_handle(&line).expect("a control frame gets a reply"));
+        let reply = reply_from(
+            broker
+                .try_handle(&line)
+                .expect("a control frame gets a reply"),
+        );
 
         assert_eq!(reply, error("protocol_version_mismatch"));
     }
@@ -371,7 +376,11 @@ mod tests {
         let line = control_line(1, PROTOCOL_VERSION, "navigate", json!({ "target": "demo" }));
 
         let reply = tokio::task::block_in_place(|| {
-            reply_from(broker.try_handle(&line).expect("a control frame gets a reply"))
+            reply_from(
+                broker
+                    .try_handle(&line)
+                    .expect("a control frame gets a reply"),
+            )
         });
 
         assert_eq!(
@@ -394,7 +403,11 @@ mod tests {
         let line = control_line(1, PROTOCOL_VERSION, "navigate", json!({ "target": "demo" }));
 
         let reply = tokio::task::block_in_place(|| {
-            reply_from(broker.try_handle(&line).expect("a control frame gets a reply"))
+            reply_from(
+                broker
+                    .try_handle(&line)
+                    .expect("a control frame gets a reply"),
+            )
         });
 
         assert_eq!(reply, error("harness_malformed_reply"));
@@ -409,7 +422,11 @@ mod tests {
 
         assert!(line.len() > MAX_FRAME_BYTES);
         assert_eq!(
-            reply_from(broker.try_handle(&line).expect("a control frame gets a reply")),
+            reply_from(
+                broker
+                    .try_handle(&line)
+                    .expect("a control frame gets a reply")
+            ),
             error("control_frame_too_large")
         );
     }

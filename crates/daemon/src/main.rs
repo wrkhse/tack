@@ -513,8 +513,8 @@ fn launch_stall_with(
         .spawn()
         .map_err(|error| unavailable(&format!("barn launch failed: {}", error.kind())))?;
     let deadline = SystemClock.deadline(Duration::from_millis(DEFAULT_DEADLINE_MS));
-    let client = launch_from_child(&mut child, deadline, broker)
-        .map_err(|error| error.to_string())?;
+    let client =
+        launch_from_child(&mut child, deadline, broker).map_err(|error| error.to_string())?;
 
     Ok(Stall::Host { client, child })
 }
