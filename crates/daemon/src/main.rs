@@ -1297,16 +1297,17 @@ sleep 5"#
             assert_eq!(start["method"].as_str(), Some("host.start"));
 
             thread::sleep(Duration::from_millis(150));
-            writeln!(
-                stream,
-                "{}",
-                r#"{"jsonrpc":"2.0","id":21,"result":{"stall":"sourcefed"}}"#
-            )
-            .unwrap();
+            stream
+                .write_all(
+                    b"{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{\"stall\":\"sourcefed\"}}\n",
+                )
+                .unwrap();
 
             line.clear();
             reader.read_line(&mut line).unwrap();
-            writeln!(stream, "{}", r#"{"type":"hook","id":22,"outcome":"allow"}"#).unwrap();
+            stream
+                .write_all(b"{\"type\":\"hook\",\"id\":22,\"outcome\":\"allow\"}\n")
+                .unwrap();
         });
 
         let endpoint = format!(
