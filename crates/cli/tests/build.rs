@@ -3,6 +3,7 @@
 
 #![cfg(test)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -115,6 +116,31 @@ fn constant<'a>(script: &'a str, name: &str) -> &'a str {
         .expect("emitted constant");
     let value = line.strip_prefix(&prefix).expect("prefix");
     value.strip_suffix(';').expect("semicolon")
+}
+
+/// Splits emitted declarations into their `export type` bodies, keyed by name.
+fn declared_types(text: &str) -> HashMap<String, String> {
+    let mut types = HashMap::new();
+    let mut current: Option<(String, String)> = None;
+
+    for line in text.lines() {
+        if let Some(definition) = line.strip_prefix("export type ") {
+            if let Some((name, body)) = current.take() {
+                types.insert(name, body);
+            }
+            let (name, _) = definition
+                .split_once(" =")
+                .expect("type name and definition");
+            current = Some((name.to_owned(), format!("{line}\n")));
+        } else if let Some((_, body)) = &mut current {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    if let Some((name, body)) = current {
+        types.insert(name, body);
+    }
+    types
 }
 
 #[test]
@@ -455,4 +481,98 @@ fn a_directory_at_the_sdk_declaration_path_is_a_named_error() {
 
     assert!(matches!(error, tack_cli::BuildError::Io(_)));
     assert!(error.to_string().contains("Is a directory"));
+}
+
+#[test]
+fn sdk_declarations_pin_hook_table_types() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+
+    build(&plugin, &out, BuildOptions::default()).expect("sdk plugin builds");
+
+    let declarations = std::fs::read_to_string(out.join("sdk").join("tack.d.luau"))
+        .expect("SDK declarations are readable");
+    assert_eq!(declarations, TACK_D_LUAU);
+
+    for name in [
+        "export type HookHandler",
+        "export type HookTable",
+        "export type OnError = \"deliver\" | \"deny\"",
+        "export type AnnotateResult",
+        "export type DropResult",
+        "export type AllowResult",
+        "export type HookResult",
+        "eventBefore:",
+        "annotate: (fields:",
+        "drop: () ->",
+    ] {
+        assert!(declarations.contains(name), "missing declaration: {name}");
+    }
+}
+
+#[test]
+fn a_table_valued_hook_fixture_still_builds() {
+    let scratch = Scratch::new();
+    let plugin = scratch.path().join("plugin");
+    std::fs::create_dir_all(&plugin).expect("plugin folder");
+    std::fs::write(
+        plugin.join("plugin.luau"),
+        r#"return {
+    name = "hook-table-plugin",
+    needs = { "sdk" },
+    toolBefore = {
+        {
+            priority = 10,
+            budgetMs = 3000,
+            onError = "deliver",
+            run = function(payload, ctx) return ctx.allow() end,
+        },
+    },
+}"#,
+    )
+    .expect("plugin manifest");
+    let out = scratch.path().join("dist");
+
+    build(&plugin, &out, BuildOptions::default()).expect("table-valued hook fixture builds");
+
+    let declarations = out.join("sdk").join("tack.d.luau");
+    assert!(declarations.exists());
+    let emitted = std::fs::read_to_string(&declarations).expect("SDK declarations are readable");
+    assert_eq!(emitted, TACK_D_LUAU);
+
+    let types = declared_types(&emitted);
+    for name in [
+        "HookHandler",
+        "HookTable",
+        "ToolBeforeHandler",
+        "ToolBeforeHookTable",
+        "HookResult",
+        "OnError",
+        "AnnotateResult",
+        "DropResult",
+        "AllowResult",
+        "HookCtx",
+        "Plugin",
+    ] {
+        assert!(types.contains_key(name), "missing type: {name}");
+    }
+
+    assert!(types["HookTable"].contains("HookHandler"));
+    assert!(types["ToolBeforeHookTable"].contains("ToolBeforeHandler"));
+    assert!(types["ToolBeforeHandler"].contains("ctx: ToolBeforeCtx"));
+    assert!(types["Plugin"].contains("toolBefore: (ToolBeforeFn | ToolBeforeHookTable)?"));
+    assert!(types["Plugin"].contains("eventBefore: (EventBeforeFn | HookTable)?"));
+
+    for field in [
+        "priority",
+        "budgetMs",
+        "onError",
+        "run: (payload: any, ctx: HookCtx) -> HookResult?",
+    ] {
+        assert!(
+            types["HookHandler"].contains(field),
+            "HookHandler missing: {field}"
+        );
+    }
 }
