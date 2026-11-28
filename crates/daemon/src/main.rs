@@ -100,7 +100,7 @@ fn kill_and_wait(child: &mut Child) {
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(500))
         .unwrap_or_else(Instant::now);
-    if let Reaped::Timeout = wait_bounded(|| child.try_wait(), deadline) {
+    if wait_bounded(|| child.try_wait(), deadline) == Reaped::Timeout {
         eprintln!("tack-daemon: child reap timed out");
     }
 }
@@ -363,32 +363,30 @@ fn launch_from_child(child: &mut Child, deadline: Instant) -> Result<HostClient,
                 .ok()
                 .and_then(Pid::from_raw);
 
+            // Barn is reaped by `wait_bounded`; sweep any helpers left
+            // in its group. The PGID stays reserved while any group
+            // member is alive, so the only residual exposure is a new
+            // process taking that PID and making itself a group leader
+            // in the window after the last member exits; the supervisor
+            // accepted that residual window on 2026-11-27. ESRCH means
+            // the group already exited and counts as success, so the
+            // result is ignored.
+            if let Some(group) = group {
+                let _ = kill_process_group(group, Signal::KILL);
+            }
+
             if let Reaped::Exited(status) = wait_bounded(|| reaper.child.try_wait(), deadline) {
-                // Barn is reaped by `wait_bounded`; sweep any helpers left
-                // in its group. The PGID stays reserved while any group
-                // member is alive, so the only residual exposure is a new
-                // process taking that PID and making itself a group leader
-                // in the window after the last member exits; the supervisor
-                // accepted that residual window on 2026-11-27. ESRCH means
-                // the group already exited and counts as success, so the
-                // result is ignored.
-                if let Some(group) = group {
-                    let _ = kill_process_group(group, Signal::KILL);
-                }
-                reaper.disarm();
                 if matches!(status.code(), Some(code) if code != 0) {
+                    reaper.disarm();
                     return Err(PipeError::Error(reason));
                 }
-                return Err(PipeError::Malformed);
             } else {
-                if let Some(group) = group {
-                    let _ = kill_process_group(group, Signal::KILL);
-                }
                 kill_and_wait(reaper.child);
-                reaper.disarm();
-
-                return Err(PipeError::Malformed);
             }
+
+            reaper.disarm();
+
+            return Err(PipeError::Malformed);
         }
         Err(error) => return Err(error),
     };
