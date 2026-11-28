@@ -1254,7 +1254,7 @@ mod tests {
     #[test]
     fn a_non_interrupted_fill_error_is_reported_not_retried() {
         let line = wire(&json!({ "ok": true }));
-        let mut reader = FailsOnceWith::new(line.clone());
+        let mut reader = FailsOnceWith::new(line);
         let mut into = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(5);
 
@@ -1262,7 +1262,7 @@ mod tests {
             read_line(&mut reader, &mut into, deadline),
             Err(StallError::Closed)
         );
-        assert!(into.is_empty());
+        assert_eq!(into, Vec::<u8>::new());
     }
 
     #[test]
