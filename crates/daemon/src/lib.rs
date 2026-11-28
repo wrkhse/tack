@@ -21,10 +21,11 @@ pub const EXIT_ENGINE: i32 = 4;
 pub const SOCKET_NAME: &str = "tack.sock";
 pub const ERR_SOCKET_MISMATCH: &str = "socket_not_in_state_dir";
 
-/// Each startup stage gets its own bound: reading barn's endpoint line and
-/// the one-time `host.start` handshake each take up to 2 s, so at most 4 s
-/// pass before the first call's budget starts. `STALL_STARTUP_TIMEOUT` is
-/// the named refusal for either stage.
+/// Bounds each stall startup stage.
+///
+/// Reading barn's endpoint line and the one-time `host.start` handshake each
+/// take up to 2 s, so at most 4 s pass before the first call's budget starts.
+/// `STALL_STARTUP_TIMEOUT` is the named refusal for either stage.
 pub const STALL_STARTUP_MS: u64 = 2_000;
 
 /// Named refusal when the stall startup budget is exceeded.
