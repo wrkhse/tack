@@ -436,6 +436,10 @@ jobs:
               ;;
           esac
 
+      - name: Prove review gate step conditions
+        shell: bash
+        run: bash .github/scripts/test-review-gate.sh
+
   # Scripts AND prompt come from the base SHA via the pin; the YAML is editable
   # by a same-repo PR. The manager's merge guard diff-checks every PR touching
   # review workflows, .github/scripts, the prompt or required checks (owner
