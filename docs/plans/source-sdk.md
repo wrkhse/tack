@@ -264,11 +264,10 @@ scope.
 
 ## End to end
 
-tack CI builds barn at its pinned revision and runs a real source stall with
-a fixture source. sourcefed CI runs tack's daemon at a pinned commit; tack
-launches barn. CI never touches live GitHub: a local HTTP fixture serves issue
-payloads under an exact host:port grant. Grants match the authority string by
-exact equality, including a named port, with no wildcard or case folding.
+The proof runs a real source stall with a fixture source. CI never touches
+live GitHub: a local HTTP fixture serves issue payloads under an exact
+host:port grant. Grants match the authority string by exact equality,
+including a named port, with no wildcard or case folding.
 
 sourcefed sends a due poll and the reply carries the exact event and state to
 sourcefed core. Core sends each event through `eventBefore` before
@@ -280,20 +279,29 @@ Only its blocker paragraph needs updating when this plan is approved; that
 update is outside this PR.
 
 CI runs formatting, clippy, workspace tests, dependency checks, mutation
-shards, end-to-end and packaged smoke checks. tack CI proves the SDK fixture;
-sourcefed CI proves the P4 table through the pinned daemon.
+shards, end-to-end and packaged smoke checks.
 
 ## Decided
 
-| Choice        | Decision                                    | By         | When       |
-| ------------- | ------------------------------------------- | ---------- | ---------- |
-| Drive path    | PollEngine calls tack's framed poll hook.   | supervisor | 2026-11-28 |
-| Grants        | Need and exact host grant required.         | supervisor | 2026-11-28 |
-| State         | Store commits cursor and state with events. | supervisor | 2026-11-28 |
-| VM ownership  | barn: engine; tack: declaration and wire.   | owner      | 2026-11-28 |
-| Proof runner  | tack CI uses its pinned barn revision.      | supervisor | 2026-11-28 |
-| Cap behaviour | Refuse with a named reason.                 | supervisor | 2026-11-28 |
-| P4 proof      | tack: SDK; sourcefed: P4, pinned daemon.    | supervisor | 2026-11-28 |
+The plugin runs in a barn stall through tack's SDK.
+
+| Choice       | Decision                                  | By    | When       |
+| ------------ | ----------------------------------------- | ----- | ---------- |
+| VM ownership | barn stall via tack's SDK (chauffeur#92). | owner | 2026-11-27 |
+
+## Proposed (awaits owner approval)
+
+These are owner-facing proposals, not prior decisions.
+
+| Choice        | Proposal                                          | Basis                          |
+| ------------- | ------------------------------------------------- | ------------------------------ |
+| Drive path    | PollEngine calls tack's poll hook.                | sourcefed never launches barn. |
+| Grants        | Declared need and exact host grant required.      | tack#125 applied to http.      |
+| State         | Store owns cursor and state; commits with events. | Crash replay.                  |
+| Cap behaviour | Refuse with a named reason.                       | No silent truncation.          |
+
+For proof, tack CI runs the SDK fixture and sourcefed CI runs P4 through a
+pinned tack daemon; questions 5 and 6 record the alternatives.
 
 ## Open questions
 
@@ -314,3 +322,11 @@ sourcefed CI proves the P4 table through the pinned daemon.
    - **(Recommended)** Use one revision for tack CI proof and the sourcefed P4
      runner, bumped in its own PR, so both prove the same engine.
    - Use independent pins to let each project advance separately.
+5. Where does the SDK proof run?
+   - **(Recommended)** tack CI builds barn at the pinned rev and runs the
+     fixture source.
+   - sourcefed CI runs the SDK proof.
+6. Where is P4 proven?
+   - **(Recommended)** sourcefed CI runs tack's daemon at a pinned commit;
+     tack launches barn, so sourcefed never launches barn.
+   - A joint proof runs in chauffeur CI.
