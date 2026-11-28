@@ -90,6 +90,11 @@ impl<C: Clock, T: Transport> StallClient<C, T> {
         }
     }
 
+    /// Borrow the transport so the caller can prepare it before calls begin.
+    pub const fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
     /// Call the stall once and return its reply when it fits the budget.
     ///
     /// Control frames come from the stall over host.sock; only hook and tool

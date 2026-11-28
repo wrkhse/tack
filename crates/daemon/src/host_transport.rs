@@ -109,6 +109,29 @@ impl HostTransport {
         }
     }
 
+    /// Authenticate the stall before any call is dispatched.
+    ///
+    /// A timeout becomes the named `stall_startup_timeout` refusal; any
+    /// failure latches the transport so no later call reconnects.
+    ///
+    /// # Errors
+    ///
+    /// Returns the handshake failure when barn cannot authenticate.
+    pub fn connect(&mut self, deadline: Instant) -> Result<(), StallError> {
+        match self.handshake(deadline) {
+            Ok(()) => Ok(()),
+            Err(StallError::Timeout) => {
+                self.failed = true;
+                Err(StallError::Io(STALL_STARTUP_TIMEOUT.to_owned()))
+            }
+            Err(error) => {
+                self.failed = true;
+                drop(self.stream.take());
+                Err(error)
+            }
+        }
+    }
+
     /// Run one validated call on the connection, opening it on first use.
     fn call_once(&mut self, request: &str, mut deadline: Instant) -> Result<String, StallError> {
         let id = request_id(request)?;
