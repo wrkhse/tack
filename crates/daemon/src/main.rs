@@ -94,7 +94,15 @@ fn kill_and_wait(child: &mut Child) {
         let _ = kill_process_group(group, Signal::KILL);
     }
     let _ = child.kill();
-    let _ = child.wait();
+
+    // An uninterruptible child can ignore both signals, so never wait on it
+    // without a budget: startup and shutdown must stay bounded.
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(500))
+        .expect("the reap budget is representable");
+    if wait_bounded(child, deadline).is_err() {
+        eprintln!("tack-daemon: child reap timed out");
+    }
 }
 
 /// Wait for an exit inside the budget; an absent exit is not a success.
@@ -726,6 +734,18 @@ mod tests {
     }
 
     fn assert_reaped(child: &mut Child) {
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn kill_and_wait_reaps_a_short_lived_child_within_its_budget() {
+        let script = Script::new("exit 0");
+        let mut child = script.child();
+        let start = Instant::now();
+
+        kill_and_wait(&mut child);
+
+        assert!(start.elapsed() < Duration::from_secs(2));
         assert!(child.try_wait().unwrap().is_some());
     }
 
