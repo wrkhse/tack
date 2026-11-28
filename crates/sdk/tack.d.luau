@@ -1,5 +1,9 @@
 --!strict
 
+-- The SDK contract major is 1. The pure major check is used by build-time
+-- tests; the running daemon's named contract_major_mismatch refusal comes
+-- later with the barn engine.
+
 -- The scoped module loader bound into each module chunk's environment, with
 -- Luau's stock require absent. A specifier resolves relative to the requiring
 -- file, only inside the canonical plugin folder: absolute paths, parent
@@ -17,8 +21,25 @@ export type HookResult = DenyResult | RewriteResult | AnnotateResult | DropResul
 export type ToolBeforeResult = HookResult
 export type OnError = "deliver" | "deny"
 
+-- Capabilities are injected into hooks by the barn stall. A plugin declares
+-- the capabilities it calls in its `needs` list, such as
+-- `control.call.navigate`.
+--
+-- The build audit finds literal `ctx.control.call("<ident>", ...)` forms and
+-- reports missing declarations as early, developer-facing feedback. It is not
+-- fail-closed and cannot be complete in Lua, so it is not a security boundary:
+-- aliases, computed keys, string concatenation, `pairs(ctx)` and dynamic
+-- `require` are known bypasses.
+--
+-- The security boundary is the daemon's run-time refusal of undeclared or
+-- ungranted calls, delivered by the host-grants PR (barn#71, tack#23). Until
+-- that PR, `ctx.control` is not injected and a call fails as a script error
+-- mapped to `daemon_error`.
+export type Control = { call: (name: string, input: any) -> any }
+
 -- Rust-backed helpers passed as the second hook and tool argument.
 export type HookCtx = {
+    control: Control,
     deny: (reason: string) -> DenyResult,
     rewrite: (payload: any) -> RewriteResult,
     allow: () -> nil,

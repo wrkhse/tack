@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::ErrorKind;
+use std::io::Read as _;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -31,6 +32,28 @@ pub const DAEMON_BIN: &str = "tack-daemon";
 pub const HOOK_BIN: &str = "tack-hook";
 
 const SUPPORTED: [&str; 4] = ["sandbox", "daemon", "opencode", tack_sdk::SDK_NEED];
+/// The largest number of Luau sources the capability audit reads.
+const MAX_AUDIT_FILES: usize = 64;
+/// The largest portion of one Luau source the capability audit reads.
+const MAX_AUDIT_BYTES: u64 = 1024 * 1024;
+/// The largest number of capability calls one source may contain.
+const MAX_AUDIT_CALLS: usize = 128;
+/// The deepest folder the capability audit walks below the plugin root.
+const MAX_AUDIT_DEPTH: usize = 8;
+/// The largest number of entries the capability audit visits in one walk.
+const MAX_AUDIT_ENTRIES: usize = 256;
+/// The largest number of needs entries a plugin may declare.
+const MAX_CAPABILITY_ENTRIES: usize = 128;
+/// The largest identifier a capability need may name.
+const MAX_IDENT_BYTES: usize = 128;
+/// The member whose calls the audit reports.
+const CONTROL: &str = "control";
+/// The qualifier a capability call must use.
+const CONTROL_QUALIFIER: &str = "ctx.";
+/// The member access that follows `control` in a capability call.
+const CALL_PREFIX: &str = ".call(\"";
+/// The prefix of a capability need entry.
+const CONTROL_CALL_PREFIX: &str = "control.call.";
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -42,6 +65,13 @@ pub enum BuildError {
     RenderExtension(ExtensionError),
     Codex(CodexError),
     Io(std::io::Error),
+    UngrantedCapability(String),
+    DynamicCapability,
+    ControlCallForm,
+    AuditLimit,
+    AuditSymlink,
+    InvalidCapabilityEntry(String),
+    CapabilityCount,
 }
 
 impl fmt::Display for BuildError {
@@ -55,6 +85,18 @@ impl fmt::Display for BuildError {
             Self::RenderExtension(error) => write!(f, "render:{error}"),
             Self::Codex(error) => write!(f, "codex:{error}"),
             Self::Io(error) => write!(f, "io:{error}"),
+            Self::UngrantedCapability(name) => write!(f, "ungranted_capability:{name}"),
+            Self::DynamicCapability => write!(f, "dynamic_capability"),
+            Self::ControlCallForm => write!(
+                f,
+                "control_call_form: expected ctx.control.call(\"<ident>\", ...)"
+            ),
+            Self::AuditLimit => write!(f, "audit_limit"),
+            Self::AuditSymlink => write!(f, "audit_symlink"),
+            Self::InvalidCapabilityEntry(entry) => {
+                write!(f, "invalid_capability_entry:{entry}")
+            }
+            Self::CapabilityCount => write!(f, "capability_count"),
         }
     }
 }
@@ -62,7 +104,14 @@ impl fmt::Display for BuildError {
 impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::NeedMissing(_) => None,
+            Self::NeedMissing(_)
+            | Self::UngrantedCapability(_)
+            | Self::DynamicCapability
+            | Self::ControlCallForm
+            | Self::AuditLimit
+            | Self::AuditSymlink
+            | Self::InvalidCapabilityEntry(_)
+            | Self::CapabilityCount => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -91,9 +140,271 @@ impl Default for BuildOptions {
     }
 }
 
-/// Canonicalize a plugin folder, read its manifest in the sandbox, and check
-/// its needs. `sdk` is an opt-in need that emits typed Luau declarations.
-fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
+/// A capability need names one capability. Declared capabilities start with
+/// `control.call.` and carry a short identifier; every other entry is refused
+/// so a typo cannot widen a plugin's privileges.
+fn validate_entry(entry: &str) -> Result<(), BuildError> {
+    let Some(ident) = entry.strip_prefix(CONTROL_CALL_PREFIX) else {
+        return Err(BuildError::InvalidCapabilityEntry(entry.to_owned()));
+    };
+
+    if ident.is_empty()
+        || ident.len() > MAX_IDENT_BYTES
+        || !ident
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(BuildError::InvalidCapabilityEntry(entry.to_owned()));
+    }
+
+    Ok(())
+}
+
+/// A capability call name is nonempty and made only of ASCII letters,
+/// digits and underscores, so a call cannot smuggle syntax through its name.
+fn is_call_name(name: &str, rest: &str) -> bool {
+    // The name is one quoted literal; a remainder that is not a comma or
+    // a closing parenthesis is a concatenated or otherwise dynamic name.
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && (rest.starts_with(',') || rest.starts_with(')'))
+}
+
+/// Skip the ASCII whitespace at the start of `text`.
+fn skip_ascii_ws(text: &str) -> &str {
+    text.trim_start_matches(|byte: char| byte.is_ascii_whitespace())
+}
+
+/// Whether the text right after `control` uses it as a quoted index key, as
+/// in `ctx["control"] .call(...)` or `ctx["control"]["call"](...)`. ASCII
+/// whitespace may sit around the brackets, quote and member access tokens, so
+/// spacing the call out is refused rather than skipped.
+fn bracket_indexed_call(after: &str) -> bool {
+    let after = skip_ascii_ws(after);
+    let after = if let Some(rest) = after.strip_prefix(']') {
+        // A long-bracket key closes with `]]`, `]=]`, `]==]`, and so on.
+        let rest = rest.trim_start_matches('=');
+        let Some(rest) = rest.strip_prefix(']') else {
+            return false;
+        };
+        skip_ascii_ws(rest)
+    } else {
+        let Some(after) = after.strip_prefix('"').or_else(|| after.strip_prefix('\'')) else {
+            return false;
+        };
+
+        let Some(after) = skip_ascii_ws(after).strip_prefix(']') else {
+            return false;
+        };
+
+        skip_ascii_ws(after)
+    };
+
+    after.starts_with('.') || after.starts_with('[')
+}
+
+/// Check that the `control` at `at` is preceded by the exact `ctx.` qualifier
+/// and not glued to a preceding identifier. An out-of-range qualifier reads as
+/// dynamic; a wrong or glued qualifier is a `ControlCallForm` error.
+fn check_qualifier(source: &str, at: usize) -> Result<(), BuildError> {
+    let qualifier_start = at
+        .checked_sub(CONTROL_QUALIFIER.len())
+        .ok_or(BuildError::DynamicCapability)?;
+    let qualifier = source
+        .get(qualifier_start..at)
+        .ok_or(BuildError::DynamicCapability)?;
+    if qualifier != CONTROL_QUALIFIER {
+        return Err(BuildError::ControlCallForm);
+    }
+    let glued = source
+        .get(..qualifier_start)
+        .and_then(|head| head.bytes().next_back())
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if glued {
+        return Err(BuildError::ControlCallForm);
+    }
+
+    Ok(())
+}
+
+/// Audit one source by scanning every `control` occurrence. A call-shaped
+/// occurrence must be the literal `ctx.control.call("<ident>")` form, so a call
+/// hidden in a comment or string is still checked. Whitespace-separated member
+/// access such as `ctx . control . call("name")` is refused rather than
+/// skipped, so spacing out the dots cannot hide a call. A `control` substring
+/// in a plugin name or need string carries no call and is left alone.
+fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
+    let mut cursor = 0usize;
+    let mut calls = 0usize;
+
+    loop {
+        let rest = source.get(cursor..).ok_or(BuildError::AuditLimit)?;
+        let Some(offset) = rest.find(CONTROL) else {
+            break;
+        };
+        let at = cursor.checked_add(offset).ok_or(BuildError::AuditLimit)?;
+        let after_start = at
+            .checked_add(CONTROL.len())
+            .ok_or(BuildError::AuditLimit)?;
+        let after = source
+            .get(after_start..)
+            .ok_or(BuildError::DynamicCapability)?;
+        let literal = after.strip_prefix(CALL_PREFIX);
+
+        let trimmed = skip_ascii_ws(after);
+        let dot = trimmed.strip_prefix('.').map(skip_ascii_ws);
+        let call_shaped = after.starts_with(".call(")
+            || after.starts_with(":call(")
+            || after.starts_with("\"].call(")
+            || bracket_indexed_call(after)
+            || trimmed.starts_with('[')
+            || dot.is_some_and(|rest| rest.starts_with("call("));
+        let has_ctx_qualifier = source
+            .get(..at)
+            .and_then(|head| head.strip_suffix(CONTROL_QUALIFIER))
+            .is_some();
+
+        if literal.is_none() && !call_shaped && !has_ctx_qualifier {
+            cursor = after_start;
+            continue;
+        }
+
+        let literal = literal.ok_or(BuildError::DynamicCapability)?;
+        let (name, rest) = literal
+            .split_once('"')
+            .ok_or(BuildError::DynamicCapability)?;
+
+        if !is_call_name(name, rest) {
+            return Err(BuildError::DynamicCapability);
+        }
+
+        check_qualifier(source, at)?;
+
+        calls = calls.checked_add(1).ok_or(BuildError::AuditLimit)?;
+        if calls > MAX_AUDIT_CALLS {
+            return Err(BuildError::AuditLimit);
+        }
+
+        let grant = format!("{CONTROL_CALL_PREFIX}{name}");
+        if !declared.contains(&grant) {
+            return Err(BuildError::UngrantedCapability(name.to_owned()));
+        }
+
+        // Land just after the closing quote so a `control` in the name is not
+        // scanned again. Step one byte, not two: a multibyte character after
+        // a call must not be skipped and cut off the rest of the file.
+        cursor = after_start
+            .checked_add(CALL_PREFIX.len())
+            .and_then(|end| end.checked_add(name.len()))
+            .and_then(|end| end.checked_add(1))
+            .ok_or(BuildError::AuditLimit)?;
+    }
+
+    Ok(())
+}
+
+/// Audit the plugin's Luau sources for capability calls, refusing any call
+/// whose name the manifest does not declare in `needs`. The walk visits sorted
+/// entries to a depth of eight and at most 256 entries, skips the build output
+/// folder, skips files that are not `.luau`, refuses symlinks and files whose
+/// canonical path leaves the plugin folder, and bounds reads to 64 files of at
+/// most 1 MiB each.
+fn audit_capabilities(
+    plugin_dir: &Path,
+    out: &Path,
+    manifest: &PluginManifest,
+) -> Result<(), BuildError> {
+    let root = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
+    let output = match std::fs::canonicalize(out) {
+        Ok(path) => Some(path),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(BuildError::Io(error)),
+    };
+    let mut stack = vec![(root.clone(), 0usize)];
+    let mut read = 0usize;
+    let mut visited = 0usize;
+
+    while let Some((path, depth)) = stack.pop() {
+        if depth > MAX_AUDIT_DEPTH {
+            return Err(BuildError::AuditLimit);
+        }
+
+        let meta = std::fs::symlink_metadata(&path).map_err(BuildError::Io)?;
+        if meta.file_type().is_symlink() {
+            return Err(BuildError::AuditSymlink);
+        }
+
+        if meta.is_dir() {
+            let mut entries = Vec::new();
+
+            for entry in std::fs::read_dir(&path).map_err(BuildError::Io)? {
+                visited = visited.checked_add(1).ok_or(BuildError::AuditLimit)?;
+                if visited > MAX_AUDIT_ENTRIES {
+                    return Err(BuildError::AuditLimit);
+                }
+
+                let entry = entry.map_err(BuildError::Io)?;
+                if output.as_deref() == Some(entry.path().as_path()) {
+                    continue;
+                }
+                entries.push(entry);
+            }
+
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+
+            for entry in entries.into_iter().rev() {
+                let is_dir = entry.file_type().map_err(BuildError::Io)?.is_dir();
+                let entry_depth = if is_dir {
+                    depth.checked_add(1).ok_or(BuildError::AuditLimit)?
+                } else {
+                    depth
+                };
+                stack.push((entry.path(), entry_depth));
+            }
+
+            continue;
+        }
+
+        if !meta.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("luau") {
+            continue;
+        }
+
+        let canonical = std::fs::canonicalize(&path).map_err(BuildError::Io)?;
+        if !canonical.starts_with(&root) {
+            return Err(BuildError::AuditLimit);
+        }
+        if read == MAX_AUDIT_FILES {
+            return Err(BuildError::AuditLimit);
+        }
+
+        let mut bytes = Vec::new();
+        let count = std::fs::File::open(&canonical)
+            .map_err(BuildError::Io)?
+            .take(MAX_AUDIT_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(BuildError::Io)?;
+        if u64::try_from(count).map_err(|_| BuildError::AuditLimit)? > MAX_AUDIT_BYTES {
+            return Err(BuildError::AuditLimit);
+        }
+        read = read.checked_add(1).ok_or(BuildError::AuditLimit)?;
+
+        let source = String::from_utf8_lossy(&bytes);
+        audit_source(&source, &manifest.needs)?;
+    }
+
+    Ok(())
+}
+
+/// Canonicalize a plugin folder, read its manifest in the sandbox, check its
+/// needs, and audit capability calls against the capabilities declared in
+/// `needs`. A plugin declares the capabilities it uses in `needs`; the host
+/// config grants them per plugin in a later PR, and the daemon refuses
+/// ungranted calls at run time as the security boundary. The build audit is an
+/// early, developer-facing error, not that boundary. `sdk` is an opt-in need
+/// that emits typed Luau declarations.
+fn load(plugin_dir: &Path, out: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
     let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
         .and_then(|limits| Sandbox::new(&plugin_dir, limits, Capabilities::default()))
@@ -102,11 +413,21 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     let manifest: PluginManifest =
         serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
 
+    if manifest.needs.len() > MAX_CAPABILITY_ENTRIES {
+        return Err(BuildError::CapabilityCount);
+    }
+
     for need in &manifest.needs {
+        if need.starts_with(CONTROL_CALL_PREFIX) {
+            validate_entry(need)?;
+            continue;
+        }
         if !SUPPORTED.contains(&need.as_str()) {
             return Err(BuildError::NeedMissing(need.clone()));
         }
     }
+
+    audit_capabilities(&plugin_dir, out, &manifest)?;
 
     Ok((plugin_dir, manifest))
 }
@@ -196,7 +517,7 @@ pub fn build(
     out: &Path,
     options: BuildOptions,
 ) -> Result<(PathBuf, PathBuf), BuildError> {
-    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir, out)?;
     let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = WrapperConfig {
@@ -240,7 +561,7 @@ pub fn build(
 /// wire contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderMod`] when the mod cannot be rendered.
 pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir, out)?;
     let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = ModConfig {
@@ -283,7 +604,7 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
 /// contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderExtension`] when the extension cannot be rendered.
 pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
-    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir, out)?;
     let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
 
     let dest = out.join("pi");
@@ -385,7 +706,7 @@ pub fn build_codex(
     out: &Path,
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir, out)?;
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
@@ -577,6 +898,29 @@ mod tests {
         match error {
             BuildError::Io(io) => {
                 assert!(io.to_string().contains("cannot inspect SDK output folder"));
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audit_capabilities_reports_a_file_in_the_output_path() {
+        let scratch = Scratch::new();
+        let file = scratch.root.join("not-a-dir");
+        std::fs::write(&file, "x").expect("file");
+        let out = file.join("child");
+
+        let manifest = PluginManifest {
+            name: "x".into(),
+            needs: Vec::new(),
+            tools: Vec::new(),
+        };
+
+        let error = audit_capabilities(&scratch.root, &out, &manifest).expect_err("refused");
+
+        match error {
+            BuildError::Io(io) => {
+                assert!(io.to_string().contains("Not a directory"));
             }
             other => panic!("expected Io, got {other:?}"),
         }
