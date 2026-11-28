@@ -1,6 +1,8 @@
 //! Wire contracts, serialization and protocol invariants shared by the tack
 //! CLI, daemon and generated wrappers.
 
+// Review-gate proof: a small non-docs change.
+
 /// Memory ceiling for one plugin VM.
 pub const DEFAULT_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 
