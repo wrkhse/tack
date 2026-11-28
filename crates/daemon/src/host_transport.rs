@@ -1412,7 +1412,7 @@ mod tests {
         let listener = UnixListener::bind(socket).unwrap();
 
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
