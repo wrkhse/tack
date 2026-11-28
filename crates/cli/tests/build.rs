@@ -75,6 +75,7 @@ fn manifest() -> PluginManifest {
     PluginManifest {
         name: "safe-push".into(),
         needs: vec![],
+        grants: Vec::new(),
         tools: vec![ToolDef {
             name: "guard_status".into(),
             description: "Reports whether the tack daemon is running".into(),
@@ -506,6 +507,8 @@ fn sdk_declarations_pin_hook_table_types() {
         "eventBefore:",
         "annotate: (fields:",
         "drop: () ->",
+        "export type Control",
+        "control: Control?",
     ] {
         assert!(declarations.contains(name), "missing declaration: {name}");
     }
@@ -575,4 +578,66 @@ fn a_table_valued_hook_fixture_still_builds() {
             "HookHandler missing: {field}"
         );
     }
+}
+
+#[test]
+fn an_out_of_grant_control_call_fails_the_build() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"return {
+    name = "control-plugin",
+    needs = { "sdk" },
+    eventBefore = function(payload, ctx)
+        ctx.control.call("navigate", payload)
+        return ctx.allow()
+    end,
+}"#,
+    );
+    let out = scratch.path().join("dist");
+
+    let error = build(scratch.path(), &out, BuildOptions::default())
+        .expect_err("an ungranted control call is refused");
+
+    assert!(matches!(
+        &error,
+        tack_cli::BuildError::UngrantedCapability(name) if name.as_str() == "navigate"
+    ));
+    assert_eq!(error.to_string(), "ungranted_capability:navigate");
+}
+
+#[test]
+fn a_granted_control_call_builds() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"return {
+    name = "control-plugin",
+    needs = { "sdk" },
+    grants = { "control.call.navigate" },
+    eventBefore = function(payload, ctx)
+        ctx.control.call("navigate", payload)
+        return ctx.allow()
+    end,
+}"#,
+    );
+    let out = scratch.path().join("dist");
+
+    build(scratch.path(), &out, BuildOptions::default()).expect("a granted control call builds");
+}
+
+#[test]
+fn a_plugin_cannot_import_a_client() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"local client = require("./control-client")
+
+return { name = "client-plugin", needs = { "sdk" }, tools = { client = client } }"#,
+    );
+    let out = scratch.path().join("dist");
+
+    let result = build(scratch.path(), &out, BuildOptions::default());
+
+    assert!(matches!(result, Err(tack_cli::BuildError::Sandbox(_))));
 }

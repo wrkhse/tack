@@ -1,5 +1,8 @@
 --!strict
 
+-- The SDK contract major is 1. A plugin built against another major is refused
+-- with a named contract_major_mismatch error.
+
 -- The scoped module loader bound into each module chunk's environment, with
 -- Luau's stock require absent. A specifier resolves relative to the requiring
 -- file, only inside the canonical plugin folder: absolute paths, parent
@@ -17,8 +20,14 @@ export type HookResult = DenyResult | RewriteResult | AnnotateResult | DropResul
 export type ToolBeforeResult = HookResult
 export type OnError = "deliver" | "deny"
 
+-- Capabilities are injected into hooks by the barn stall. No runtime client
+-- module is importable, and the default grant is none: a plugin must be
+-- granted `control.call.<name>` at build time to call that control.
+export type Control = { call: (name: string, input: any) -> any }
+
 -- Rust-backed helpers passed as the second hook and tool argument.
 export type HookCtx = {
+    control: Control?,
     deny: (reason: string) -> DenyResult,
     rewrite: (payload: any) -> RewriteResult,
     allow: () -> nil,

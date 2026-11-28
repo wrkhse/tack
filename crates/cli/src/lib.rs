@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::ErrorKind;
+use std::io::Read as _;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -31,6 +32,11 @@ pub const DAEMON_BIN: &str = "tack-daemon";
 pub const HOOK_BIN: &str = "tack-hook";
 
 const SUPPORTED: [&str; 4] = ["sandbox", "daemon", "opencode", tack_sdk::SDK_NEED];
+/// The largest number of Luau sources the capability audit reads.
+const MAX_AUDIT_FILES: usize = 64;
+/// The largest portion of one Luau source the capability audit reads.
+const MAX_AUDIT_BYTES: u64 = 1024 * 1024;
+const CONTROL_CALL_PREFIX: &str = "control.call(\"";
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -42,6 +48,7 @@ pub enum BuildError {
     RenderExtension(ExtensionError),
     Codex(CodexError),
     Io(std::io::Error),
+    UngrantedCapability(String),
 }
 
 impl fmt::Display for BuildError {
@@ -55,6 +62,7 @@ impl fmt::Display for BuildError {
             Self::RenderExtension(error) => write!(f, "render:{error}"),
             Self::Codex(error) => write!(f, "codex:{error}"),
             Self::Io(error) => write!(f, "io:{error}"),
+            Self::UngrantedCapability(name) => write!(f, "ungranted_capability:{name}"),
         }
     }
 }
@@ -70,6 +78,7 @@ impl Error for BuildError {
             Self::RenderExtension(error) => Some(error),
             Self::Codex(error) => Some(error),
             Self::Io(error) => Some(error),
+            Self::UngrantedCapability(_) => None,
         }
     }
 }
@@ -91,8 +100,55 @@ impl Default for BuildOptions {
     }
 }
 
-/// Canonicalize a plugin folder, read its manifest in the sandbox, and check
-/// its needs. `sdk` is an opt-in need that emits typed Luau declarations.
+/// Audit the plugin's Luau sources for capability calls, refusing any call
+/// whose name the manifest does not grant. Reads are bounded to 64 files of
+/// at most 1 MiB each, and a plugin with no capability call is unaffected.
+fn audit_capabilities(plugin_dir: &Path, manifest: &PluginManifest) -> Result<(), BuildError> {
+    let mut read = 0;
+
+    for entry in std::fs::read_dir(plugin_dir).map_err(BuildError::Io)? {
+        let path = entry.map_err(BuildError::Io)?.path();
+        let is_luau = path.extension().and_then(|ext| ext.to_str()) == Some("luau");
+
+        if !is_luau || !path.is_file() {
+            continue;
+        }
+        if read == MAX_AUDIT_FILES {
+            break;
+        }
+
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .map_err(BuildError::Io)?
+            .take(MAX_AUDIT_BYTES)
+            .read_to_end(&mut bytes)
+            .map_err(BuildError::Io)?;
+        read += 1;
+
+        let source = String::from_utf8_lossy(&bytes);
+        let mut rest: &str = &source;
+
+        while let Some(start) = rest.find(CONTROL_CALL_PREFIX) {
+            let after = &rest[start + CONTROL_CALL_PREFIX.len()..];
+            let Some(end) = after.find('"') else {
+                break;
+            };
+            let name = &after[..end];
+
+            if !manifest.grants.contains(&format!("control.call.{name}")) {
+                return Err(BuildError::UngrantedCapability(name.to_owned()));
+            }
+
+            rest = &after[end + 1..];
+        }
+    }
+
+    Ok(())
+}
+
+/// Canonicalize a plugin folder, read its manifest in the sandbox, check its
+/// needs, and audit capability calls against the manifest's grants. `sdk` is
+/// an opt-in need that emits typed Luau declarations.
 fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
     let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
@@ -107,6 +163,8 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
             return Err(BuildError::NeedMissing(need.clone()));
         }
     }
+
+    audit_capabilities(&plugin_dir, &manifest)?;
 
     Ok((plugin_dir, manifest))
 }
@@ -569,6 +627,7 @@ mod tests {
         let manifest = PluginManifest {
             name: "x".into(),
             needs: Vec::new(),
+            grants: Vec::new(),
             tools: Vec::new(),
         };
 

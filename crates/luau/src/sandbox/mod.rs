@@ -220,37 +220,40 @@ impl Sandbox {
 
         Ok(json!({
             "name": name,
-            "needs": self.read_needs()?,
+            "needs": self.read_string_array("needs", "needs")?,
+            "grants": self.read_string_array("grants", "grants")?,
             "tools": self.read_tools()?,
         }))
     }
 
-    fn read_needs(&self) -> Result<Vec<String>, EngineError> {
-        let Some(value) = self.plugin.get::<Option<LuaValue>>("needs")? else {
+    fn read_string_array(&self, key: &str, label: &str) -> Result<Vec<String>, EngineError> {
+        let Some(value) = self.plugin.get::<Option<LuaValue>>(key)? else {
             return Ok(Vec::new());
         };
         let LuaValue::Table(table) = value else {
-            return Err(EngineError::InvalidResult("needs must be an array".into()));
+            return Err(EngineError::InvalidResult(format!(
+                "{label} must be an array"
+            )));
         };
-        let mut needs = Vec::new();
+        let mut items = Vec::new();
         for pair in table.pairs::<LuaValue, LuaValue>() {
-            if needs.len() >= MAX_ENTRIES {
+            if items.len() >= MAX_ENTRIES {
                 return Err(EngineError::Limit(LimitCause::TooManyEntries {
                     limit: MAX_ENTRIES,
                 }));
             }
             let (_, item) = pair?;
-            let need = match item {
+            let value = match item {
                 LuaValue::String(value) => value.to_str()?.to_string(),
                 _ => {
-                    return Err(EngineError::InvalidResult(
-                        "needs must contain strings".into(),
-                    ));
+                    return Err(EngineError::InvalidResult(format!(
+                        "{label} must contain strings"
+                    )));
                 }
             };
-            needs.push(need);
+            items.push(value);
         }
-        Ok(needs)
+        Ok(items)
     }
 
     fn read_tools(&self) -> Result<Vec<Value>, EngineError> {
