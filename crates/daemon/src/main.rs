@@ -363,28 +363,32 @@ fn launch_from_child(child: &mut Child, deadline: Instant) -> Result<HostClient,
                 .ok()
                 .and_then(Pid::from_raw);
 
-            // Barn is reaped by `wait_bounded`; sweep any helpers left
-            // in its group. The PGID stays reserved while any group
-            // member is alive, so the only residual exposure is a new
-            // process taking that PID and making itself a group leader
-            // in the window after the last member exits; the supervisor
-            // accepted that residual window on 2026-11-27. ESRCH means
-            // the group already exited and counts as success, so the
-            // result is ignored.
+            let status = match wait_bounded(|| reaper.child.try_wait(), deadline) {
+                Reaped::Exited(status) => Some(status),
+                Reaped::Timeout => None,
+            };
+
+            // Only leftover helpers remain: barn itself was already reaped.
+            // The PGID stays reserved while any group member is alive, so
+            // the only residual exposure is a new process taking that PID
+            // and making itself a group leader in the window after the last
+            // member exits; the supervisor accepted that window on
+            // 2026-11-27. ESRCH means the group already exited and counts
+            // as success, so the result is ignored.
             if let Some(group) = group {
                 let _ = kill_process_group(group, Signal::KILL);
             }
 
-            if let Reaped::Exited(status) = wait_bounded(|| reaper.child.try_wait(), deadline) {
-                if matches!(status.code(), Some(code) if code != 0) {
-                    reaper.disarm();
-                    return Err(PipeError::Error(reason));
-                }
-            } else {
+            if status.is_none() {
                 kill_and_wait(reaper.child);
             }
-
             reaper.disarm();
+
+            if let Some(status) = status {
+                if matches!(status.code(), Some(code) if code != 0) {
+                    return Err(PipeError::Error(reason));
+                }
+            }
 
             return Err(PipeError::Malformed);
         }
