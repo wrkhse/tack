@@ -18,6 +18,7 @@ tack-adapter-opencode = { path = "../../adapters/opencode" }
 tack-adapter-claude = { path = "../../adapters/claude" }
 tack-adapter-pi = { path = "../../adapters/pi" }
 tack-adapter-codex = { path = "../../adapters/codex" }
+tack_sdk = { path = "../sdk" }
 
 [lints]
 workspace = true

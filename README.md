@@ -94,6 +94,18 @@ tack build fixtures/safe-push --out dist --target codex
 
 This is a pre-release for trying the current slice, not a stable release.
 
+### SDK declarations (opt-in)
+
+A plugin listing the `sdk` module in its `needs` gets strict Luau declarations
+at `dist/sdk/tack.d.luau`:
+
+```lua
+return { name = "guard", needs = { "sdk" }, tools = {} }
+```
+
+A plugin that omits it emits no SDK files. The declarations name the contract
+major a host must check.
+
 Plugin stalls are supervised by barn, a separate program installed beside
 tack's binaries as three binaries: `barn`, `barn-exec` and
 `barn-luau-stall`. tack finds `barn` beside its own executable, and

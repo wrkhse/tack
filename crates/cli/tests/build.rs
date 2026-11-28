@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tack_adapter_opencode::{WrapperConfig, WrapperError};
-use tack_cli::{BuildOptions, DAEMON_BIN, build};
+use tack_cli::{BuildOptions, DAEMON_BIN, build, build_claude, build_codex, build_pi};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest, ToolDef};
+use tack_sdk::TACK_D_LUAU;
 
 const TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -67,6 +68,14 @@ fn manifest() -> PluginManifest {
             input: serde_json::json!({}),
         }],
     }
+}
+
+fn sdk_plugin(scratch: &Scratch, listed: bool) {
+    let needs = if listed { "\"sdk\"" } else { "" };
+    scratch.write(
+        "plugin.luau",
+        &format!("return {{ name = \"sdk-tool\", needs = {{ {needs} }}, tools = {{}} }}"),
+    );
 }
 
 fn reasons() -> Vec<&'static str> {
@@ -231,4 +240,122 @@ fn the_manifest_json_has_the_plugin_contract() {
     let emitted: PluginManifest = serde_json::from_slice(&bytes).expect("manifest parses");
 
     assert_eq!(emitted, manifest());
+}
+
+#[test]
+fn a_listing_plugin_emits_the_strict_sdk_declarations() {
+    let scratch = Scratch::new();
+    sdk_plugin(&scratch, true);
+    let out = scratch.path().join("dist");
+
+    build(scratch.path(), &out, BuildOptions::default()).expect("listed plugin builds");
+
+    let declaration = out.join("sdk/tack.d.luau");
+    let emitted = std::fs::read_to_string(&declaration).expect("SDK declaration is readable");
+
+    assert_eq!(emitted, TACK_D_LUAU);
+    assert!(emitted.starts_with("--!strict\n"));
+    assert_eq!(std::fs::read_dir(out.join("sdk")).unwrap().count(), 1);
+}
+
+#[test]
+fn an_unlisted_plugin_emits_no_sdk_declarations() {
+    let scratch = Scratch::new();
+    sdk_plugin(&scratch, false);
+    let out = scratch.path().join("dist");
+
+    build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
+
+    assert!(!out.join("sdk").exists());
+    assert!(out.join("opencode/index.js").exists());
+}
+
+#[test]
+fn a_later_unlisted_build_removes_stale_sdk_declarations() {
+    let scratch = Scratch::new();
+    sdk_plugin(&scratch, true);
+    let out = scratch.path().join("dist");
+    let declaration = out.join("sdk/tack.d.luau");
+
+    build(scratch.path(), &out, BuildOptions::default()).expect("listed plugin builds");
+    assert!(declaration.exists());
+
+    sdk_plugin(&scratch, false);
+    build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
+
+    assert!(!declaration.exists());
+    assert!(out.join("opencode/index.js").exists());
+}
+
+#[test]
+fn an_sdk_output_path_that_is_a_file_fails() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+    std::fs::create_dir_all(&out).expect("output folder");
+    std::fs::write(out.join("sdk"), "not a folder").expect("file at the SDK path");
+    sdk_plugin(&scratch, true);
+
+    let result = build(scratch.path(), &out, BuildOptions::default());
+
+    let Err(tack_cli::BuildError::Io(_)) = result else {
+        panic!("an I/O error is reported");
+    };
+    assert!(!out.join("opencode").exists());
+}
+
+#[test]
+fn a_directory_at_the_declaration_path_fails_the_listed_build() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+    std::fs::create_dir_all(out.join("sdk/tack.d.luau"))
+        .expect("directory at the declaration path");
+    sdk_plugin(&scratch, true);
+
+    let result = build(scratch.path(), &out, BuildOptions::default());
+
+    let Err(tack_cli::BuildError::Io(_)) = result else {
+        panic!("an I/O error is reported");
+    };
+    assert!(!out.join("opencode").exists());
+}
+
+#[test]
+fn a_directory_at_the_declaration_path_fails_the_unlisted_build() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+    std::fs::create_dir_all(out.join("sdk/tack.d.luau"))
+        .expect("directory at the declaration path");
+    sdk_plugin(&scratch, false);
+
+    let result = build(scratch.path(), &out, BuildOptions::default());
+
+    let Err(tack_cli::BuildError::Io(_)) = result else {
+        panic!("an I/O error is reported");
+    };
+    assert!(!out.join("opencode").exists());
+}
+
+#[test]
+fn every_build_target_emits_the_sdk_declarations() {
+    let scratch = Scratch::new();
+    sdk_plugin(&scratch, true);
+
+    let opencode = scratch.path().join("out-opencode");
+    build(scratch.path(), &opencode, BuildOptions::default()).expect("OpenCode build");
+
+    let claude = scratch.path().join("out-claude");
+    build_claude(scratch.path(), &claude).expect("Claude build");
+
+    let pi = scratch.path().join("out-pi");
+    build_pi(scratch.path(), &pi).expect("Pi build");
+
+    let codex = scratch.path().join("out-codex");
+    build_codex(scratch.path(), &codex, scratch.path()).expect("Codex build");
+
+    for out in [&opencode, &claude, &pi, &codex] {
+        assert_eq!(
+            std::fs::read_to_string(out.join("sdk/tack.d.luau")).unwrap(),
+            TACK_D_LUAU
+        );
+    }
 }

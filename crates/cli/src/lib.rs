@@ -16,6 +16,7 @@ use tack_adapter_pi::{EXTENSION_JS, ExtensionError};
 use tack_luau::{Capabilities, EngineError, Limits, Sandbox};
 use tack_protocol::wire::{DenyReason, PROTOCOL_VERSION, PluginManifest};
 use tack_protocol::{DEFAULT_DEADLINE_MS, DEFAULT_MEMORY_BYTES};
+use tack_sdk::{SDK_MODULE, TACK_D_LUAU};
 
 /// Wall-clock budget for one wrapper call in the default build.
 pub const CALL_TIMEOUT_MS: u64 = 2000;
@@ -29,7 +30,7 @@ pub const DAEMON_BIN: &str = "tack-daemon";
 /// resolves it.
 pub const HOOK_BIN: &str = "tack-hook";
 
-const SUPPORTED: [&str; 3] = ["sandbox", "daemon", "opencode"];
+const SUPPORTED: [&str; 4] = ["sandbox", "daemon", "opencode", SDK_MODULE];
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -110,6 +111,28 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     Ok((plugin_dir, manifest))
 }
 
+/// Emit the SDK's strict Luau declarations for a plugin that lists the `sdk`
+/// module, and remove a stale copy for one that does not.
+///
+/// The build output folder belongs to the build user; a conflicting file or
+/// directory at the declaration path is reported as a build I/O error.
+fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
+    let dest = out.join("sdk");
+    let declaration = dest.join("tack.d.luau");
+
+    if !needs.iter().any(|need| need == SDK_MODULE) {
+        match std::fs::remove_file(&declaration) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(BuildError::Io(error)),
+        }
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    std::fs::write(&declaration, TACK_D_LUAU).map_err(BuildError::Io)
+}
+
 fn deny_reasons() -> Vec<&'static str> {
     DenyReason::ALL
         .iter()
@@ -137,6 +160,7 @@ pub fn build(
     options: BuildOptions,
 ) -> Result<(PathBuf, PathBuf), BuildError> {
     let (plugin_dir, manifest) = load(plugin_dir)?;
+    emit_sdk(out, &manifest.needs)?;
     let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = WrapperConfig {
@@ -180,6 +204,7 @@ pub fn build(
 /// [`BuildError::RenderMod`] when the mod cannot be rendered.
 pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
     let (plugin_dir, manifest) = load(plugin_dir)?;
+    emit_sdk(out, &manifest.needs)?;
     let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = ModConfig {
@@ -218,7 +243,8 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
 /// contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderExtension`] when the extension cannot be rendered.
 pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir)?;
+    emit_sdk(out, &manifest.needs)?;
     let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
 
     let dest = out.join("pi");
@@ -319,7 +345,8 @@ pub fn build_codex(
     out: &Path,
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir)?;
+    emit_sdk(out, &manifest.needs)?;
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
