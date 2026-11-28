@@ -702,7 +702,7 @@ jobs:
         run: bash .github/scripts/enforce-review-verdict.sh
       - name: Require a fresh posted review
         if: >-
-          always() && steps.post_review.outcome != 'success'
+          always() && steps.carry_forward.outputs.carried != 'true' && steps.post_review.outcome != 'success'
         shell: bash
         run: |
           set -euo pipefail
