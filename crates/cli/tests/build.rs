@@ -659,6 +659,8 @@ return {{ name = "client-plugin", needs = {{ "sdk" }}, tools = {{ client = clien
 mod audit_tests {
     use super::*;
 
+    // No --!strict analysis test: this build path has no Luau analyzer.
+
     /// A plugin whose only hook holds the call under test.
     fn source(needs: &str, body: &str) -> String {
         format!(
@@ -866,5 +868,241 @@ mod audit_tests {
             matches!(&error, tack_cli::BuildError::AuditLimit),
             "expected AuditLimit, got {error:?}"
         );
+    }
+
+    #[test]
+    fn a_multibyte_character_after_a_granted_call_does_not_hide_a_later_call() {
+        let scratch = Scratch::new();
+        // The audit is a text scan: this comment holds a granted call whose
+        // closing quote is immediately followed by a multibyte character.
+        let error = refused(
+            &scratch,
+            &source(
+                "\"control.call.first\"",
+                "-- ctx.control.call(\"first\"é ctx.control.call(\"navigate\", payload)",
+            ),
+        );
+
+        assert!(
+            matches!(
+                &error,
+                tack_cli::BuildError::UngrantedCapability(name) if name == "navigate"
+            ),
+            "expected the call after the multibyte character, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn the_129th_capability_call_is_an_audit_limit() {
+        for (count, ok) in [(128usize, true), (129usize, false)] {
+            let body = vec![r#"ctx.control.call("cap", payload)"#; count].join("\n");
+            let text = source("\"control.call.cap\"", &body);
+            let scratch = Scratch::new();
+            scratch.write("plugin.luau", &text);
+            let out = scratch.path().join("dist");
+
+            if ok {
+                build(scratch.path(), &out, BuildOptions::default())
+                    .expect("128 declared calls build");
+                continue;
+            }
+
+            let error = build(scratch.path(), &out, BuildOptions::default())
+                .expect_err("the 129th call exceeds the audit limit");
+            assert!(
+                matches!(&error, tack_cli::BuildError::AuditLimit),
+                "expected AuditLimit, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_luau_source_is_an_audit_limit() {
+        let exact = "x".repeat(1024 * 1024);
+        let oversized = "x".repeat(1024 * 1024 + 1);
+
+        for (bytes, ok) in [(exact.as_str(), true), (oversized.as_str(), false)] {
+            let scratch = Scratch::new();
+            scratch.write("plugin.luau", &source("", ""));
+            scratch.write("large.luau", bytes);
+            let out = scratch.path().join("dist");
+
+            if ok {
+                build(scratch.path(), &out, BuildOptions::default())
+                    .expect("a 1 MiB source builds");
+                continue;
+            }
+
+            let error = build(scratch.path(), &out, BuildOptions::default())
+                .expect_err("an oversized source is refused");
+            assert!(
+                matches!(&error, tack_cli::BuildError::AuditLimit),
+                "expected AuditLimit, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_128_needs_build() {
+        let modules = ["sandbox", "daemon", "opencode", "sdk"];
+
+        for (count, ok) in [(128usize, true), (129usize, false)] {
+            let needs = (0..count)
+                .map(|i| format!("\"{}\"", modules[i % modules.len()]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let scratch = Scratch::new();
+            scratch.write("plugin.luau", &source(&needs, ""));
+            let out = scratch.path().join("dist");
+
+            if ok {
+                build(scratch.path(), &out, BuildOptions::default())
+                    .expect("128 valid needs build");
+                continue;
+            }
+
+            let error = build(scratch.path(), &out, BuildOptions::default())
+                .expect_err("the 129th need is refused");
+            assert!(
+                matches!(&error, tack_cli::BuildError::CapabilityCount),
+                "expected CapabilityCount, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_128_byte_capability_ident_builds() {
+        for (length, ok) in [(128usize, true), (129usize, false)] {
+            let ident = "a".repeat(length);
+            let entry = format!("control.call.{ident}");
+            let needs = format!("\"{entry}\"");
+            let body = format!("ctx.control.call(\"{ident}\", payload)");
+            let scratch = Scratch::new();
+            scratch.write("plugin.luau", &source(&needs, &body));
+            let out = scratch.path().join("dist");
+
+            if ok {
+                build(scratch.path(), &out, BuildOptions::default())
+                    .expect("a 128 byte identifier builds");
+                continue;
+            }
+
+            let error = build(scratch.path(), &out, BuildOptions::default())
+                .expect_err("a 129 byte identifier is refused");
+            assert!(
+                matches!(
+                    &error,
+                    tack_cli::BuildError::InvalidCapabilityEntry(value) if value == &entry
+                ),
+                "expected InvalidCapabilityEntry for {entry}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_64_luau_files_build() {
+        for (extra, ok) in [(63usize, true), (64usize, false)] {
+            let scratch = Scratch::new();
+            scratch.write("plugin.luau", &source("", ""));
+
+            for i in 0..extra {
+                scratch.write(&format!("extra{i}.luau"), "return true");
+            }
+
+            let out = scratch.path().join("dist");
+
+            if ok {
+                build(scratch.path(), &out, BuildOptions::default())
+                    .expect("64 Luau sources build");
+                continue;
+            }
+
+            let error = build(scratch.path(), &out, BuildOptions::default())
+                .expect_err("the 65th Luau source is refused");
+            assert!(
+                matches!(&error, tack_cli::BuildError::AuditLimit),
+                "expected AuditLimit, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_ctx_qualifier_is_refused_by_name() {
+        let scratch = Scratch::new();
+        let error = refused(
+            &scratch,
+            &source(
+                "\"control.call.navigate\"",
+                "myctx.control.call(\"navigate\", payload)",
+            ),
+        );
+
+        assert!(
+            matches!(&error, tack_cli::BuildError::ControlCallForm),
+            "expected ControlCallForm, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("control_call_form"), "{message}");
+        assert!(message.contains("ctx.control.call"), "{message}");
+    }
+
+    #[test]
+    fn a_bracket_indexed_control_call_is_refused() {
+        let scratch = Scratch::new();
+        let error = refused(
+            &scratch,
+            &source(
+                "\"control.call.navigate\"",
+                "ctx['control'].call(\"navigate\", payload)",
+            ),
+        );
+
+        assert!(
+            matches!(&error, tack_cli::BuildError::DynamicCapability),
+            "expected DynamicCapability, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_deep_plugin_tree_is_an_audit_limit() {
+        let scratch = Scratch::new();
+        scratch.write("plugin.luau", &source("", ""));
+        let mut nested = scratch.path().to_path_buf();
+
+        for i in 0..9 {
+            nested.push(format!("d{i}"));
+        }
+
+        std::fs::create_dir_all(&nested).expect("deep folder");
+        std::fs::write(nested.join("deep.luau"), "return true").expect("deep source");
+        let out = scratch.path().join("dist");
+
+        let error = build(scratch.path(), &out, BuildOptions::default())
+            .expect_err("a source deeper than eight folders is refused");
+
+        assert!(
+            matches!(&error, tack_cli::BuildError::AuditLimit),
+            "expected AuditLimit, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn build_output_and_vendor_folders_are_skipped() {
+        let scratch = Scratch::new();
+        scratch.write("plugin.luau", &source("", ""));
+
+        for folder in ["dist", "node_modules"] {
+            let dir = scratch.path().join(folder);
+            std::fs::create_dir_all(&dir).expect("vendor folder");
+            std::fs::write(
+                dir.join("evil.luau"),
+                "-- ctx.control.call(\"navigate\", payload)",
+            )
+            .expect("vendor source");
+        }
+
+        let out = scratch.path().join("dist");
+
+        build(scratch.path(), &out, BuildOptions::default()).expect("vendor folders are ignored");
     }
 }

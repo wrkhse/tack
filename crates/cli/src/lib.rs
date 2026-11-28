@@ -38,6 +38,10 @@ const MAX_AUDIT_FILES: usize = 64;
 const MAX_AUDIT_BYTES: u64 = 1024 * 1024;
 /// The largest number of capability calls one source may contain.
 const MAX_AUDIT_CALLS: usize = 128;
+/// The deepest folder the capability audit walks below the plugin root.
+const MAX_AUDIT_DEPTH: usize = 8;
+/// The largest number of entries the capability audit visits in one walk.
+const MAX_AUDIT_ENTRIES: usize = 256;
 /// The largest number of needs entries a plugin may declare.
 const MAX_CAPABILITY_ENTRIES: usize = 128;
 /// The largest identifier a capability need may name.
@@ -63,6 +67,7 @@ pub enum BuildError {
     Io(std::io::Error),
     UngrantedCapability(String),
     DynamicCapability,
+    ControlCallForm,
     AuditLimit,
     InvalidCapabilityEntry(String),
     CapabilityCount,
@@ -81,6 +86,10 @@ impl fmt::Display for BuildError {
             Self::Io(error) => write!(f, "io:{error}"),
             Self::UngrantedCapability(name) => write!(f, "ungranted_capability:{name}"),
             Self::DynamicCapability => write!(f, "dynamic_capability"),
+            Self::ControlCallForm => write!(
+                f,
+                "control_call_form: expected ctx.control.call(\"<ident>\", ...)"
+            ),
             Self::AuditLimit => write!(f, "audit_limit"),
             Self::InvalidCapabilityEntry(entry) => {
                 write!(f, "invalid_capability_entry:{entry}")
@@ -93,7 +102,13 @@ impl fmt::Display for BuildError {
 impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::NeedMissing(_) => None,
+            Self::NeedMissing(_)
+            | Self::UngrantedCapability(_)
+            | Self::DynamicCapability
+            | Self::ControlCallForm
+            | Self::AuditLimit
+            | Self::InvalidCapabilityEntry(_)
+            | Self::CapabilityCount => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -101,11 +116,6 @@ impl Error for BuildError {
             Self::RenderExtension(error) => Some(error),
             Self::Codex(error) => Some(error),
             Self::Io(error) => Some(error),
-            Self::UngrantedCapability(_) => None,
-            Self::DynamicCapability => None,
-            Self::AuditLimit => None,
-            Self::InvalidCapabilityEntry(_) => None,
-            Self::CapabilityCount => None,
         }
     }
 }
@@ -155,7 +165,11 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
     let mut cursor = 0usize;
     let mut calls = 0usize;
 
-    while let Some(offset) = source.get(cursor..).and_then(|rest| rest.find(CONTROL)) {
+    loop {
+        let rest = source.get(cursor..).ok_or(BuildError::AuditLimit)?;
+        let Some(offset) = rest.find(CONTROL) else {
+            break;
+        };
         let at = cursor.checked_add(offset).ok_or(BuildError::AuditLimit)?;
         let after_start = at
             .checked_add(CONTROL.len())
@@ -199,14 +213,14 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             .get(qualifier_start..at)
             .ok_or(BuildError::DynamicCapability)?;
         if qualifier != CONTROL_QUALIFIER {
-            return Err(BuildError::DynamicCapability);
+            return Err(BuildError::ControlCallForm);
         }
         let glued = source
             .get(..qualifier_start)
             .and_then(|head| head.bytes().next_back())
             .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
         if glued {
-            return Err(BuildError::DynamicCapability);
+            return Err(BuildError::ControlCallForm);
         }
 
         calls = calls.checked_add(1).ok_or(BuildError::AuditLimit)?;
@@ -219,12 +233,13 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             return Err(BuildError::UngrantedCapability(name.to_owned()));
         }
 
-        // Step past the closing quote so a `control` in the name is not
-        // scanned as another occurrence.
+        // Land just after the closing quote so a `control` in the name is not
+        // scanned again. Step one byte, not two: a multibyte character after
+        // a call must not be skipped and cut off the rest of the file.
         cursor = after_start
             .checked_add(CALL_PREFIX.len())
             .and_then(|end| end.checked_add(name.len()))
-            .and_then(|end| end.checked_add(2))
+            .and_then(|end| end.checked_add(1))
             .ok_or(BuildError::AuditLimit)?;
     }
 
@@ -233,16 +248,22 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
 
 /// Audit the plugin's Luau sources for capability calls, refusing any call
 /// whose name the manifest does not declare in `needs`. The walk visits sorted
-/// entries,
-/// skips files that are not `.luau`, refuses symlinks and files whose
-/// canonical path leaves the plugin folder, and bounds reads to 64 files of
-/// at most 1 MiB each.
+/// entries to a depth of eight and at most 256 entries, skips `.git`,
+/// `node_modules` and `dist`, skips files that are not `.luau`, refuses
+/// symlinks and files whose canonical path leaves the plugin folder, and
+/// bounds reads to 64 files of at most 1 MiB each.
 fn audit_capabilities(plugin_dir: &Path, manifest: &PluginManifest) -> Result<(), BuildError> {
     let root = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
-    let mut stack = vec![root.clone()];
+    let mut stack = vec![(root.clone(), 0usize)];
     let mut read = 0usize;
+    let mut visited = 0usize;
 
-    while let Some(path) = stack.pop() {
+    while let Some((path, depth)) = stack.pop() {
+        visited = visited.checked_add(1).ok_or(BuildError::AuditLimit)?;
+        if visited > MAX_AUDIT_ENTRIES || depth > MAX_AUDIT_DEPTH {
+            return Err(BuildError::AuditLimit);
+        }
+
         let meta = std::fs::symlink_metadata(&path).map_err(BuildError::Io)?;
         if meta.file_type().is_symlink() {
             return Err(BuildError::AuditLimit);
@@ -252,13 +273,19 @@ fn audit_capabilities(plugin_dir: &Path, manifest: &PluginManifest) -> Result<()
             let mut entries = Vec::new();
 
             for entry in std::fs::read_dir(&path).map_err(BuildError::Io)? {
-                entries.push(entry.map_err(BuildError::Io)?);
+                let entry = entry.map_err(BuildError::Io)?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if matches!(name.as_ref(), ".git" | "node_modules" | "dist") {
+                    continue;
+                }
+                entries.push(entry);
             }
 
             entries.sort_by_key(|entry| entry.file_name());
 
             for entry in entries.into_iter().rev() {
-                stack.push(entry.path());
+                stack.push((entry.path(), depth + 1));
             }
 
             continue;

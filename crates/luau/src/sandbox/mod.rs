@@ -220,39 +220,37 @@ impl Sandbox {
 
         Ok(json!({
             "name": name,
-            "needs": self.read_string_array("needs", "needs")?,
+            "needs": self.read_needs()?,
             "tools": self.read_tools()?,
         }))
     }
 
-    fn read_string_array(&self, key: &str, label: &str) -> Result<Vec<String>, EngineError> {
-        let Some(value) = self.plugin.get::<Option<LuaValue>>(key)? else {
+    fn read_needs(&self) -> Result<Vec<String>, EngineError> {
+        let Some(value) = self.plugin.get::<Option<LuaValue>>("needs")? else {
             return Ok(Vec::new());
         };
         let LuaValue::Table(table) = value else {
-            return Err(EngineError::InvalidResult(format!(
-                "{label} must be an array"
-            )));
+            return Err(EngineError::InvalidResult("needs must be an array".into()));
         };
-        let mut items = Vec::new();
+        let mut needs = Vec::new();
         for pair in table.pairs::<LuaValue, LuaValue>() {
-            if items.len() >= MAX_ENTRIES {
+            if needs.len() >= MAX_ENTRIES {
                 return Err(EngineError::Limit(LimitCause::TooManyEntries {
                     limit: MAX_ENTRIES,
                 }));
             }
             let (_, item) = pair?;
-            let value = match item {
+            let need = match item {
                 LuaValue::String(value) => value.to_str()?.to_string(),
                 _ => {
-                    return Err(EngineError::InvalidResult(format!(
-                        "{label} must contain strings"
-                    )));
+                    return Err(EngineError::InvalidResult(
+                        "needs must contain strings".into(),
+                    ));
                 }
             };
-            items.push(value);
+            needs.push(need);
         }
-        Ok(items)
+        Ok(needs)
     }
 
     fn read_tools(&self) -> Result<Vec<Value>, EngineError> {

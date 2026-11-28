@@ -30,11 +30,21 @@ export type OnError = "deliver" | "deny"
 -- run time is the later security boundary. No runtime client module is
 -- importable. The audit scans comments and string literals too, so mentioning
 -- a capability counts as a call (conservative fail-closed).
+--
+-- There is one accepted spelling of a capability call: the hook parameter is
+-- named `ctx`, and the call is `ctx.control.call("<ident>", ...)`. tack build
+-- refuses any other spelling with the named `control_call_form` error.
+--
+-- ## Known bypasses
+-- The build audit cannot prove these at runtime:
+--   - a plugin that is not built by tack;
+--   - a call injected after build by another loader;
+--   - a runtime capability obtained outside the stall grant.
 export type Control = { call: (name: string, input: any) -> any }
 
 -- Rust-backed helpers passed as the second hook and tool argument.
 export type HookCtx = {
-    control: Control?,
+    control: Control,
     deny: (reason: string) -> DenyResult,
     rewrite: (payload: any) -> RewriteResult,
     allow: () -> nil,

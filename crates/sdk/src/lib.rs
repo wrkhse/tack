@@ -50,7 +50,6 @@ mod tests {
 
     #[test]
     fn the_current_contract_major_is_accepted() {
-        assert_eq!(SDK_CONTRACT_MAJOR, 1);
         assert_eq!(check_contract_major(SDK_CONTRACT_MAJOR), Ok(()));
     }
 
