@@ -528,6 +528,8 @@ mod tests {
 
         let values = [
             ("PLUGIN_DIR", plugin_dir_literal),
+            ("PLUGIN_NAME", "\"safe-push\""),
+            ("NEEDS", "[]"),
             ("PROTOCOL_VERSION", "1"),
             ("BUDGET_MS", "8500"),
             ("MAX_FRAME_BYTES", "1048576"),
