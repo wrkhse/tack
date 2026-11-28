@@ -499,26 +499,25 @@ fn an_untouched_empty_sdk_folder_is_preserved_by_an_unlisted_build() {
 
 #[cfg(unix)]
 #[test]
-fn an_unlisted_build_reports_an_unexpected_sdk_folder_error() {
+fn an_unlisted_build_refuses_a_symlinked_sdk_folder_without_deleting_the_target() {
     use std::os::unix::fs::symlink;
 
     let scratch = Scratch::new();
     let out = scratch.path().join("dist");
     let target = scratch.path().join("target");
     std::fs::create_dir_all(&target).expect("target folder");
-    std::fs::write(target.join("tack.d.luau"), "stale").expect("stale declaration");
+    let external = target.join("tack.d.luau");
+    std::fs::write(&external, "do not delete").expect("external declaration");
     std::fs::create_dir_all(&out).expect("output folder");
     symlink(&target, out.join("sdk")).expect("sdk symlink");
     sdk_plugin(&scratch, false);
 
     let result = build(scratch.path(), &out, BuildOptions::default());
 
-    let Err(tack_cli::BuildError::Io(error)) = result else {
-        panic!("an unexpected cleanup I/O error is reported");
+    let Err(tack_cli::BuildError::Sdk(message)) = result else {
+        panic!("a symlinked SDK folder is refused by name");
     };
-    assert!(matches!(
-        error.kind(),
-        ErrorKind::NotADirectory | ErrorKind::InvalidInput
-    ));
+    assert_eq!(message, "the SDK output path is a symlink");
+    assert_eq!(std::fs::read_to_string(&external).unwrap(), "do not delete");
     assert!(!out.join("opencode").exists());
 }

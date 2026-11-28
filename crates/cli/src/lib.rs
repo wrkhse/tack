@@ -120,22 +120,28 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
 /// The build output folder belongs to the build user. A symlink at the output
 /// path or declaration, a non-directory output path, or a non-regular
 /// declaration entry is refused with [`BuildError::Sdk`] rather than followed;
-/// other I/O failures are reported as build I/O errors.
+/// other I/O failures are reported as build I/O errors. The opt-out path also
+/// refuses a symlinked SDK folder before removing anything.
 fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
     let dest = out.join("sdk");
     let declaration = dest.join("tack.d.luau");
 
     if !needs.iter().any(|need| need == SDK_MODULE) {
+        if let Ok(metadata) = std::fs::symlink_metadata(&dest) {
+            if metadata.file_type().is_symlink() {
+                return Err(BuildError::Sdk("the SDK output path is a symlink".into()));
+            }
+        }
         match std::fs::remove_file(&declaration) {
-            Ok(()) => match std::fs::remove_dir(&dest) {
-                Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
-                    ) => {}
-                Err(error) => return Err(BuildError::Io(error)),
-            },
+            Ok(()) => {
+                if std::fs::read_dir(&dest)
+                    .map_err(BuildError::Io)?
+                    .next()
+                    .is_none()
+                {
+                    std::fs::remove_dir(&dest).map_err(BuildError::Io)?;
+                }
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(BuildError::Io(error)),
         }
@@ -147,32 +153,28 @@ fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
     let dest = root.join("sdk");
     let declaration = dest.join("tack.d.luau");
 
-    match std::fs::symlink_metadata(&dest) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+    if std::fs::symlink_metadata(&dest).is_ok() {
+        let metadata = std::fs::symlink_metadata(&dest).map_err(BuildError::Io)?;
+        if metadata.file_type().is_symlink() {
             return Err(BuildError::Sdk("the SDK output path is a symlink".into()));
         }
-        Ok(metadata) if !metadata.is_dir() => {
+        if !metadata.is_dir() {
             return Err(BuildError::Sdk(
                 "the SDK output path is not a directory".into(),
             ));
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(BuildError::Io(error)),
     }
 
-    match std::fs::symlink_metadata(&declaration) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+    if std::fs::symlink_metadata(&declaration).is_ok() {
+        let metadata = std::fs::symlink_metadata(&declaration).map_err(BuildError::Io)?;
+        if metadata.file_type().is_symlink() {
             return Err(BuildError::Sdk("the SDK declaration is a symlink".into()));
         }
-        Ok(metadata) if !metadata.is_file() => {
+        if !metadata.is_file() {
             return Err(BuildError::Sdk(
                 "the SDK declaration is not a regular file".into(),
             ));
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(BuildError::Io(error)),
     }
 
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
