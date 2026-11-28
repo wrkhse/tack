@@ -173,7 +173,7 @@ impl ControlBroker {
             timeout(budget, join).await
         });
 
-        joined.map_err(|_| ERR_TIMEOUT)??
+        joined.map_err(|_| ERR_TIMEOUT)?.map_err(|_| ERR_IO)?
     }
 }
 
