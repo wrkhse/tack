@@ -326,9 +326,32 @@ pub fn read_line<R: BufRead>(reader: &mut R) -> Result<Option<Vec<u8>>, WireErro
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io::BufReader;
     use std::io::Cursor;
 
     use super::*;
+
+    /// A reader that yields one queued chunk per `read` call.
+    ///
+    /// An empty chunk is one transient EOF: `read` returns `Ok(0)` for it,
+    /// but later calls can still produce bytes, as a TTY can after Ctrl-D.
+    struct Chunks(VecDeque<Vec<u8>>);
+
+    impl std::io::Read for Chunks {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some(mut chunk) = self.0.pop_front() else {
+                return Ok(0);
+            };
+            if chunk.len() > buf.len() {
+                let tail = chunk.split_off(buf.len());
+                self.0.push_front(tail);
+            }
+            let len = chunk.len();
+            buf[..len].copy_from_slice(chunk.as_slice());
+            Ok(len)
+        }
+    }
 
     fn hook_request() -> Request {
         Request::Hook {
@@ -524,6 +547,29 @@ mod tests {
             read_line(&mut Cursor::new(oversize)),
             Err(WireError::TooLarge)
         );
+    }
+
+    #[test]
+    fn encode_accepts_a_frame_exactly_at_the_cap() {
+        let at_cap = encode_line(&"x".repeat(MAX_FRAME_BYTES - 3)).unwrap();
+        assert_eq!(at_cap.len(), MAX_FRAME_BYTES);
+        assert_eq!(
+            encode_line(&"x".repeat(MAX_FRAME_BYTES - 2)),
+            Err(WireError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn eof_exactly_at_the_cap_is_a_closed_frame() {
+        let mut reader = Cursor::new(vec![b'x'; MAX_FRAME_BYTES + 1]);
+        assert_eq!(read_line(&mut reader), Err(WireError::Closed));
+    }
+
+    #[test]
+    fn a_truncated_frame_ends_at_eof_without_probing_for_more() {
+        let chunks = VecDeque::from([vec![b'x'; MAX_FRAME_BYTES], Vec::new(), b"y".to_vec()]);
+        let mut reader = BufReader::new(Chunks(chunks));
+        assert_eq!(read_line(&mut reader), Err(WireError::Closed));
     }
 
     #[test]

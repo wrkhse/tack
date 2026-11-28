@@ -828,3 +828,42 @@ fn a_rebuild_after_a_user_group_is_inserted_removes_the_stale_tack_state() {
     assert!(!config.contains(&stale), "{config}");
     assert!(config.contains(&current), "{config}");
 }
+
+#[test]
+fn tack_hashes_are_only_the_hashes_of_tack_groups() {
+    let [pre, start] = handlers("/out/codex");
+    let hooks = json!({ "hooks": {
+        "PreToolUse": [other_group(), pre.group()],
+        "SessionStart": [start.group()],
+        "Stop": [other_group()]
+    } });
+
+    assert_eq!(
+        tack_hashes(&hooks),
+        std::collections::HashSet::from([pre.trusted_hash(), start.trusted_hash()])
+    );
+}
+
+#[test]
+fn a_rebuild_without_a_hash_record_drops_the_stale_tack_table() {
+    let scratch = Scratch::new();
+    install(&scratch.root, &handlers("/old/codex")).expect("first install");
+    fs::remove_file(scratch.root.join(HASHES_FILE)).expect("forget the record");
+
+    // With the hash record gone, only tack_hashes can identify the old tack
+    // group as stale: the hook is still present, so the orphan rule does not apply.
+    let hooks_path = scratch.root.join(HOOKS_FILE);
+    let mut hooks: Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).expect("hooks")).expect("JSON");
+    hooks["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .expect("list")
+        .insert(0, other_group());
+    fs::write(&hooks_path, hooks.to_string()).expect("edited hooks");
+
+    install(&scratch.root, &handlers("/out/codex")).expect("rebuild");
+    let config = fs::read_to_string(scratch.root.join(CONFIG_FILE)).expect("config");
+    let source = hooks_path.display().to_string();
+
+    assert_eq!(config, tack_tables(&source, 1));
+}

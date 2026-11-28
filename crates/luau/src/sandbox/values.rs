@@ -197,6 +197,81 @@ mod tests {
         EngineError::InvalidResult("unsupported table key".into())
     }
 
+    fn too_deep() -> EngineError {
+        EngineError::Limit(LimitCause::TooDeep { limit: MAX_DEPTH })
+    }
+
+    fn too_many() -> EngineError {
+        EngineError::Limit(LimitCause::TooManyEntries { limit: MAX_ENTRIES })
+    }
+
+    #[test]
+    fn lua_key_renders_numeric_keys() {
+        assert_eq!(lua_key(LuaValue::Integer(7)), Ok("7".to_string()));
+        assert_eq!(lua_key(LuaValue::Number(1.5)), Ok("1.5".to_string()));
+        assert_eq!(
+            lua_key(LuaValue::Boolean(true)),
+            Err(EngineError::InvalidResult("tool key must be a string".into()))
+        );
+    }
+
+    #[test]
+    fn json_to_lua_accepts_exactly_the_depth_limit() {
+        let lua = Lua::new();
+        assert!(matches!(
+            json_to_lua(&lua, &Value::Null, MAX_DEPTH),
+            Ok(LuaValue::Nil)
+        ));
+        assert!(matches!(
+            json_to_lua(&lua, &Value::Null, MAX_DEPTH + 1),
+            Err(error) if error == too_deep()
+        ));
+    }
+
+    #[test]
+    fn json_to_lua_accepts_exactly_the_array_entry_limit() {
+        let lua = Lua::new();
+        let at = Value::Array(vec![Value::Null; MAX_ENTRIES]);
+        assert!(matches!(json_to_lua(&lua, &at, 0), Ok(LuaValue::Table(_))));
+
+        let over = Value::Array(vec![Value::Null; MAX_ENTRIES + 1]);
+        assert!(matches!(
+            json_to_lua(&lua, &over, 0),
+            Err(error) if error == too_many()
+        ));
+    }
+
+    #[test]
+    fn json_to_lua_accepts_exactly_the_object_entry_limit() {
+        let lua = Lua::new();
+        let at: Map<String, Value> = (0..MAX_ENTRIES)
+            .map(|i| (format!("k{i}"), Value::Null))
+            .collect();
+        assert!(matches!(
+            json_to_lua(&lua, &Value::Object(at.clone()), 0),
+            Ok(LuaValue::Table(_))
+        ));
+
+        let mut over = at;
+        over.insert("extra".into(), Value::Null);
+        assert!(matches!(
+            json_to_lua(&lua, &Value::Object(over), 0),
+            Err(error) if error == too_many()
+        ));
+    }
+
+    #[test]
+    fn lua_to_json_accepts_exactly_the_depth_limit() {
+        assert!(matches!(
+            lua_to_json(LuaValue::Nil, MAX_DEPTH),
+            Ok(Value::Null)
+        ));
+        assert!(matches!(
+            lua_to_json(LuaValue::Nil, MAX_DEPTH + 1),
+            Err(error) if error == too_deep()
+        ));
+    }
+
     #[test]
     fn lua_index_converts_the_position_exactly() {
         assert_eq!(lua_index(0), Ok(0));

@@ -2012,4 +2012,79 @@ mod tests {
         trickle.abort();
         task.abort();
     }
+
+    #[test]
+    fn transport_errors_display_their_names() {
+        let cases = [
+            (TransportError::LockBusy, "lock_busy"),
+            (TransportError::LockIo, "lock_io"),
+            (TransportError::StateNotOwned, "state_not_owned"),
+            (TransportError::Bind("ctx".into()), "bind(ctx)"),
+            (TransportError::Io, "io"),
+            (TransportError::Malformed, "malformed"),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn a_state_path_that_is_a_file_is_refused() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        fs::write(&state, b"").unwrap();
+        fs::set_permissions(&state, Permissions::from_mode(0o600)).unwrap();
+
+        assert_eq!(
+            ensure_state_dir(&state),
+            Err(TransportError::Bind(format!(
+                "{} is not a directory",
+                state.display()
+            )))
+        );
+    }
+
+    #[test]
+    fn a_state_path_that_cannot_be_statted_is_named() {
+        let dir = TempDir::new();
+        let file = dir.path().join("file");
+        fs::write(&file, b"").unwrap();
+        let state = file.join("state");
+        let cause = fs::metadata(&state).unwrap_err();
+
+        assert_eq!(
+            ensure_state_dir(&state),
+            Err(TransportError::Bind(format!(
+                "stat {}: {cause}",
+                state.display()
+            )))
+        );
+    }
+
+    #[test]
+    fn prepare_socket_removes_a_stale_socket_file() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("tack.sock");
+        fs::write(&socket, b"stale").unwrap();
+
+        assert_eq!(prepare_socket(&socket), Ok(()));
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn an_unremovable_socket_path_is_named() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("tack.sock");
+        fs::create_dir(&socket).unwrap();
+        let cause = fs::remove_file(&socket).unwrap_err();
+
+        assert_eq!(
+            prepare_socket(&socket),
+            Err(TransportError::Bind(format!(
+                "unlink {}: {cause}",
+                socket.display()
+            )))
+        );
+    }
 }
