@@ -56,6 +56,12 @@ if ((${#staged[@]} > 0)); then
     if [[ "$staged_mode" == "120000" ]]; then
       fail 'staged path'
     fi
+    parent="$(dirname "./$file")"
+    resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)" || fail 'staged path'
+    case "$resolved_parent/" in
+      "$repo_root"/*) ;;
+      *) fail 'staged path' ;;
+    esac
     if ! git diff --quiet -- "$file"; then
       printf 'pre-commit: partially staged: %s; stage it fully or stash\n' "$file" >&2
       exit 1
@@ -83,7 +89,7 @@ if ((${#rust_files[@]} > 0)); then
       fail 'staged path'
     fi
     parent="$(dirname "./$file")"
-    resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)"
+    resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)" || fail 'staged path'
     case "$resolved_parent/" in
       "$repo_root"/*) ;;
       *) fail 'staged path' ;;
@@ -176,7 +182,7 @@ if ((${#other_files[@]} > 0)); then
       fail 'staged path'
     fi
     parent="$(dirname "./$file")"
-    resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)"
+    resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)" || fail 'staged path'
     case "$resolved_parent/" in
       "$repo_root"/*) ;;
       *) fail 'staged path' ;;
