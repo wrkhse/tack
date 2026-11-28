@@ -95,31 +95,112 @@ fn frame_cap() -> u64 {
         .saturating_add(1)
 }
 
-/// The plugin folder from `--plugin <dir>`, the only argument. Without it
-/// the hook never starts a daemon.
+/// The largest number of needs the hook will carry to a daemon.
+const MAX_NEEDS: usize = 64;
+
+/// The largest plugin name or need, in bytes.
+const MAX_IDENTITY_BYTES: usize = 128;
+
+/// The launch arguments an adapter passes to the hook. The plugin folder
+/// decides whether a daemon is cold-started; the name and needs are the
+/// plugin's identity, forwarded unchanged on that start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookArgs {
+    pub plugin: Option<PathBuf>,
+    pub name: Option<String>,
+    pub needs: Vec<String>,
+}
+
+/// Parse the hook's arguments in any order.
+///
+/// Names and needs are non-empty ASCII `[a-z0-9_.-]` strings of at most
+/// `MAX_IDENTITY_BYTES` bytes, so the daemon can adopt them without escaping;
+/// at most `MAX_NEEDS` needs are kept.
 ///
 /// # Errors
 ///
-/// Returns a `malformed` failure for any other argument or a missing dir.
-pub fn plugin_dir(args: impl IntoIterator<Item = OsString>) -> Result<Option<PathBuf>, Failure> {
+/// Returns a `malformed` failure for an unknown argument, a missing value,
+/// a second `--plugin-name`, or an invalid name or need.
+pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HookArgs, Failure> {
     let mut args = args.into_iter();
     let mut plugin = None;
+    let mut name = None;
+    let mut needs = Vec::new();
+
+    let malformed = |message: &'static str| Failure::new(ReplyError::Malformed, message);
 
     while let Some(arg) = args.next() {
-        if arg != "--plugin" {
+        if arg == "--plugin" {
+            let dir = args
+                .next()
+                .ok_or_else(|| malformed("--plugin needs a dir"))?;
+            plugin = Some(PathBuf::from(dir));
+        } else if arg == "--plugin-name" {
+            if name.is_some() {
+                return Err(malformed("duplicate --plugin-name"));
+            }
+
+            let value = args
+                .next()
+                .ok_or_else(|| malformed("--plugin-name needs a name"))?;
+            let value = value
+                .to_str()
+                .ok_or_else(|| malformed("malformed --plugin-name"))?;
+
+            if !valid_identity(value) {
+                return Err(malformed("malformed --plugin-name"));
+            }
+            name = Some(value.to_owned());
+        } else if arg == "--need" {
+            let value = args
+                .next()
+                .ok_or_else(|| malformed("--need needs a capability"))?;
+            let value = value
+                .to_str()
+                .ok_or_else(|| malformed("malformed --need"))?;
+
+            if !valid_identity(value) {
+                return Err(malformed("malformed --need"));
+            }
+            if needs.len() >= MAX_NEEDS {
+                return Err(malformed("too many --need"));
+            }
+            needs.push(value.to_owned());
+        } else {
             return Err(Failure::new(
                 ReplyError::Malformed,
                 format_args!("unknown argument {}", arg.to_string_lossy()),
             ));
         }
-
-        let dir = args
-            .next()
-            .ok_or_else(|| Failure::new(ReplyError::Malformed, "--plugin needs a dir"))?;
-        plugin = Some(PathBuf::from(dir));
     }
 
-    Ok(plugin)
+    Ok(HookArgs {
+        plugin,
+        name,
+        needs,
+    })
+}
+
+/// Names are non-empty ASCII `[a-z0-9_.-]`, matching the daemon's grant names.
+fn valid_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_IDENTITY_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+        })
+}
+
+/// The plugin folder from `--plugin <dir>`.
+///
+/// Without it the hook never starts a daemon. The other launch arguments are
+/// parsed and validated here too, so a caller that cold-starts a daemon uses
+/// [`parse_args`] to forward them.
+///
+/// # Errors
+///
+/// Returns a `malformed` failure for any other argument or a missing dir.
+pub fn plugin_dir(args: impl IntoIterator<Item = OsString>) -> Result<Option<PathBuf>, Failure> {
+    Ok(parse_args(args)?.plugin)
 }
 
 /// Read the first line of `reader`, at most 1 MiB with its newline. A last
@@ -228,4 +309,100 @@ where
     exchange::check(&reply, &call.request)?;
 
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(Into::into).collect()
+    }
+
+    #[test]
+    fn identity_is_returned_in_the_exact_order_given() {
+        let parsed = parse_args(args(&[
+            "--need",
+            "sdk.barn",
+            "--plugin-name",
+            "safe-push",
+            "--plugin",
+            "/plugins/safe-push",
+            "--need",
+            "control.call.push",
+        ]));
+
+        assert_eq!(
+            parsed,
+            Ok(HookArgs {
+                plugin: Some(PathBuf::from("/plugins/safe-push")),
+                name: Some("safe-push".into()),
+                needs: vec!["sdk.barn".into(), "control.call.push".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn a_second_plugin_name_is_malformed() {
+        let parsed = parse_args(args(&["--plugin-name", "one", "--plugin-name", "two"]));
+
+        assert_eq!(
+            parsed,
+            Err(Failure::new(
+                ReplyError::Malformed,
+                "duplicate --plugin-name"
+            ))
+        );
+    }
+
+    #[test]
+    fn malformed_names_and_needs_are_rejected() {
+        let too_long = "a".repeat(MAX_IDENTITY_BYTES + 1);
+        let caps: Vec<String> = (0..=MAX_NEEDS).map(|i| format!("cap-{i}")).collect();
+        let mut too_many = vec!["--plugin-name", "safe-push"];
+        for cap in &caps {
+            too_many.push("--need");
+            too_many.push(cap);
+        }
+
+        let cases: &[&[&str]] = &[
+            &["--plugin-name"],
+            &["--plugin-name", ""],
+            &["--plugin-name", "Bad"],
+            &["--plugin-name", "has space"],
+            &["--plugin-name", "a/b"],
+            &["--plugin-name", too_long.as_str()],
+            &["--need"],
+            &["--need", ""],
+            &["--need", "Bad-Name"],
+            &["--need", too_long.as_str()],
+            &too_many,
+        ];
+
+        for &case in cases {
+            assert_eq!(
+                parse_args(args(case)).map_err(|failure| failure.kind),
+                Err(ReplyError::Malformed),
+                "case {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_identity_still_parses() {
+        let empty = HookArgs {
+            plugin: None,
+            name: None,
+            needs: Vec::new(),
+        };
+
+        assert_eq!(parse_args(args(&[])), Ok(empty.clone()));
+        assert_eq!(
+            parse_args(args(&["--plugin", "/plugins/safe-push"])),
+            Ok(HookArgs {
+                plugin: Some(PathBuf::from("/plugins/safe-push")),
+                ..empty
+            })
+        );
+    }
 }

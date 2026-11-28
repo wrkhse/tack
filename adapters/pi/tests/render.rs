@@ -6,12 +6,20 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 use tack_adapter_pi::{ExtensionError, render};
-use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION};
+use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION, PluginManifest};
 
 const TEMPLATE: &str = include_str!("../register.js");
 
 fn fixture_values() -> Map<String, Value> {
     serde_json::from_str(include_str!("../fixture-values.json")).expect("fixture values")
+}
+
+fn manifest() -> PluginManifest {
+    PluginManifest {
+        name: "safe-push".into(),
+        needs: Vec::new(),
+        tools: Vec::new(),
+    }
 }
 
 fn constant<'a>(script: &'a str, name: &str) -> &'a str {
@@ -58,7 +66,7 @@ fn render_fills_only_template_placeholders() {
     let plugin_dir = fixture["PLUGIN_DIR"]
         .as_str()
         .expect("fixture plugin directory");
-    let script = render(Path::new(plugin_dir)).expect("render");
+    let script = render(Path::new(plugin_dir), &manifest()).expect("render");
 
     assert_template_substitutions(&script, r#""/plugins/safe-push""#, &fixture);
     assert_eq!(constant(&script, "HOOK_BIN"), r#""tack-hook""#);
@@ -91,7 +99,7 @@ fn pi_loads_one_default_factory_with_only_node_imports() {
     let plugin_dir = fixture["PLUGIN_DIR"]
         .as_str()
         .expect("fixture plugin directory");
-    let script = render(Path::new(plugin_dir)).expect("render");
+    let script = render(Path::new(plugin_dir), &manifest()).expect("render");
     let imports: Vec<_> = script
         .lines()
         .filter(|line| line.trim_start().starts_with("import "))
@@ -116,7 +124,7 @@ fn pi_loads_one_default_factory_with_only_node_imports() {
 #[test]
 fn a_path_with_javascript_punctuation_is_only_a_json_string() {
     let path = r#"/plugins/"; spawn("other"); // \\safe"#;
-    let script = render(Path::new(path)).expect("render");
+    let script = render(Path::new(path), &manifest()).expect("render");
     let literal = json!(path).to_string();
 
     assert_eq!(constant(&script, "PLUGIN_DIR"), literal);
@@ -133,16 +141,48 @@ fn render_refuses_unsafe_paths() {
         "/plugins/nul\0byte",
     ] {
         assert_eq!(
-            render(Path::new(path)),
+            render(Path::new(path), &manifest()),
             Err(ExtensionError::UnsafePluginDir)
         );
     }
 }
 
 #[test]
+fn render_refuses_an_unsafe_plugin_identity() {
+    let mut bad_name = manifest();
+    bad_name.name = "__TACK_PLUGIN_NAME__".into();
+    let mut bad_need = manifest();
+    bad_need.needs = vec!["daemon\nspawn".into()];
+
+    for (manifest, name) in [(&bad_name, "plugin_name"), (&bad_need, "needs")] {
+        assert_eq!(
+            render(Path::new("/plugins/safe-push"), manifest),
+            Err(ExtensionError::UnsafeValue(name))
+        );
+    }
+}
+
+#[test]
+fn declared_needs_are_embedded_in_the_extension() {
+    let manifest = PluginManifest {
+        name: "safe-push".into(),
+        needs: vec!["daemon".into(), "control.call.navigate".into()],
+        tools: Vec::new(),
+    };
+    let script = render(Path::new("/plugins/safe-push"), &manifest).expect("render");
+
+    assert_eq!(constant(&script, "PLUGIN_NAME"), r#""safe-push""#);
+    assert_eq!(
+        constant(&script, "NEEDS"),
+        r#"["daemon","control.call.navigate"]"#
+    );
+}
+
+#[test]
 fn extension_errors_display_their_machine_readable_messages() {
     for (error, expected) in [
         (ExtensionError::UnsafePluginDir, "unsafe_value:plugin_dir"),
+        (ExtensionError::UnsafeValue("needs"), "unsafe_value:needs"),
         (
             ExtensionError::MissingToken("__TACK_PLUGIN_DIR__"),
             "missing_token:__TACK_PLUGIN_DIR__",
@@ -161,7 +201,7 @@ fn render_refuses_a_path_that_cannot_round_trip_through_utf8() {
     let path = OsStr::from_bytes(b"/plugins/\xff");
 
     assert_eq!(
-        render(Path::new(path)),
+        render(Path::new(path), &manifest()),
         Err(ExtensionError::UnsafePluginDir)
     );
 }

@@ -605,7 +605,8 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
 /// [`BuildError::RenderExtension`] when the extension cannot be rendered.
 pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
     let (plugin_dir, manifest) = load(plugin_dir, out)?;
-    let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
+    let script =
+        tack_adapter_pi::render(&plugin_dir, &manifest).map_err(BuildError::RenderExtension)?;
 
     let dest = out.join("pi");
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
@@ -710,6 +711,7 @@ pub fn build_codex(
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
+        manifest: &manifest,
         plugin_dir: &plugin_dir,
         codex_dir: &dest,
         version: env!("CARGO_PKG_VERSION"),

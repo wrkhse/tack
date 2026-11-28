@@ -27,7 +27,7 @@ pub const REGISTER_JS: &str = "hooks/register.js";
 
 const MAX_TOOL_NAME: usize = 64;
 
-const TOKENS: [&str; 7] = [
+const TOKENS: [&str; 9] = [
     "__TACK_TOOLS__",
     "__TACK_HOOK_BIN__",
     "__TACK_PLUGIN_DIR__",
@@ -35,6 +35,8 @@ const TOKENS: [&str; 7] = [
     "__TACK_PROTOCOL_VERSION__",
     "__TACK_BUDGET_MS__",
     "__TACK_TOOL_PREFIX__",
+    "__TACK_PLUGIN_NAME__",
+    "__TACK_NEEDS__",
 ];
 
 #[derive(Debug)]
@@ -128,7 +130,7 @@ fn tool_spec(tool: &ToolDef) -> Result<Value, ModError> {
     Ok(Value::Object(spec))
 }
 
-fn fill(values: [(&'static str, String); 7]) -> Result<String, ModError> {
+fn fill(values: [(&'static str, String); 9]) -> Result<String, ModError> {
     let mut output = TEMPLATE.to_owned();
 
     for (token, value) in values {
@@ -171,6 +173,11 @@ fn register_js(config: &ModConfig) -> Result<String, ModError> {
         (TOKENS[4], config.protocol_version.to_string()),
         (TOKENS[5], BUDGET_MS.to_string()),
         (TOKENS[6], string(&prefix)?),
+        (TOKENS[7], string(&config.manifest.name)?),
+        (
+            TOKENS[8],
+            serde_json::to_string(&config.manifest.needs).map_err(|e| json_error(&e))?,
+        ),
     ])
 }
 
@@ -195,6 +202,10 @@ pub fn render(config: &ModConfig) -> Result<[ModFile; 3], ModError> {
     validate("hook_bin", config.hook_bin)?;
     validate("plugin_dir", config.plugin_dir)?;
     validate("version", config.version)?;
+    validate("plugin_name", &config.manifest.name)?;
+    for need in &config.manifest.needs {
+        validate("needs", need)?;
+    }
     for reason in config.deny_reasons {
         validate("deny_reasons", reason)?;
     }

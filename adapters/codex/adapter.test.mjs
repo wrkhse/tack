@@ -184,7 +184,7 @@ test("allow prints an empty object and records the call", async () => {
   assert.deepEqual(w.starts, [
     [
       "tack-hook",
-      ["--plugin", "/plugins/safe-push"],
+      ["--plugin", "/plugins/safe-push", "--plugin-name", "safe-push"],
       { stdio: ["pipe", "pipe", "ignore"] },
     ],
   ]);
@@ -231,7 +231,7 @@ test("every Bash command goes to tack-hook, which decides", async () => {
     assert.deepEqual(w.starts, [
       [
         "tack-hook",
-        ["--plugin", "/plugins/safe-push"],
+        ["--plugin", "/plugins/safe-push", "--plugin-name", "safe-push"],
         { stdio: ["pipe", "pipe", "ignore"] },
       ],
     ]);

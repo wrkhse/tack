@@ -9,6 +9,8 @@
   ],
   "HOOK_BIN": "tack-hook",
   "PLUGIN_DIR": "/plugins/safe-push",
+  "PLUGIN_NAME": "safe-push",
+  "NEEDS": [],
   "DENY_REASONS": [
     "socket_missing",
     "timeout",

@@ -3,6 +3,7 @@
 //! The hook never removes a socket. A daemon unlinks a stale one only after
 //! it holds the kernel lock, so a live daemon's socket always survives.
 
+use std::ffi::OsString;
 use std::fs::{DirBuilder, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -24,9 +25,35 @@ pub struct Launch {
     pub socket: PathBuf,
     pub plugin: PathBuf,
     pub state: PathBuf,
+    pub name: Option<String>,
+    pub needs: Vec<String>,
 }
 
 impl Launch {
+    /// The daemon arguments after its program: the socket and plugin first,
+    /// then the plugin identity when a name was supplied. With no name, no
+    /// identity arguments are sent and the daemon denies control calls.
+    fn argv(&self) -> Vec<OsString> {
+        let mut args = vec![
+            OsString::from("--socket"),
+            self.socket.as_os_str().to_os_string(),
+            OsString::from("--plugin"),
+            self.plugin.as_os_str().to_os_string(),
+        ];
+
+        if let Some(name) = &self.name {
+            args.push(OsString::from("--plugin-name"));
+            args.push(OsString::from(name.as_str()));
+
+            for need in &self.needs {
+                args.push(OsString::from("--need"));
+                args.push(OsString::from(need.as_str()));
+            }
+        }
+
+        args
+    }
+
     /// Spawn the daemon in its own process group, its output appended to
     /// `daemon.log` in the state folder. A missing state folder is created
     /// owner-only; an existing one is left as it is.
@@ -59,10 +86,7 @@ impl Launch {
         // The daemon outlives this short-lived client by design, so the child
         // is never waited on; init reaps it.
         Command::new(&self.bin)
-            .arg("--socket")
-            .arg(&self.socket)
-            .arg("--plugin")
-            .arg(&self.plugin)
+            .args(self.argv())
             .stdin(Stdio::null())
             .stdout(log)
             .stderr(errors)
@@ -140,6 +164,8 @@ mod tests {
             socket: file.with_extension("sock"),
             plugin: file.with_extension("plugin"),
             state: file.clone(),
+            name: None,
+            needs: Vec::new(),
         };
 
         let result = launch.spawn();
@@ -148,6 +174,56 @@ mod tests {
         assert_eq!(
             result.map_err(|failure| failure.kind),
             Err(ReplyError::DaemonError)
+        );
+    }
+
+    #[test]
+    fn argv_forwards_the_identity_after_the_socket_and_plugin_args() {
+        let launch = Launch {
+            bin: PathBuf::from("/bin/tack-daemon"),
+            socket: PathBuf::from("/state/tack.sock"),
+            plugin: PathBuf::from("/plugins/safe-push"),
+            state: PathBuf::from("/state"),
+            name: Some("safe-push".into()),
+            needs: vec!["control.call.push".into(), "sdk.barn".into()],
+        };
+
+        assert_eq!(
+            launch.argv(),
+            vec![
+                OsString::from("--socket"),
+                OsString::from("/state/tack.sock"),
+                OsString::from("--plugin"),
+                OsString::from("/plugins/safe-push"),
+                OsString::from("--plugin-name"),
+                OsString::from("safe-push"),
+                OsString::from("--need"),
+                OsString::from("control.call.push"),
+                OsString::from("--need"),
+                OsString::from("sdk.barn"),
+            ]
+        );
+    }
+
+    #[test]
+    fn argv_forwards_nothing_when_there_is_no_name() {
+        let launch = Launch {
+            bin: PathBuf::from("/bin/tack-daemon"),
+            socket: PathBuf::from("/state/tack.sock"),
+            plugin: PathBuf::from("/plugins/safe-push"),
+            state: PathBuf::from("/state"),
+            name: None,
+            needs: vec!["control.call.push".into()],
+        };
+
+        assert_eq!(
+            launch.argv(),
+            vec![
+                OsString::from("--socket"),
+                OsString::from("/state/tack.sock"),
+                OsString::from("--plugin"),
+                OsString::from("/plugins/safe-push"),
+            ]
         );
     }
 }

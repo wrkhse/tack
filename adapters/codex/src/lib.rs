@@ -13,7 +13,7 @@ use std::fmt;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
-use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION};
+use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION, PluginManifest};
 
 pub use home::{
     CONFIG_FILE, HASHES_FILE, HOOKS_FILE, Installed, Planned, install, plan_home, resolve_home,
@@ -80,6 +80,7 @@ impl Error for CodexError {}
 /// the scripts are written to, and tack's version.
 #[derive(Debug, Clone, Copy)]
 pub struct Config<'a> {
+    pub manifest: &'a PluginManifest,
     pub plugin_dir: &'a Path,
     pub codex_dir: &'a Path,
     pub version: &'a str,
@@ -104,11 +105,20 @@ pub(crate) fn toml_string(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// A template value: no token marker or control character may reach the
+/// generated script.
+fn safe_text(name: &'static str, text: &str) -> Result<(), CodexError> {
+    if text.contains("__TACK_") || text.chars().any(char::is_control) {
+        return Err(CodexError::Unsafe(name));
+    }
+    Ok(())
+}
+
 fn safe_path<'a>(name: &'static str, path: &'a Path) -> Result<&'a str, CodexError> {
     let text = path.to_str().ok_or(CodexError::Unsafe(name))?;
-    let unsafe_text = text.contains("__TACK_") || text.chars().any(char::is_control);
+    safe_text(name, text)?;
 
-    if !path.is_absolute() || unsafe_text {
+    if !path.is_absolute() {
         return Err(CodexError::Unsafe(name));
     }
 
@@ -138,11 +148,16 @@ fn fill(template: &str, slots: &[(&'static str, String)]) -> Result<String, Code
     Ok(output)
 }
 
-fn client(plugin_dir: &str) -> Result<String, CodexError> {
+fn client(plugin_dir: &str, manifest: &PluginManifest) -> Result<String, CodexError> {
     fill(
         CLIENT,
         &[
             ("__TACK_PLUGIN_DIR__", json!(plugin_dir).to_string()),
+            (
+                "__TACK_PLUGIN_NAME__",
+                json!(manifest.name.as_str()).to_string(),
+            ),
+            ("__TACK_NEEDS__", json!(&manifest.needs).to_string()),
             ("__TACK_PROTOCOL_VERSION__", PROTOCOL_VERSION.to_string()),
             ("__TACK_BUDGET_MS__", BUDGET_MS.to_string()),
             ("__TACK_MAX_FRAME_BYTES__", MAX_FRAME_BYTES.to_string()),
@@ -220,8 +235,10 @@ pub fn render(config: &Config) -> Result<Adapter, CodexError> {
     let plugin_dir = safe_path("plugin_dir", config.plugin_dir)?;
     let codex_dir = safe_path("codex_dir", config.codex_dir)?;
 
-    if config.version.contains("__TACK_") {
-        return Err(CodexError::Unsafe("version"));
+    safe_text("version", config.version)?;
+    safe_text("plugin_name", &config.manifest.name)?;
+    for need in &config.manifest.needs {
+        safe_text("needs", need)?;
     }
 
     let script = |name: &str| format!("{codex_dir}/{name}");
@@ -244,7 +261,7 @@ pub fn render(config: &Config) -> Result<Adapter, CodexError> {
             command: wrapped(SESSION_START_JS),
         },
     ];
-    let client = client(plugin_dir)?;
+    let client = client(plugin_dir, config.manifest)?;
     let mcp = fill(
         MCP,
         &[

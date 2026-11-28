@@ -25,7 +25,13 @@ for (const [name, value] of Object.entries(VALUES)) {
 
 assert.equal(SOURCE.includes("__TACK_"), false);
 
-const HOOK_ARGV = ["tack-hook", "--plugin", "/plugins/safe-push"];
+const HOOK_ARGV = [
+  "tack-hook",
+  "--plugin",
+  "/plugins/safe-push",
+  "--plugin-name",
+  "safe-push",
+];
 const BASH = {
   tool: "Bash",
   tool_use_id: "toolu_1",

@@ -6,10 +6,22 @@ import { appendFileSync } from "node:fs";
 
 const HOOK_BIN = "tack-hook";
 const PLUGIN_DIR = __TACK_PLUGIN_DIR__;
+const PLUGIN_NAME = __TACK_PLUGIN_NAME__;
+const NEEDS = __TACK_NEEDS__;
 const PROTOCOL_VERSION = __TACK_PROTOCOL_VERSION__;
 const BUDGET_MS = __TACK_BUDGET_MS__;
 const MAX_FRAME_BYTES = __TACK_MAX_FRAME_BYTES__;
 const DENY_REASONS = __TACK_DENY_REASONS__;
+
+// The plugin's declared identity travels on every call so the daemon can
+// authorize control calls against the host's per-plugin grants.
+const HOOK_ARGS = [
+  "--plugin",
+  PLUGIN_DIR,
+  "--plugin-name",
+  PLUGIN_NAME,
+  ...NEEDS.flatMap((need) => ["--need", need]),
+];
 
 const REASONS = new Set(DENY_REASONS);
 
@@ -132,7 +144,7 @@ function forward(request, deadline) {
     }
 
     try {
-      child = spawn(HOOK_BIN, ["--plugin", PLUGIN_DIR], {
+      child = spawn(HOOK_BIN, HOOK_ARGS, {
         stdio: ["pipe", "pipe", "ignore"],
       });
       child.on("error", spawnFailed);

@@ -4,10 +4,22 @@
 const TOOLS = __TACK_TOOLS__;
 const HOOK_BIN = __TACK_HOOK_BIN__;
 const PLUGIN_DIR = __TACK_PLUGIN_DIR__;
+const PLUGIN_NAME = __TACK_PLUGIN_NAME__;
+const NEEDS = __TACK_NEEDS__;
 const DENY_REASONS = __TACK_DENY_REASONS__;
 const PROTOCOL_VERSION = __TACK_PROTOCOL_VERSION__;
 const BUDGET_MS = __TACK_BUDGET_MS__;
 const TOOL_PREFIX = __TACK_TOOL_PREFIX__;
+
+// The plugin's declared identity travels on every call so the daemon can
+// authorize control calls against the host's per-plugin grants.
+const HOOK_ARGS = [
+  "--plugin",
+  PLUGIN_DIR,
+  "--plugin-name",
+  PLUGIN_NAME,
+  ...NEEDS.flatMap((need) => ["--need", need]),
+];
 
 const KINDS = new Set(["hook", "tool", "error"]);
 const REASONS = new Set(DENY_REASONS);
@@ -145,7 +157,7 @@ async function forward($, request) {
   let done;
 
   try {
-    done = await $.process.run([HOOK_BIN, "--plugin", PLUGIN_DIR], {
+    done = await $.process.run([HOOK_BIN, ...HOOK_ARGS], {
       stdin: JSON.stringify(request) + "\n",
       timeoutMs: BUDGET_MS,
     });

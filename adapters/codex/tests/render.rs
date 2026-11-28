@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use tack_adapter_codex::{
     Adapter, CodexError, Config, Event, HOOK_TIMEOUT_SEC, MCP_PROTOCOL_VERSION, render,
 };
-use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION};
+use tack_protocol::wire::{DenyReason, MAX_FRAME_BYTES, PROTOCOL_VERSION, PluginManifest};
 
 const CLIENT: &str = include_str!("../client.js");
 const PRE_TOOL_USE: &str = include_str!("../pre-tool-use.js");
@@ -23,11 +23,20 @@ fn fixture() -> Map<String, Value> {
     serde_json::from_str(include_str!("../fixture-values.json")).expect("fixture values")
 }
 
+fn manifest() -> PluginManifest {
+    PluginManifest {
+        name: "safe-push".into(),
+        needs: Vec::new(),
+        tools: Vec::new(),
+    }
+}
+
 fn rendered(plugin_dir: &str) -> Adapter {
     let fixture = fixture();
     let version = fixture["VERSION"].as_str().expect("version");
 
     render(&Config {
+        manifest: &manifest(),
         plugin_dir: Path::new(plugin_dir),
         codex_dir: Path::new(CODEX_DIR),
         version,
@@ -159,6 +168,8 @@ fn the_fixture_values_are_the_built_values() {
     );
     assert_eq!(fixture["MCP_PROTOCOL_VERSION"], json!(MCP_PROTOCOL_VERSION));
     assert_eq!(MCP_PROTOCOL_VERSION, "2025-06-18");
+    assert_eq!(fixture["PLUGIN_NAME"], json!("safe-push"));
+    assert_eq!(fixture["NEEDS"], json!([]));
 }
 
 #[test]
@@ -221,6 +232,7 @@ fn the_config_fragment_registers_a_required_mcp_server_with_env_and_timeouts() {
 #[test]
 fn a_quote_in_the_output_path_stays_one_shell_word() {
     let adapter = render(&Config {
+        manifest: &manifest(),
         plugin_dir: Path::new("/plugins/safe-push"),
         codex_dir: Path::new("/it's/codex"),
         version: "1",
@@ -262,12 +274,54 @@ fn render_refuses_unsafe_values() {
         ),
     ] {
         let config = Config {
+            manifest: &manifest(),
             plugin_dir: Path::new(plugin_dir),
             codex_dir: Path::new(codex_dir),
             version,
         };
 
         assert_eq!(render(&config), Err(CodexError::Unsafe(name)));
+    }
+}
+
+#[test]
+fn render_refuses_an_unsafe_plugin_identity() {
+    let mut bad_name = manifest();
+    bad_name.name = "__TACK_PLUGIN_NAME__".into();
+    let mut bad_need = manifest();
+    bad_need.needs = vec!["daemon\nspawn".into()];
+
+    for (manifest, name) in [(&bad_name, "plugin_name"), (&bad_need, "needs")] {
+        let config = Config {
+            manifest,
+            plugin_dir: Path::new("/plugins/safe-push"),
+            codex_dir: Path::new(CODEX_DIR),
+            version: "1",
+        };
+
+        assert_eq!(render(&config), Err(CodexError::Unsafe(name)));
+    }
+}
+
+#[test]
+fn declared_needs_are_embedded_in_the_hook_client() {
+    let manifest = PluginManifest {
+        name: "safe-push".into(),
+        needs: vec!["daemon".into(), "control.call.navigate".into()],
+        tools: Vec::new(),
+    };
+    let adapter = render(&Config {
+        manifest: &manifest,
+        plugin_dir: Path::new("/plugins/safe-push"),
+        codex_dir: Path::new(CODEX_DIR),
+        version: "1",
+    })
+    .expect("render");
+
+    for script in ["pre-tool-use.js", "mcp.js"] {
+        let text = file(&adapter, script);
+        assert!(text.contains("const PLUGIN_NAME = \"safe-push\";"));
+        assert!(text.contains("const NEEDS = [\"daemon\",\"control.call.navigate\"];"));
     }
 }
 
