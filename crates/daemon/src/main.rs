@@ -18,8 +18,8 @@ use tack_daemon::pipe::{self, PipeError};
 use tack_daemon::stall::{Clock, StallClient, SystemClock};
 use tack_daemon::transport::{TransportError, bind};
 use tack_daemon::{
-    ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, frames,
-    socket_in_state_dir, state_dir,
+    ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, STALL_STARTUP_MS,
+    frames, socket_in_state_dir, state_dir,
 };
 use tack_protocol::wire::{
     DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
@@ -510,7 +510,7 @@ fn launch_stall_with(
         .command()
         .spawn()
         .map_err(|error| unavailable(&format!("barn launch failed: {}", error.kind())))?;
-    let deadline = SystemClock.deadline(Duration::from_millis(DEFAULT_DEADLINE_MS));
+    let deadline = SystemClock.deadline(Duration::from_millis(STALL_STARTUP_MS));
     let client =
         launch_from_child(&mut child, deadline, broker).map_err(|error| error.to_string())?;
 

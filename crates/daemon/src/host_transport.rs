@@ -21,7 +21,10 @@ use tokio::net::UnixStream as AsyncUnixStream;
 use tokio::runtime::Handle;
 use tokio::time::timeout;
 
-use crate::stall::{StallError, Transport};
+use crate::{
+    STALL_STARTUP_MS, STALL_STARTUP_TIMEOUT,
+    stall::{StallError, Transport},
+};
 
 /// The two plain values barn supplies at stall start: the path of its host
 /// socket and the single-use token tack authenticates with.
@@ -104,11 +107,25 @@ impl HostTransport {
     }
 
     /// Run one validated call on the connection, opening it on first use.
-    fn call_once(&mut self, request: &str, deadline: Instant) -> Result<String, StallError> {
+    fn call_once(&mut self, request: &str, mut deadline: Instant) -> Result<String, StallError> {
         let id = request_id(request)?;
+        let call_budget = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
 
         if self.stream.is_none() {
-            self.handshake(deadline)?;
+            let startup = Instant::now()
+                .checked_add(Duration::from_millis(STALL_STARTUP_MS))
+                .unwrap_or_else(Instant::now);
+
+            self.handshake(startup).map_err(|error| match error {
+                StallError::Timeout => StallError::Io(STALL_STARTUP_TIMEOUT.to_owned()),
+                other => other,
+            })?;
+
+            deadline = Instant::now()
+                .checked_add(call_budget)
+                .unwrap_or_else(Instant::now);
         }
 
         let reader = self.stream.as_mut().ok_or(StallError::Malformed)?;

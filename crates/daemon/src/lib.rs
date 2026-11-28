@@ -21,6 +21,13 @@ pub const EXIT_ENGINE: i32 = 4;
 pub const SOCKET_NAME: &str = "tack.sock";
 pub const ERR_SOCKET_MISMATCH: &str = "socket_not_in_state_dir";
 
+/// One bounded budget for stall launch and `host.start`, matching barn's
+/// 2 s host handshake timeout and at most 10 s.
+pub const STALL_STARTUP_MS: u64 = 2_000;
+
+/// Named refusal when the stall startup budget is exceeded.
+pub const STALL_STARTUP_TIMEOUT: &str = "stall_startup_timeout";
+
 fn state_dir_from(
     tack_state_dir: Option<&str>,
     xdg_state_home: Option<&str>,
