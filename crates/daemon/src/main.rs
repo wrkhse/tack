@@ -1275,4 +1275,80 @@ sleep 5"#
             a_child_without_a_stdout_pipe_is_reaped();
         }
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_host_start_is_not_charged_to_the_call_budget() {
+        use barn_stall::{FRAMED_VERSION, Outcome, Reply, Request, ToolCall};
+        use std::io::{BufRead, Write as IoWrite};
+        use std::os::unix::net::UnixListener;
+
+        let scratch = Script::new("exit 0");
+        let socket = scratch.0.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let host = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+
+            reader.read_line(&mut line).unwrap();
+            let start: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+            assert_eq!(start["jsonrpc"].as_str(), Some("2.0"));
+            assert_eq!(start["id"].as_u64(), Some(21));
+            assert_eq!(start["method"].as_str(), Some("host.start"));
+
+            thread::sleep(Duration::from_millis(150));
+            writeln!(
+                stream,
+                r#"{"jsonrpc":"2.0","id":21,"result":{"stall":"sourcefed"}}"#
+            )
+            .unwrap();
+
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            writeln!(stream, r#"{"type":"hook","id":22,"outcome":"allow"}"#).unwrap();
+        });
+
+        let endpoint = format!(
+            "{{\"protocol\":1,\"socket_path\":\"{}\",\"token\":\"t\"}}",
+            socket.display()
+        );
+        let barn = Script::new(&format!("sleep 0.15; echo '{endpoint}'; sleep 5"));
+        let override_bin = barn.0.join("barn").to_string_lossy().into_owned();
+        let plugin = std::env::temp_dir();
+        let state = barn.0.join("state");
+
+        let mut stall = tokio::task::block_in_place(|| {
+            launch_stall_with(Some(&override_bin), &plugin, &state, test_broker())
+        })
+        .expect("a stall that writes its endpoint and host within startup bounds");
+
+        let request = Request::Hook {
+            id: 22,
+            version: FRAMED_VERSION,
+            hook: "PreToolUse".to_owned(),
+            call: ToolCall {
+                tool: "bash".to_owned(),
+                name: "run".to_owned(),
+                input: serde_json::json!({}),
+                session_id: None,
+            },
+            _meta: None,
+        };
+        let expected = Reply::Hook {
+            id: 22,
+            outcome: Outcome::Allow,
+        };
+
+        let result = tokio::task::block_in_place(|| {
+            let Stall::Host { client, .. } = &mut stall else {
+                panic!("a launched barn yields a host stall");
+            };
+            client.call(&request)
+        });
+
+        drop(stall);
+        host.join().unwrap();
+
+        assert_eq!(result, Ok(expected));
+    }
 }
