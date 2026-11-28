@@ -189,7 +189,7 @@ impl Drop for Daemon {
             .checked_add(WAIT)
             .unwrap_or_else(Instant::now);
 
-        while let Ok(None) = self.0.try_wait() {
+        while matches!(self.0.try_wait(), Ok(None)) {
             if Instant::now() >= deadline {
                 eprintln!("tack-daemon: reap timed out");
                 break;
