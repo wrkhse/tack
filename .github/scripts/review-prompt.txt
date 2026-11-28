@@ -54,11 +54,12 @@ material.
    - a test or proof that can pass while the feature is broken.
    Name the commit, file and line, and say what it hides.
 
-Output, in this exact shape and nothing else. Line 1 must be the
-marker below, exactly. Line 2 must be the verdict line, exactly:
-**Verdict: MERGE AS IS** when there is no MUST, otherwise
-**Verdict: FIX FIRST**. The posted verdict is derived from the
-findings JSON, so the findings and the verdict line must agree:
+Output, in this exact shape and nothing else. The first line must be
+the marker below, exactly. The posted verdict is derived from the
+findings JSON: FIX FIRST when any finding is a MUST, MERGE AS IS
+otherwise. The verdict line below is informational and may be
+omitted; when given, X is MERGE AS IS when there is no MUST and FIX
+FIRST otherwise:
 <!-- opencode-review -->
 **Verdict: X**
 Then give a short summary.
@@ -83,7 +84,7 @@ including those outside the diff and from NOTES.txt, using null for
 line when no RIGHT-side diff line applies and null for path when no
 file applies; use [] only when there are no findings.
 <!-- opencode-findings-json
-[{\"path\":\"...\",\"line\":12,\"side\":\"RIGHT\",\"severity\":\"MUST\",\"commit\":\"abc1234\",\"body\":\"...\"}]
+[{"path":"...","line":12,"side":"RIGHT","severity":"MUST","commit":"abc1234","body":"..."}]
 -->
 
 If asked to summarize, repeat the review itself verbatim; never describe what you read or did.
