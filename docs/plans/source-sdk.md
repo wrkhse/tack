@@ -25,6 +25,7 @@ flowchart LR
 
 This page proposes the `poll` hook, `on.poll`, `ctx.emit`, `ctx.state`,
 `ctx.input`, `ctx.http` and a `Reply::Poll` carrying `events` and `state`.
+Open question 1 records the alternative to the proposed reply.
 
 ### 1. Framed poll hook
 
@@ -194,9 +195,12 @@ sourcefed's `MAX_POSITION_LEN`; the HTTP response cap matches barn's
 
 **Failed poll.** A failed poll returns `Reply::Error` with the named reason
 `poll_failed:<reason>`, emits no accepted events and leaves the cursor
-unchanged. sourcefed core records the reason and re-polls. A denied HTTP host
-is a named refusal, not a silent drop. An event-hook failure after a successful
-poll keeps the event with a named reason, as P4 decides.
+unchanged. sourcefed core retries a refused poll with a doubling delay up to
+its existing cap. After five consecutive refusals for the same cursor, it
+records `poll_refusal_deadletter:<reason>` and pauses the source in an
+operator-visible named state, without advancing the cursor or dropping events.
+A denied HTTP host is a named refusal, not a silent drop. An event-hook failure
+after a successful poll keeps the event with a named reason, as P4 decides.
 
 Files in barn at `95065f65`:
 
@@ -294,7 +298,7 @@ sourcefed CI proves the P4 table through the pinned daemon.
 ## Open questions
 
 1. How do poll results return?
-   - **(Recommended)** A new `Reply::Poll` variant carries events and state.
+   - **(Recommended)** A proposed `Reply::Poll` carries events and state.
      `Request` and `Reply` are non-exhaustive, so the variant is additive.
    - `annotate` fields carry `events` and `state`. P3 caps annotations at
      32 entries, 64-byte keys and 512-byte values, so an event list cannot
