@@ -43,3 +43,6 @@ jobs:
       - name: Test verdict enforcement on fixtures
         shell: bash
         run: bash .github/scripts/test-enforce-verdict.sh
+      - name: Test review gate step conditions
+        shell: bash
+        run: bash .github/scripts/test-review-gate.sh
