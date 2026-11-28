@@ -6,6 +6,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::fs::FileType;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
@@ -114,20 +115,36 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     Ok((plugin_dir, manifest))
 }
 
+/// Read one entry's type in an existing folder without following symlinks.
+/// Read failures are reported; a missing entry is not an error.
+fn sdk_entry_type(folder: &Path, name: &str) -> Result<Option<FileType>, BuildError> {
+    let entries = std::fs::read_dir(folder).map_err(BuildError::Io)?;
+
+    for entry in entries {
+        let entry = entry.map_err(BuildError::Io)?;
+
+        if entry.file_name() == name {
+            return entry.file_type().map(Some).map_err(BuildError::Io);
+        }
+    }
+
+    Ok(None)
+}
+
 /// Emit the SDK's strict Luau declarations for a plugin that lists the `sdk`
 /// module, and remove a stale copy for one that does not.
 ///
-/// The build output folder belongs to the build user. A symlink at the output
-/// path or declaration, a non-directory output path, or a non-regular
-/// declaration entry is refused with [`BuildError::Sdk`] rather than followed;
-/// other I/O failures are reported as build I/O errors. The opt-out path also
-/// refuses a symlinked SDK folder before removing anything.
+/// The build output folder belongs to the build user. Symlinks and non-regular
+/// entries are refused with named errors, and metadata read failures are
+/// reported as build I/O errors.
 fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
     let dest = out.join("sdk");
     let declaration = dest.join("tack.d.luau");
 
     if !needs.iter().any(|need| need == SDK_MODULE) {
-        if std::fs::symlink_metadata(&dest).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        if out.is_dir()
+            && let Some(kind) = sdk_entry_type(out, "sdk")?
+            && kind.is_symlink()
         {
             return Err(BuildError::Sdk("the SDK output path is a symlink".into()));
         }
@@ -152,27 +169,25 @@ fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
     let dest = root.join("sdk");
     let declaration = dest.join("tack.d.luau");
 
-    if std::fs::symlink_metadata(&dest).is_ok() {
-        let metadata = std::fs::symlink_metadata(&dest).map_err(BuildError::Io)?;
-        if metadata.file_type().is_symlink() {
+    if let Some(kind) = sdk_entry_type(&root, "sdk")? {
+        if kind.is_symlink() {
             return Err(BuildError::Sdk("the SDK output path is a symlink".into()));
         }
-        if !metadata.is_dir() {
+        if !kind.is_dir() {
             return Err(BuildError::Sdk(
                 "the SDK output path is not a directory".into(),
             ));
         }
-    }
 
-    if std::fs::symlink_metadata(&declaration).is_ok() {
-        let metadata = std::fs::symlink_metadata(&declaration).map_err(BuildError::Io)?;
-        if metadata.file_type().is_symlink() {
-            return Err(BuildError::Sdk("the SDK declaration is a symlink".into()));
-        }
-        if !metadata.is_file() {
-            return Err(BuildError::Sdk(
-                "the SDK declaration is not a regular file".into(),
-            ));
+        if let Some(kind) = sdk_entry_type(&dest, "tack.d.luau")? {
+            if kind.is_symlink() {
+                return Err(BuildError::Sdk("the SDK declaration is a symlink".into()));
+            }
+            if !kind.is_file() {
+                return Err(BuildError::Sdk(
+                    "the SDK declaration is not a regular file".into(),
+                ));
+            }
         }
     }
 
