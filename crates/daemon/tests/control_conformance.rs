@@ -6,6 +6,8 @@
 //! own launch arguments and the host grants file. Each test is inert unless
 //! `TACK_BARN_BIN` names a barn binary; CI supplies one.
 
+#![cfg(test)]
+
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;

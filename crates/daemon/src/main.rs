@@ -103,9 +103,7 @@ where
     }
 
     let grants = match grants.or_else(|| env_grants.map(PathBuf::from)) {
-        Some(path) => {
-            Grants::from_file(&PathBuf::from(path)).map_err(|error| format!("grants: {error}"))?
-        }
+        Some(path) => Grants::from_file(&path).map_err(|error| format!("grants: {error}"))?,
         None => Grants::default(),
     };
 
