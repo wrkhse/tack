@@ -157,6 +157,15 @@ fn validate_entry(entry: &str) -> Result<(), BuildError> {
     Ok(())
 }
 
+/// A capability call name is nonempty and made only of ASCII letters,
+/// digits and underscores, so a call cannot smuggle syntax through its name.
+fn is_call_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 /// Audit one source by scanning every `control` occurrence. A call-shaped
 /// occurrence must be the literal `ctx.control.call("<ident>")` form, so a call
 /// hidden in a comment or string is still checked. Whitespace-separated member
@@ -190,12 +199,12 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             || after.starts_with("\"].call(")
             || after.starts_with("'].call(")
             || whitespace_after;
-        let qualified = source
+        let has_ctx_qualifier = source
             .get(..at)
             .and_then(|head| head.strip_suffix(CONTROL_QUALIFIER))
             .is_some();
 
-        if literal.is_none() && !call_shaped && !qualified {
+        if literal.is_none() && !call_shaped && !has_ctx_qualifier {
             cursor = after_start;
             continue;
         }
@@ -205,11 +214,7 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             .split_once('"')
             .ok_or(BuildError::DynamicCapability)?;
 
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
+        if !is_call_name(name) {
             return Err(BuildError::DynamicCapability);
         }
 
@@ -293,10 +298,11 @@ fn audit_capabilities(plugin_dir: &Path, manifest: &PluginManifest) -> Result<()
                 entries.push(entry);
             }
 
-            entries.sort_by_key(|entry| entry.file_name());
+            entries.sort_by_key(std::fs::DirEntry::file_name);
 
             for entry in entries.into_iter().rev() {
-                stack.push((entry.path(), depth + 1));
+                let child_depth = depth.checked_add(1).ok_or(BuildError::AuditLimit)?;
+                stack.push((entry.path(), child_depth));
             }
 
             continue;

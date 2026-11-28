@@ -799,6 +799,22 @@ mod audit_tests {
     }
 
     #[test]
+    fn a_declared_capability_with_an_underscore_builds() {
+        let scratch = Scratch::new();
+        scratch.write(
+            "plugin.luau",
+            &source(
+                "\"control.call.navigate_event\"",
+                "ctx.control.call(\"navigate_event\", payload)",
+            ),
+        );
+        let out = scratch.path().join("dist");
+
+        build(scratch.path(), &out, BuildOptions::default())
+            .expect("a declared underscore capability builds");
+    }
+
+    #[test]
     fn invalid_need_entries_are_refused_by_name() {
         let long = format!("control.call.{}", "a".repeat(200));
         for entry in ["control.call.bad-name", "control.call.", long.as_str()] {
