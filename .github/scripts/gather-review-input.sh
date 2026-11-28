@@ -8,9 +8,9 @@ OUT="${OUT:-review-input}"
 GH="${GH:-gh}"
 MAX_BYTES="${MAX_BYTES:-2000000}"
 MAX_COMMITS="${MAX_COMMITS:-100}"
-RG="${RG:-rg}"
+GREP="${GREP:-grep}"
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-config="$script_dir/../review-config.json"
+config="${GATHER_CONFIG:-$script_dir/../review-config.json}"
 
 if [[ ! "$MAX_BYTES" =~ ^[0-9]{1,18}$ || ! "$MAX_COMMITS" =~ ^[0-9]{1,18}$ ]]; then
   echo 'MAX_BYTES and MAX_COMMITS must be nonnegative integers of at most 18 digits.' >&2
@@ -211,8 +211,8 @@ find_manifest() {
 }
 
 if [ "$docs_only" = true ]; then
-  if ! command -v "$RG" > /dev/null 2>&1; then
-    printf '%s is unavailable; cannot check include_str! references; reviewing as code.\n' "$RG" >> "$notes"
+  if ! command -v "$GREP" > /dev/null 2>&1; then
+    printf '%s is unavailable; cannot check include_str! references; reviewing as code.\n' "$GREP" >> "$notes"
     docs_only=false
   else
     md_paths=$(printf '%s' "$api_files" | jq -rs '
@@ -223,28 +223,41 @@ if [ "$docs_only" = true ]; then
     # Flatten each Rust file so a path split across lines still matches, and
     # parse every include separately. A truncated or unparseable scan fails closed.
     scan="$OUT/include-scan.txt"
+    raw_list="$OUT/include-raw.txt"
     : > "$scan"
-    files=$("$RG" -l --glob '*.rs' --glob '!target/**' 'include_str!' "${roots[@]}" 2> /dev/null || true)
-    file_count=$(printf '%s\n' "$files" | grep -c . || true)
-    raw_count=0
-    if [ "$file_count" -gt 100 ]; then
+    : > "$raw_list"
+    grep_status=0
+    "$GREP" -rnE --include='*.rs' 'include_str!' "${roots[@]}" \
+      > "$raw_list" 2> "$OUT/include-grep.err" || grep_status=$?
+    if [ "$grep_status" -gt 1 ]; then
       docs_only=false
-      printf 'include_str! scan covered too many files (%s); reviewing as code.\n' "$file_count" >> "$notes"
+      printf 'include_str! scan failed (status %s); reviewing as code.\n' "$grep_status" >> "$notes"
     else
-      while IFS= read -r file; do
-        [ -n "$file" ] || continue
-        flat=$(tr '\n' ' ' < "$file")
-        n=$(printf '%s' "$flat" | "$RG" -o 'include_str!' 2> /dev/null | wc -l || true)
-        raw_count=$((raw_count + n))
-        printf '%s' "$flat" | "$RG" --label "$file" -o --no-heading \
-          'include_str!\s*\(\s*"[^"]*"|include_str!\s*\(concat!\s*\(\s*env!\s*\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*"[^"]*"' \
-          >> "$scan" 2> /dev/null || true
-      done <<< "$files"
-      parsed_count=$(grep -c . "$scan" || true)
-      if [ "$raw_count" -gt "$parsed_count" ] || [ "$parsed_count" -gt 200 ]; then
+      file_count=$(sed 's/:.*//' "$raw_list" | sort -u | grep -c . || true)
+      raw_count=$("$GREP" -o 'include_str!' "$raw_list" 2> /dev/null | wc -l || true)
+      if [ "$file_count" -gt 100 ]; then
         docs_only=false
-        printf 'include_str! scan was truncated or unparseable (%s of %s includes); reviewing as code.\n' \
-          "$parsed_count" "$raw_count" >> "$notes"
+        printf 'include_str! scan covered too many files (%s); reviewing as code.\n' "$file_count" >> "$notes"
+      else
+        parse_status=0
+        while IFS= read -r file; do
+          [ -n "$file" ] || continue
+          flat=$(tr '\n' ' ' < "$file")
+          printf '%s' "$flat" | "$GREP" -oE \
+            'include_str!\([[:space:]]*"[^"]*"|include_str!\(concat!\([[:space:]]*env!\([[:space:]]*"CARGO_MANIFEST_DIR"[[:space:]]*\)[[:space:]]*,[[:space:]]*"[^"]*"' \
+            | sed "s|^|$file:|" >> "$scan" 2> /dev/null || parse_status=$?
+        done < <(sed 's/:.*//' "$raw_list" | sort -u)
+        if [ "$parse_status" -gt 1 ]; then
+          docs_only=false
+          printf 'include_str! scan failed (status %s); reviewing as code.\n' "$parse_status" >> "$notes"
+        else
+          parsed_count=$(grep -c . "$scan" || true)
+          if [ "$raw_count" -gt "$parsed_count" ] || [ "$parsed_count" -gt 200 ]; then
+            docs_only=false
+            printf 'include_str! scan was truncated or unparseable (%s of %s includes); reviewing as code.\n' \
+              "$parsed_count" "$raw_count" >> "$notes"
+          fi
+        fi
       fi
     fi
 

@@ -164,6 +164,15 @@ run_docs_case() {
   printf 'ok: docs-only %s\n' "$name"
 }
 
+# A plain docs-only PR classifies as advisory (true).
+cat > "$tmp/plain-docs.json" <<'JSON'
+{"title":"Plain docs","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/plain-docs-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case plain-docs "$tmp/plain-docs.json" "$tmp/plain-docs-files.json" 1 true
+
 cat > "$tmp/docs.json" <<'JSON'
 {"title":"Docs","body":"","files":[{"path":"README.md"},{"path":"site/img/logo.png"}]}
 JSON
@@ -281,25 +290,25 @@ grep -Fq 'Markdown crates/x/README.md is included by include_str! in Rust; revie
   "$tmp/docs-include-str/NOTES.txt"
 printf 'ok: docs-only include-str note\n'
 
-# Without rg the include check cannot run, so classification must fail closed.
-cat > "$tmp/no-rg.json" <<'JSON'
-{"title":"No rg","body":"","files":[{"path":"README.md"}]}
+# Without grep the include check cannot run, so classification must fail closed.
+cat > "$tmp/no-grep.json" <<'JSON'
+{"title":"No grep","body":"","files":[{"path":"README.md"}]}
 JSON
-cat > "$tmp/no-rg-files.json" <<'JSON'
+cat > "$tmp/no-grep-files.json" <<'JSON'
 [{"filename":"README.md","previous_filename":null,"status":"modified"}]
 JSON
-out="$tmp/docs-no-rg"
+out="$tmp/docs-no-grep"
 printf '%s\n' 1 > "$tmp/changed-files.txt"
-PR_FIXTURE="$tmp/no-rg.json" "$tmp/gh-pr-files" pr view 1 -R o/r \
+PR_FIXTURE="$tmp/no-grep.json" "$tmp/gh-pr-files" pr view 1 -R o/r \
   --json title,body,files > "$tmp/pr.json"
 BASE="$base" HEAD="$head" PR_JSON="$tmp/pr.json" REPO=o/r PR=1 \
   CHANGED_FILES="$tmp/changed-files.txt" \
-  API_FILES_FIXTURE="$tmp/no-rg-files.json" GH="$tmp/gh" RG="$tmp/no-such-rg" \
+  API_FILES_FIXTURE="$tmp/no-grep-files.json" GH="$tmp/gh" GREP="$tmp/no-such-grep" \
   OUT="$out" MAX_BYTES=1000 MAX_COMMITS=100 "$gather"
 
 [ "$(cat -- "$out/docs-only.txt")" = "false" ]
 grep -Fq 'cannot check include_str! references; reviewing as code.' "$out/NOTES.txt"
-printf 'ok: docs-only missing rg fails closed\n'
+printf 'ok: docs-only missing grep fails closed\n'
 
 # A crate-root include through concat!/CARGO_MANIFEST_DIR cannot be resolved
 # without a manifest, so classification must fail closed.
