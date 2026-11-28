@@ -138,15 +138,19 @@ fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<Option<PathBuf>, Bu
             )));
         }
         Ok(_) => {}
-        Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => return Err(BuildError::Io(err)),
+        Err(err) => match err.kind() {
+            ErrorKind::NotFound => {}
+            _ => return Err(BuildError::Io(err)),
+        },
     }
 
     let remove_stale = || -> Result<(), BuildError> {
         match std::fs::remove_file(&declarations) {
             Ok(()) => {}
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => return Err(BuildError::Io(err)),
+            Err(err) => match err.kind() {
+                ErrorKind::NotFound => {}
+                _ => return Err(BuildError::Io(err)),
+            },
         }
         Ok(())
     };
