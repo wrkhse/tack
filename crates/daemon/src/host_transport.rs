@@ -1258,7 +1258,10 @@ mod tests {
         let mut into = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(5);
 
-        assert_eq!(read_line(&mut reader, &mut into, deadline), Err(StallError::Closed));
+        assert_eq!(
+            read_line(&mut reader, &mut into, deadline),
+            Err(StallError::Closed)
+        );
         assert!(into.is_empty());
     }
 

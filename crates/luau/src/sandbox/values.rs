@@ -211,7 +211,9 @@ mod tests {
         assert_eq!(lua_key(LuaValue::Number(1.5)), Ok("1.5".to_string()));
         assert_eq!(
             lua_key(LuaValue::Boolean(true)),
-            Err(EngineError::InvalidResult("tool key must be a string".into()))
+            Err(EngineError::InvalidResult(
+                "tool key must be a string".into()
+            ))
         );
     }
 
