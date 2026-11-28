@@ -1,0 +1,3 @@
+[profile.default]
+# A hung test is killed and named after four 30-second periods.
+slow-timeout = { period = "30s", terminate-after = 4 }
