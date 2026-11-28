@@ -880,12 +880,129 @@ fn manifest_reads_the_fixture() {
         Ok(json!({
             "name": "safe-push",
             "needs": ["lookup"],
+            "modules": [],
             "tools": [{
                 "name": "guard_status",
                 "description": "daemon status",
                 "input": {},
                 "cacheable": true,
             }],
+        }))
+    );
+}
+
+#[test]
+fn manifest_reads_the_listed_module() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"return { name = "safe-push", modules = { sdk = {} } }"#,
+    );
+    let sandbox = Sandbox::new(scratch.path(), default_limits(), Capabilities::default())
+        .expect("fixture loads");
+
+    assert_eq!(
+        sandbox.manifest(),
+        Ok(json!({
+            "name": "safe-push",
+            "needs": [],
+            "modules": ["sdk"],
+            "tools": [],
+        }))
+    );
+}
+
+#[test]
+fn manifest_reads_every_listed_module() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"return { name = "safe-push", modules = { sdk = {}, other = {} } }"#,
+    );
+    let sandbox = Sandbox::new(scratch.path(), default_limits(), Capabilities::default())
+        .expect("fixture loads");
+
+    let manifest = sandbox.manifest().expect("manifest reads");
+    let mut modules: Vec<String> = manifest["modules"]
+        .as_array()
+        .expect("modules is an array")
+        .iter()
+        .map(|module| module.as_str().expect("module is a name").to_owned())
+        .collect();
+    modules.sort();
+
+    assert_eq!(modules, ["other", "sdk"]);
+}
+
+#[test]
+fn manifest_refuses_modules_that_are_not_a_table() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"return { name = "safe-push", modules = "sdk" }"#,
+    );
+    let sandbox = Sandbox::new(scratch.path(), default_limits(), Capabilities::default())
+        .expect("fixture loads");
+
+    assert_eq!(
+        sandbox.manifest(),
+        Err(EngineError::InvalidResult("modules must be a table".into()))
+    );
+}
+
+#[test]
+fn manifest_refuses_module_options_that_are_not_a_table() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"return { name = "safe-push", modules = { sdk = true } }"#,
+    );
+    let sandbox = Sandbox::new(scratch.path(), default_limits(), Capabilities::default())
+        .expect("fixture loads");
+
+    assert_eq!(
+        sandbox.manifest(),
+        Err(EngineError::InvalidResult(
+            "module options must be a table".into()
+        ))
+    );
+}
+
+#[test]
+fn manifest_refuses_a_module_that_is_not_named() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"return { name = "safe-push", modules = { "sdk" } }"#,
+    );
+    let sandbox = Sandbox::new(scratch.path(), default_limits(), Capabilities::default())
+        .expect("fixture loads");
+
+    assert_eq!(
+        sandbox.manifest(),
+        Err(EngineError::InvalidResult(
+            "modules must be keyed by name".into()
+        ))
+    );
+}
+
+#[test]
+fn manifest_limits_the_number_of_modules() {
+    let scratch = Scratch::new();
+    let entries: String = (0..=MAX_ENTRIES)
+        .map(|index| format!("m{index} = {{}},\n"))
+        .collect();
+    scratch.write(
+        "plugin.luau",
+        &format!("return {{\n    name = \"safe-push\",\n    modules = {{\n{entries}    }},\n}}\n"),
+    );
+    let sandbox = Sandbox::new(scratch.path(), default_limits(), Capabilities::default())
+        .expect("fixture loads");
+
+    assert_eq!(
+        sandbox.manifest(),
+        Err(EngineError::Limit(LimitCause::TooManyEntries {
+            limit: MAX_ENTRIES
         }))
     );
 }

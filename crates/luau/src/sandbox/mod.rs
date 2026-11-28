@@ -160,7 +160,7 @@ impl Sandbox {
         result
     }
 
-    /// Read the plugin's name, needs, and array of tool metadata as JSON.
+    /// Read the plugin's name, needs, modules, and array of tool metadata as JSON.
     ///
     /// # Errors
     ///
@@ -221,6 +221,7 @@ impl Sandbox {
         Ok(json!({
             "name": name,
             "needs": self.read_needs()?,
+            "modules": self.read_modules()?,
             "tools": self.read_tools()?,
         }))
     }
@@ -251,6 +252,36 @@ impl Sandbox {
             needs.push(need);
         }
         Ok(needs)
+    }
+
+    fn read_modules(&self) -> Result<Vec<String>, EngineError> {
+        let Some(value) = self.plugin.get::<Option<LuaValue>>("modules")? else {
+            return Ok(Vec::new());
+        };
+        let LuaValue::Table(table) = value else {
+            return Err(EngineError::InvalidResult("modules must be a table".into()));
+        };
+        let mut modules = Vec::new();
+        for pair in table.pairs::<LuaValue, LuaValue>() {
+            if modules.len() >= MAX_ENTRIES {
+                return Err(EngineError::Limit(LimitCause::TooManyEntries {
+                    limit: MAX_ENTRIES,
+                }));
+            }
+            let (key, options) = pair?;
+            let LuaValue::String(name) = key else {
+                return Err(EngineError::InvalidResult(
+                    "modules must be keyed by name".into(),
+                ));
+            };
+            if !matches!(options, LuaValue::Table(_)) {
+                return Err(EngineError::InvalidResult(
+                    "module options must be a table".into(),
+                ));
+            }
+            modules.push(name.to_str()?.to_string());
+        }
+        Ok(modules)
     }
 
     fn read_tools(&self) -> Result<Vec<Value>, EngineError> {

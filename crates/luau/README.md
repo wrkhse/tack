@@ -72,7 +72,7 @@ directly on `ctx`; another value appears as `ctx.host`. Verdict helpers
 and registered capabilities take precedence over host fields. A hook can
 use `ctx.rewrite(payload)` to replace the entire payload.
 
-The manifest contains the plugin's `name`, `needs`, and a `tools` array.
+The manifest contains the plugin's `name`, `needs`, `modules`, and a `tools` array.
 Tool entries carry their name and other non-function fields.
 
 ## Confinement and limits
