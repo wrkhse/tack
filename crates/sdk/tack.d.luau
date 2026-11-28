@@ -10,6 +10,11 @@ declare require: (path: string) -> any
 
 export type DenyResult = { deny: string }
 export type RewriteResult = { rewrite: any }
+export type AnnotateResult = { annotate: { [string]: any } }
+export type DropResult = { drop: true }
+export type AllowResult = { allow: true }
+export type HookResult = DenyResult | RewriteResult | AnnotateResult | DropResult | AllowResult | nil
+export type OnError = "deliver" | "deny"
 export type ToolBeforeResult = DenyResult | RewriteResult | nil
 
 -- Rust-backed helpers passed as the second hook and tool argument.
@@ -17,6 +22,8 @@ export type HookCtx = {
     deny: (reason: string) -> DenyResult,
     rewrite: (payload: any) -> RewriteResult,
     allow: () -> nil,
+    annotate: (fields: { [string]: any }) -> AnnotateResult,
+    drop: () -> DropResult,
 }
 
 -- The tack daemon adds this metadata for toolBefore hooks. The payload is
@@ -26,6 +33,19 @@ export type ToolBeforeCtx = HookCtx & {
     name: string,
     session_id: string?,
 }
+
+-- A hook field may be a function, one handler, or an array of handlers. The
+-- barn engine runs handlers in descending priority, within each handler's
+-- budget.
+export type HookHandler = {
+    priority: number?,
+    budgetMs: number?,
+    onError: OnError?,
+    run: (payload: any, ctx: HookCtx) -> HookResult?,
+}
+export type HookTable = { HookHandler } | HookHandler
+export type ToolBeforeFn = (payload: any, ctx: ToolBeforeCtx) -> ToolBeforeResult
+export type EventBeforeFn = (payload: any, ctx: HookCtx) -> HookResult
 
 export type Content = { kind: string, text: string }
 export type ToolResult = { content: { Content } }
@@ -41,6 +61,7 @@ export type ToolDef = {
 export type Plugin = {
     name: string,
     needs: { string }?,
-    toolBefore: ((payload: any, ctx: ToolBeforeCtx) -> ToolBeforeResult)?,
+    toolBefore: (ToolBeforeFn | HookTable)?,
+    eventBefore: (EventBeforeFn | HookTable)?,
     tools: { [string]: ToolDef }?,
 }

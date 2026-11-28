@@ -456,3 +456,64 @@ fn a_directory_at_the_sdk_declaration_path_is_a_named_error() {
     assert!(matches!(error, tack_cli::BuildError::Io(_)));
     assert!(error.to_string().contains("Is a directory"));
 }
+
+#[test]
+fn sdk_declarations_pin_hook_table_types() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+
+    build(&plugin, &out, BuildOptions::default()).expect("sdk plugin builds");
+
+    let declarations = std::fs::read_to_string(out.join("sdk").join("tack.d.luau"))
+        .expect("SDK declarations are readable");
+    assert_eq!(declarations, TACK_D_LUAU);
+
+    for name in [
+        "export type HookHandler",
+        "export type HookTable",
+        "export type OnError = \"deliver\" | \"deny\"",
+        "export type AnnotateResult",
+        "export type DropResult",
+        "export type AllowResult",
+        "export type HookResult",
+        "eventBefore:",
+        "annotate: (fields:",
+        "drop: () ->",
+    ] {
+        assert!(declarations.contains(name), "missing declaration: {name}");
+    }
+}
+
+#[test]
+fn a_table_valued_hook_fixture_still_builds() {
+    let scratch = Scratch::new();
+    let plugin = scratch.path().join("plugin");
+    std::fs::create_dir_all(&plugin).expect("plugin folder");
+    std::fs::write(
+        plugin.join("plugin.luau"),
+        r#"return {
+    name = "hook-table-plugin",
+    needs = { "sdk" },
+    toolBefore = {
+        {
+            priority = 10,
+            budgetMs = 3000,
+            onError = "deliver",
+            run = function(payload, ctx) return ctx.allow() end,
+        },
+    },
+}"#,
+    )
+    .expect("plugin manifest");
+    let out = scratch.path().join("dist");
+
+    build(&plugin, &out, BuildOptions::default()).expect("table-valued hook fixture builds");
+
+    let declarations = out.join("sdk").join("tack.d.luau");
+    assert!(declarations.exists());
+    assert_eq!(
+        std::fs::read_to_string(&declarations).expect("SDK declarations are readable"),
+        TACK_D_LUAU
+    );
+}
