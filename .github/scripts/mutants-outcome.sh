@@ -35,6 +35,12 @@ sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g' "$MUTANTS_LOG" |
   sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^(INFO|WARN|ERROR|DEBUG|TRACE)[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
   > "$normalized"
 
+# Either exact whole line marks a shard that had no mutants to test.
+zero_line_present() {
+  grep -Fxq 'No mutants to filter' "$normalized" \
+    || grep -Fxq 'Found 0 mutants to test' "$normalized"
+}
+
 # cargo-mutants --list prints one line per mutant. Blank lines and its own
 # no-mutants diagnostic carry no mutant.
 list_has_mutants() {
@@ -47,7 +53,7 @@ list_has_mutants() {
 }
 
 if [ "$MUTANTS_STATUS" -eq 0 ] \
-    && grep -Fxq 'No mutants to filter' "$normalized" \
+    && zero_line_present \
     && ! list_has_mutants; then
   mkdir -p -- "$(dirname -- "$OUTCOMES")"
   jq -n '{total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0}' > "$OUTCOMES"
@@ -59,8 +65,8 @@ if [ "$MUTANTS_STATUS" -eq 0 ] \
 fi
 
 if [ ! -f "$OUTCOMES" ]; then
-  if ! grep -Fxq 'No mutants to filter' "$normalized"; then
-    echo "::error::cargo mutants did not report 'No mutants to filter' and wrote no $OUTCOMES" >&2
+  if ! zero_line_present; then
+    echo "::error::cargo mutants did not report 'No mutants to filter' or 'Found 0 mutants to test' and wrote no $OUTCOMES" >&2
   else
     echo "::error::cargo mutants --list found mutants but wrote no $OUTCOMES" >&2
   fi
