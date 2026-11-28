@@ -92,6 +92,9 @@ impl<C: Clock, T: Transport> StallClient<C, T> {
 
     /// Call the stall once and return its reply when it fits the budget.
     ///
+    /// Control frames come from the stall over host.sock; only hook and tool
+    /// frames cross this seam, and no barn injection exists until barn#76.
+    ///
     /// # Errors
     ///
     /// Returns `Malformed` when the request's version is not `FRAMED_VERSION`,

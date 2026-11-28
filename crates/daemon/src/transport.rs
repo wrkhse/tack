@@ -619,6 +619,8 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 content: vec![],
             },
+            Request::Control { .. } => error_reply(ReplyError::UnsupportedHook, "control denied"),
+            _ => error_reply(ReplyError::UnsupportedHook, "unsupported request"),
         }
     }
 
@@ -1227,6 +1229,8 @@ mod tests {
         let task = tokio::spawn(server.serve(move |request| match request {
             Request::Tool { id, .. } => large(id),
             hook @ Request::Hook { .. } => allow_all(&hook),
+            control @ Request::Control { .. } => allow_all(&control),
+            _ => error_reply(ReplyError::UnsupportedHook, "unsupported request"),
         }));
 
         let full = wire::encode_line(&large(9)).unwrap();

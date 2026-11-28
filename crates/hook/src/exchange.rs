@@ -118,7 +118,23 @@ pub fn check(reply: &[u8], request: &Request) -> Result<(), Failure> {
     let (id, version, answers) = match &parsed {
         Reply::Hook { id, version, .. } => (*id, *version, matches!(request, Request::Hook { .. })),
         Reply::Tool { id, version, .. } => (*id, *version, matches!(request, Request::Tool { .. })),
+        // A control reply is outside the hook's closed set of verdicts.
+        // UnsupportedHook names that refusal; ProtocolVersion would blame a
+        // version that the check below has not reached yet.
+        Reply::Control { .. } => {
+            return Err(Failure::new(
+                ReplyError::UnsupportedHook,
+                "the daemon sent a control reply to a hook",
+            ));
+        }
         Reply::Error { id, version, .. } => (*id, *version, true),
+        // A future reply kind is refused the way a control reply is.
+        _ => {
+            return Err(Failure::new(
+                ReplyError::UnsupportedHook,
+                "unsupported reply kind",
+            ));
+        }
     };
 
     if version != PROTOCOL_VERSION {
@@ -198,6 +214,24 @@ mod tests {
             Err(Failure::new(
                 ReplyError::MalformedReply,
                 "the reply id 0 does not match the request id 7",
+            ))
+        );
+    }
+
+    #[test]
+    fn a_control_reply_to_a_hook_is_unsupported() {
+        let reply = wire::encode_line(&Reply::Control {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            result: serde_json::json!({ "denied": true }),
+        })
+        .unwrap();
+
+        assert_eq!(
+            check(&reply, &tool_request()),
+            Err(Failure::new(
+                ReplyError::UnsupportedHook,
+                "the daemon sent a control reply to a hook",
             ))
         );
     }

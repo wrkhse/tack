@@ -5,6 +5,9 @@
 //! expects. Neither contract is redefined here: this module is the only place
 //! the two meet.
 //!
+//! Control frames come from the stall over host.sock. No tack path dispatches
+//! them until barn#76.
+//!
 //! Trace context in _meta is data. It crosses the boundary unchanged and
 //! never grants a tool, a session or a verdict.
 
@@ -61,9 +64,9 @@ fn stall_meta(meta: &WireMeta) -> StallMeta {
 ///
 /// # Errors
 ///
-/// The mapping is total: both wire variants have a stall frame, so this
-/// returns `Ok` for every request. The `Result` keeps the shape of the reply
-/// mapping.
+/// Returns `UnsupportedOutcome` for a control request: the stall has no control
+/// frame yet. Hooks and tools always map to a stall frame, so the `Result`
+/// keeps the shape of the reply mapping.
 pub fn to_stall(request: &Request) -> Result<StallRequest, ConvertError> {
     match request {
         Request::Hook {
@@ -91,6 +94,9 @@ pub fn to_stall(request: &Request) -> Result<StallRequest, ConvertError> {
                 session_id: None,
             },
         }),
+        // Control frames come from the stall over host.sock; no tack path
+        // dispatches them until barn#76.
+        _ => Err(ConvertError::UnsupportedOutcome),
     }
 }
 
@@ -145,7 +151,8 @@ const fn reply_id(reply: &StallReply) -> u64 {
 /// # Errors
 ///
 /// Returns `UnsupportedOutcome` when the reply's id or kind does not answer the
-/// request.
+/// request, or when the request is a control frame: the stall has no control
+/// verdict to map back.
 pub fn from_stall(request: &Request, reply: StallReply) -> Result<Reply, ConvertError> {
     let id = reply_id(&reply);
 
@@ -167,6 +174,7 @@ pub fn from_stall(request: &Request, reply: StallReply) -> Result<Reply, Convert
                 text: content.text,
             }],
         }),
+        (Request::Control { .. }, _) => Err(ConvertError::UnsupportedOutcome),
         (_, StallReply::Error { message, .. }) => Ok(Reply::Error {
             id,
             version: PROTOCOL_VERSION,
@@ -261,7 +269,8 @@ fn stall_error_name(error: ReplyError) -> Result<String, ConvertError> {
 /// # Errors
 ///
 /// Returns `UnsupportedOutcome` when a tool reply does not carry exactly one
-/// piece of content, or its error kind has no wire name.
+/// piece of content, its error kind has no wire name, or the reply is a control
+/// frame.
 pub fn to_stall_reply(reply: &Reply) -> Result<StallReply, ConvertError> {
     match reply {
         Reply::Hook { id, outcome, .. } => Ok(StallReply::Hook {
@@ -288,6 +297,9 @@ pub fn to_stall_reply(reply: &Reply) -> Result<StallReply, ConvertError> {
             error: stall_error_name(*error)?,
             message: message.clone(),
         }),
+        // Control frames come from the stall over host.sock; no tack path
+        // dispatches them until barn#76.
+        _ => Err(ConvertError::UnsupportedOutcome),
     }
 }
 
@@ -615,6 +627,38 @@ mod tests {
                 StallReply::Hook {
                     id: 8,
                     outcome: StallOutcome::Allow,
+                }
+            ),
+            Err(ConvertError::UnsupportedOutcome)
+        );
+    }
+
+    #[test]
+    fn from_stall_refuses_a_reply_to_a_control_request() {
+        let request = Request::Control {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            call: "navigate".into(),
+            input: json!({}),
+        };
+
+        assert_eq!(
+            from_stall(
+                &request,
+                StallReply::Hook {
+                    id: 7,
+                    outcome: StallOutcome::Allow,
+                }
+            ),
+            Err(ConvertError::UnsupportedOutcome)
+        );
+        assert_eq!(
+            from_stall(
+                &request,
+                StallReply::Error {
+                    id: 7,
+                    error: "denied".to_owned(),
+                    message: "control has no verdict".to_owned(),
                 }
             ),
             Err(ConvertError::UnsupportedOutcome)
