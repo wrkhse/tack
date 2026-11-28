@@ -16,7 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tack_protocol = { path = "../protocol" }
-barn-stall = { git = "https://github.com/wrkhse/barn.git", rev = "a2a94ea4440c7dee0be2605903f644890cbc1953" }
+barn-stall = { git = "https://github.com/wrkhse/barn.git", rev = "52b736505ec82b1e058f1ab27bd7c280b6b8724b" }
 
 [lints]
 workspace = true
