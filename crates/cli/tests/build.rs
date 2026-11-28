@@ -3,7 +3,6 @@
 
 #![cfg(test)]
 
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -59,6 +58,18 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/safe-push")
 }
 
+/// A minimal plugin that opts in to the SDK module.
+fn sdk_plugin(scratch: &Scratch) -> PathBuf {
+    let plugin = scratch.path().join("plugin");
+    std::fs::create_dir_all(&plugin).expect("plugin folder");
+    std::fs::write(
+        plugin.join("plugin.luau"),
+        r#"return { name = "sdk-plugin", needs = { "sdk" } }"#,
+    )
+    .expect("plugin manifest");
+    plugin
+}
+
 fn manifest() -> PluginManifest {
     PluginManifest {
         name: "safe-push".into(),
@@ -69,14 +80,6 @@ fn manifest() -> PluginManifest {
             input: serde_json::json!({}),
         }],
     }
-}
-
-fn sdk_plugin(scratch: &Scratch, listed: bool) {
-    let needs = if listed { "\"sdk\"" } else { "" };
-    scratch.write(
-        "plugin.luau",
-        &format!("return {{ name = \"sdk-tool\", needs = {{ {needs} }}, tools = {{}} }}"),
-    );
 }
 
 fn reasons() -> Vec<&'static str> {
@@ -244,146 +247,152 @@ fn the_manifest_json_has_the_plugin_contract() {
 }
 
 #[test]
-fn a_listing_plugin_emits_the_strict_sdk_declarations() {
+fn sdk_declarations_are_absent_when_unlisted() {
     let scratch = Scratch::new();
-    sdk_plugin(&scratch, true);
     let out = scratch.path().join("dist");
 
-    build(scratch.path(), &out, BuildOptions::default()).expect("listed plugin builds");
+    build(&fixture(), &out, BuildOptions::default()).expect("fixture builds");
 
-    let declaration = out.join("sdk/tack.d.luau");
-    let emitted = std::fs::read_to_string(&declaration).expect("SDK declaration is readable");
-
-    assert_eq!(emitted, TACK_D_LUAU);
-    assert!(TACK_D_LUAU.starts_with("--!strict\n"));
-    assert_eq!(std::fs::read_dir(out.join("sdk")).unwrap().count(), 1);
+    assert!(!out.join("sdk").join("tack.d.luau").exists());
 }
 
 #[test]
-fn an_unlisted_plugin_emits_no_sdk_declarations() {
+fn sdk_declarations_are_emitted_when_listed() {
     let scratch = Scratch::new();
-    sdk_plugin(&scratch, false);
+    let plugin = scratch.path().join("plugin");
+    std::fs::create_dir_all(&plugin).expect("plugin folder");
+    std::fs::write(
+        plugin.join("plugin.luau"),
+        r#"return { name = "sdk-plugin", needs = { "sdk" } }"#,
+    )
+    .expect("plugin manifest");
     let out = scratch.path().join("dist");
 
-    build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
+    build(&plugin, &out, BuildOptions::default()).expect("plugin builds");
 
-    assert!(!out.join("sdk").exists());
-    assert!(out.join("opencode/index.js").exists());
+    let declarations = std::fs::read_to_string(out.join("sdk").join("tack.d.luau"))
+        .expect("SDK declarations are readable");
+    assert_eq!(declarations, TACK_D_LUAU);
+    assert!(declarations.starts_with("--!strict"));
+    assert!(declarations.contains("export type Plugin"));
 }
 
 #[test]
-fn a_later_unlisted_build_removes_stale_sdk_declarations() {
+fn an_unknown_need_still_fails() {
     let scratch = Scratch::new();
-    sdk_plugin(&scratch, true);
-    let out = scratch.path().join("dist");
-    let declaration = out.join("sdk/tack.d.luau");
-
-    build(scratch.path(), &out, BuildOptions::default()).expect("listed plugin builds");
-    assert!(declaration.exists());
-
-    sdk_plugin(&scratch, false);
-    build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
-
-    assert!(!declaration.exists());
-    assert!(!out.join("sdk").exists());
-    assert!(out.join("opencode/index.js").exists());
-}
-
-#[test]
-fn an_unlisted_build_keeps_unrelated_files_in_the_sdk_folder() {
-    let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    std::fs::create_dir_all(out.join("sdk")).expect("sdk folder");
-    std::fs::write(out.join("sdk/tack.d.luau"), "stale").expect("stale declaration");
-    std::fs::write(out.join("sdk/keep.txt"), "mine").expect("unrelated file");
-    sdk_plugin(&scratch, false);
-    build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
-    assert!(!out.join("sdk/tack.d.luau").exists());
-    assert_eq!(
-        std::fs::read_to_string(out.join("sdk/keep.txt")).unwrap(),
-        "mine"
+    scratch.write(
+        "plugin.luau",
+        r#"return { name = "unknown-plugin", needs = { "not-a-module" } }"#,
     );
-    assert!(out.join("sdk").is_dir());
-    assert!(out.join("opencode/index.js").exists());
-}
-
-#[test]
-fn an_sdk_output_path_that_is_a_file_fails() {
-    let scratch = Scratch::new();
     let out = scratch.path().join("dist");
-    std::fs::create_dir_all(&out).expect("output folder");
-    std::fs::write(out.join("sdk"), "not a folder").expect("file at the SDK path");
-    sdk_plugin(&scratch, true);
 
     let result = build(scratch.path(), &out, BuildOptions::default());
 
-    let Err(tack_cli::BuildError::Sdk(message)) = result else {
-        panic!("a conflicting SDK folder is refused by name");
-    };
-    assert_eq!(message, "the SDK output path is not a directory");
-    assert!(!out.join("opencode").exists());
-}
-
-#[test]
-fn a_directory_at_the_declaration_path_fails_the_listed_build() {
-    let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    std::fs::create_dir_all(out.join("sdk/tack.d.luau"))
-        .expect("directory at the declaration path");
-    sdk_plugin(&scratch, true);
-
-    let result = build(scratch.path(), &out, BuildOptions::default());
-
-    let Err(tack_cli::BuildError::Sdk(message)) = result else {
-        panic!("a non-regular declaration is refused by name");
-    };
-    assert_eq!(message, "the SDK declaration is not a regular file");
-    assert!(!out.join("opencode").exists());
-}
-
-#[test]
-fn a_directory_at_the_declaration_path_fails_the_unlisted_build() {
-    let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    std::fs::create_dir_all(out.join("sdk/tack.d.luau"))
-        .expect("directory at the declaration path");
-    sdk_plugin(&scratch, false);
-
-    let result = build(scratch.path(), &out, BuildOptions::default());
-
-    let Err(tack_cli::BuildError::Io(error)) = result else {
-        panic!("an I/O error is reported");
-    };
     assert!(matches!(
-        error.kind(),
-        ErrorKind::IsADirectory | ErrorKind::InvalidInput
+        result,
+        Err(tack_cli::BuildError::NeedMissing(name)) if name == "not-a-module"
     ));
-    assert!(!out.join("opencode").exists());
 }
 
 #[test]
-fn every_build_target_emits_the_sdk_declarations() {
+fn an_unlisted_build_removes_stale_sdk_output() {
     let scratch = Scratch::new();
-    sdk_plugin(&scratch, true);
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let declarations = out.join("sdk").join("tack.d.luau");
 
-    let opencode = scratch.path().join("out-opencode");
-    build(scratch.path(), &opencode, BuildOptions::default()).expect("OpenCode build");
+    build(&plugin, &out, BuildOptions::default()).expect("sdk plugin builds");
+    assert!(declarations.exists());
 
-    let claude = scratch.path().join("out-claude");
-    build_claude(scratch.path(), &claude).expect("Claude build");
+    build(&fixture(), &out, BuildOptions::default()).expect("fixture builds");
+    assert!(!declarations.exists());
+}
 
-    let pi = scratch.path().join("out-pi");
-    build_pi(scratch.path(), &pi).expect("Pi build");
+#[test]
+fn build_claude_removes_stale_sdk_output_when_unlisted() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let declarations = out.join("sdk").join("tack.d.luau");
 
-    let codex = scratch.path().join("out-codex");
-    build_codex(scratch.path(), &codex, scratch.path()).expect("Codex build");
+    build_claude(&plugin, &out).expect("sdk plugin builds");
+    assert!(declarations.exists());
 
-    for out in [&opencode, &claude, &pi, &codex] {
-        assert_eq!(
-            std::fs::read_to_string(out.join("sdk/tack.d.luau")).unwrap(),
-            TACK_D_LUAU
-        );
-    }
+    build_claude(&fixture(), &out).expect("fixture builds");
+    assert!(!declarations.exists());
+}
+
+#[test]
+fn build_pi_removes_stale_sdk_output_when_unlisted() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let declarations = out.join("sdk").join("tack.d.luau");
+
+    build_pi(&plugin, &out).expect("sdk plugin builds");
+    assert!(declarations.exists());
+
+    build_pi(&fixture(), &out).expect("fixture builds");
+    assert!(!declarations.exists());
+}
+
+#[test]
+fn build_codex_removes_stale_sdk_output_when_unlisted() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let home = scratch.path().join("home");
+    std::fs::create_dir_all(&home).expect("codex home folder");
+    let declarations = out.join("sdk").join("tack.d.luau");
+
+    build_codex(&plugin, &out, &home).expect("sdk plugin builds");
+    assert!(declarations.exists());
+
+    build_codex(&fixture(), &out, &home).expect("fixture builds");
+    assert!(!declarations.exists());
+}
+
+#[test]
+fn build_claude_emits_sdk_declarations() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let declarations = out.join("sdk").join("tack.d.luau");
+
+    let written = build_claude(&plugin, &out).expect("plugin builds");
+
+    let contents = std::fs::read_to_string(&declarations).expect("SDK declarations are readable");
+    assert_eq!(contents, TACK_D_LUAU);
+    assert!(written.contains(&declarations));
+}
+
+#[test]
+fn build_pi_emits_sdk_declarations() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let declarations = out.join("sdk").join("tack.d.luau");
+
+    build_pi(&plugin, &out).expect("plugin builds");
+
+    let contents = std::fs::read_to_string(&declarations).expect("SDK declarations are readable");
+    assert_eq!(contents, TACK_D_LUAU);
+}
+
+#[test]
+fn build_codex_emits_sdk_declarations() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let home = scratch.path().join("home");
+    std::fs::create_dir_all(&home).expect("codex home folder");
+    let declarations = out.join("sdk").join("tack.d.luau");
+
+    let written = build_codex(&plugin, &out, &home).expect("plugin builds");
+
+    let contents = std::fs::read_to_string(&declarations).expect("SDK declarations are readable");
+    assert_eq!(contents, TACK_D_LUAU);
+    assert!(written.contains(&declarations));
 }
 
 #[cfg(unix)]
@@ -392,132 +401,58 @@ fn a_symlinked_sdk_folder_is_refused() {
     use std::os::unix::fs::symlink;
 
     let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    let target = scratch.path().join("target");
-    std::fs::create_dir_all(&target).expect("target folder");
-    std::fs::create_dir_all(&out).expect("output folder");
-    symlink(&target, out.join("sdk")).expect("sdk symlink");
-    sdk_plugin(&scratch, true);
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("out");
+    std::fs::create_dir_all(&out).expect("out folder");
+    let elsewhere = scratch.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere folder");
+    symlink(&elsewhere, out.join("sdk")).expect("sdk symlink");
 
-    let result = build(scratch.path(), &out, BuildOptions::default());
+    let result = build(&plugin, &out, BuildOptions::default());
 
-    let Err(tack_cli::BuildError::Sdk(message)) = result else {
-        panic!("a symlinked SDK folder is refused by name");
-    };
-    assert_eq!(message, "the SDK output path is a symlink");
-    assert!(!out.join("opencode").exists());
+    assert!(matches!(result, Err(tack_cli::BuildError::Io(_))));
+    assert!(!elsewhere.join("tack.d.luau").exists());
 }
 
 #[cfg(unix)]
 #[test]
-fn a_symlinked_sdk_declaration_is_refused() {
+fn a_symlinked_sdk_declaration_is_replaced_not_followed() {
     use std::os::unix::fs::symlink;
 
     let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    let target = scratch.path().join("target.luau");
-    std::fs::write(&target, "elsewhere").expect("symlink target");
-    std::fs::create_dir_all(out.join("sdk")).expect("sdk folder");
-    symlink(&target, out.join("sdk/tack.d.luau")).expect("declaration symlink");
-    sdk_plugin(&scratch, true);
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("out");
+    let sdk = out.join("sdk");
+    std::fs::create_dir_all(&sdk).expect("sdk folder");
+    let target = scratch.path().join("target");
+    std::fs::write(&target, "sentinel").expect("target file");
+    symlink(&target, sdk.join("tack.d.luau")).expect("declaration symlink");
 
-    let result = build(scratch.path(), &out, BuildOptions::default());
+    build(&plugin, &out, BuildOptions::default()).expect("plugin builds");
 
-    let Err(tack_cli::BuildError::Sdk(message)) = result else {
-        panic!("a symlinked declaration is refused by name");
-    };
-    assert_eq!(message, "the SDK declaration is a symlink");
-    assert!(!out.join("opencode").exists());
-}
-
-#[test]
-fn an_unlisted_build_reports_a_file_at_the_sdk_output_path() {
-    let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    std::fs::create_dir_all(&out).expect("output folder");
-    std::fs::write(out.join("sdk"), "not a folder").expect("file at the SDK path");
-    sdk_plugin(&scratch, false);
-
-    let result = build(scratch.path(), &out, BuildOptions::default());
-
-    let Err(tack_cli::BuildError::Io(error)) = result else {
-        panic!("an I/O error is reported");
-    };
-    assert!(matches!(
-        error.kind(),
-        ErrorKind::NotADirectory | ErrorKind::InvalidInput
-    ));
-    assert!(!out.join("opencode").exists());
-}
-
-#[test]
-fn a_rejected_codex_home_leaves_no_sdk_output() {
-    let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    let home = scratch.path().join("home");
-    std::fs::create_dir_all(&home).expect("home");
-    std::fs::write(home.join("config.toml"), "hooks = {}\n").expect("config");
-    std::fs::write(home.join("hooks.json"), "{}\n").expect("hooks");
-    sdk_plugin(&scratch, true);
-
-    let result = build_codex(scratch.path(), &out, &home);
-
-    let Err(tack_cli::BuildError::Codex(_)) = result else {
-        panic!("a Codex home tack cannot merge into is refused");
-    };
-    assert!(!out.exists());
-    assert!(!out.join("sdk/tack.d.luau").exists());
-}
-
-#[test]
-fn a_second_listed_build_overwrites_the_declaration() {
-    let scratch = Scratch::new();
-    sdk_plugin(&scratch, true);
-    let out = scratch.path().join("dist");
-    let declaration = out.join("sdk/tack.d.luau");
-
-    build(scratch.path(), &out, BuildOptions::default()).expect("first build");
-    std::fs::write(&declaration, "stale").expect("stale declaration");
-    build(scratch.path(), &out, BuildOptions::default()).expect("second build");
-
-    assert_eq!(std::fs::read_to_string(&declaration).unwrap(), TACK_D_LUAU);
-}
-
-#[test]
-fn an_untouched_empty_sdk_folder_is_preserved_by_an_unlisted_build() {
-    let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    std::fs::create_dir_all(out.join("sdk")).expect("empty sdk folder");
-    sdk_plugin(&scratch, false);
-
-    build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
-
-    assert!(out.join("sdk").is_dir());
-    assert!(!out.join("sdk/tack.d.luau").exists());
-    assert!(out.join("opencode/index.js").exists());
+    let declarations = sdk.join("tack.d.luau");
+    let meta = std::fs::symlink_metadata(&declarations).expect("declaration metadata");
+    assert!(meta.file_type().is_file());
+    assert_eq!(
+        std::fs::read_to_string(&declarations).expect("declarations are readable"),
+        TACK_D_LUAU
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("target is readable"),
+        "sentinel"
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn an_unlisted_build_refuses_a_symlinked_sdk_folder_without_deleting_the_target() {
-    use std::os::unix::fs::symlink;
-
+fn a_directory_at_the_sdk_declaration_path_is_a_named_error() {
     let scratch = Scratch::new();
-    let out = scratch.path().join("dist");
-    let target = scratch.path().join("target");
-    std::fs::create_dir_all(&target).expect("target folder");
-    let external = target.join("tack.d.luau");
-    std::fs::write(&external, "do not delete").expect("external declaration");
-    std::fs::create_dir_all(&out).expect("output folder");
-    symlink(&target, out.join("sdk")).expect("sdk symlink");
-    sdk_plugin(&scratch, false);
+    let out = scratch.path().join("out");
+    let declarations = out.join("sdk").join("tack.d.luau");
+    std::fs::create_dir_all(&declarations).expect("declaration directory");
 
-    let result = build(scratch.path(), &out, BuildOptions::default());
+    let error = build(&fixture(), &out, BuildOptions::default()).expect_err("directory is refused");
 
-    let Err(tack_cli::BuildError::Sdk(message)) = result else {
-        panic!("a symlinked SDK folder is refused by name");
-    };
-    assert_eq!(message, "the SDK output path is a symlink");
-    assert_eq!(std::fs::read_to_string(&external).unwrap(), "do not delete");
-    assert!(!out.join("opencode").exists());
+    assert!(matches!(error, tack_cli::BuildError::Io(_)));
+    assert!(error.to_string().contains("Is a directory"));
 }
