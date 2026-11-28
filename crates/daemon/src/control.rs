@@ -110,14 +110,14 @@ impl ControlBroker {
             return error_line(fallback_id, ERR_CONTROL_FRAME);
         }
 
-        let (id, version, call, input) = match serde_json::from_slice::<Request>(line) {
-            Ok(Request::Control {
-                id,
-                version,
-                call,
-                input,
-            }) => (id, version, call, input),
-            _ => return error_line(fallback_id, ERR_MALFORMED),
+        let Ok(Request::Control {
+            id,
+            version,
+            call,
+            input,
+        }) = serde_json::from_slice::<Request>(line)
+        else {
+            return error_line(fallback_id, ERR_MALFORMED);
         };
 
         if version != PROTOCOL_VERSION {
@@ -221,11 +221,11 @@ fn harness_exchange(
 
 impl ControlBrokerTrait for ControlBroker {
     fn try_handle(&self, line: &[u8], deadline: Instant) -> Option<Vec<u8>> {
-        ControlBroker::try_handle(self, line, deadline)
+        Self::try_handle(self, line, deadline)
     }
 
     fn is_control(&self, line: &[u8]) -> bool {
-        ControlBroker::is_control(self, line)
+        Self::is_control(self, line)
     }
 }
 
