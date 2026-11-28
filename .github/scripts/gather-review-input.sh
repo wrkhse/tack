@@ -8,6 +8,9 @@ OUT="${OUT:-review-input}"
 GH="${GH:-gh}"
 MAX_BYTES="${MAX_BYTES:-2000000}"
 MAX_COMMITS="${MAX_COMMITS:-100}"
+GREP="${GREP:-grep}"
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+config="${GATHER_CONFIG:-$script_dir/../review-config.json}"
 
 if [[ ! "$MAX_BYTES" =~ ^[0-9]{1,18}$ || ! "$MAX_COMMITS" =~ ^[0-9]{1,18}$ ]]; then
   echo 'MAX_BYTES and MAX_COMMITS must be nonnegative integers of at most 18 digits.' >&2
@@ -107,6 +110,194 @@ for f in AGENTS.md CONTRIBUTING.md; do
 done
 
 cat -- "$PR_JSON" | write_capped "$OUT/pr.json" "$MAX_BYTES" "$OUT/pr.json"
+
+# A docs-only PR gets an advisory verdict. Classification uses the complete
+# file list from the GitHub API and the expected count in the CHANGED_FILES file:
+# gh pr view's files array stops at 100 entries, while the API count covers
+# them all. A renamed file must pass on both its old and new path. Anything
+# missing, unreadable or inconsistent fails toward blocking.
+docs_only=false
+changed=""
+if [ -n "${CHANGED_FILES-}" ] && [ -f "$CHANGED_FILES" ]; then
+  changed=$(cat -- "$CHANGED_FILES" | tr -d '[:space:]') || changed=""
+fi
+config_ok=false
+if [ -r "$config" ] &&
+   jq -e 'has("governance_names") and has("governance_paths") and
+          has("non_docs_globs") and has("include_roots")' \
+     "$config" > /dev/null 2>&1; then
+  config_ok=true
+else
+  printf 'Review config %s is missing or invalid; reviewing as code.\n' "$config" >> "$notes"
+fi
+if [ "$config_ok" = true ] && [[ "$changed" =~ ^[0-9]+$ ]] &&
+   api_files=$("$GH" api --paginate "repos/$REPO/pulls/${PR-}/files" 2>/dev/null); then
+  docs_only=$(printf '%s' "$api_files" | jq -rs \
+    --slurpfile cfg "$config" --argjson changed "$changed" '
+    def image:
+      endswith(".png") or endswith(".jpg") or endswith(".gif");
+
+    def allowed:
+      ascii_downcase as $p
+      | ($p | startswith(".github/") | not)
+        and (($p | endswith(".md"))
+          or ((($p | startswith("docs/")) or ($p | startswith("site/")))
+              and ($p | image)));
+
+    # Governance names and paths come from review-config.json. Matching is
+    # case-insensitive at any depth on the final path segment, on both sides
+    # of a rename. Configured non-docs globs are never docs-only either.
+    def governance($c):
+      ascii_downcase as $p
+      | ($p | split("/") | last) as $last
+      | any($c.governance_names[]; . as $n | ($n | ascii_downcase) == $last)
+        or any($c.governance_paths[]; . as $g | ($g | ascii_downcase) == $p)
+        or any($c.non_docs_globs[]; . as $g
+            | ($g | ascii_downcase | split("*")[0]) as $prefix
+            | ($p | startswith($prefix)));
+
+    if (length == 0 or any(.[]; type != "array")) then
+      false
+    else
+      add as $files
+      | if ($files | length) == 0
+           or ($changed != ($files | length)) then
+          false
+        else
+          ($files | all(
+            (.filename? // "") as $filename
+            | (.previous_filename? // "") as $previous
+            | ($filename | type == "string" and allowed and (governance($cfg[0]) | not))
+              and (if (.status? // "") == "renamed" or (.previous_filename? != null) then
+                     ($previous | type == "string" and allowed and (governance($cfg[0]) | not))
+                   else true end)
+          ))
+        end
+    end
+  ') || docs_only=false
+fi
+# A Markdown file compiled into Rust through include_str! is code, not docs.
+# Only Rust sources are scanned, with a bounded number of matches; each include
+# is resolved against the directory of its .rs file. A missing rg fails closed.
+normalize_path() {
+  local raw="$1" part
+  local -a parts=() out=()
+  IFS='/' read -r -a parts <<< "$raw"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) continue ;;
+      ..) if [ "${#out[@]}" -gt 0 ]; then
+             unset "out[${#out[@]}-1]"
+             out=("${out[@]}")
+           fi ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  (IFS=/; printf '%s' "${out[*]}")
+}
+
+find_manifest() {
+  local dir="$1"
+  while :; do
+    if [ -f "$dir/Cargo.toml" ]; then
+      printf '%s\n' "$dir/Cargo.toml"
+      return 0
+    fi
+    if [ "$dir" = . ]; then break; fi
+    dir=$(dirname -- "$dir")
+    [ -n "$dir" ] || dir=.
+  done
+  return 1
+}
+
+if [ "$docs_only" = true ]; then
+  if ! command -v "$GREP" > /dev/null 2>&1; then
+    printf '%s is unavailable; cannot check include_str! references; reviewing as code.\n' "$GREP" >> "$notes"
+    docs_only=false
+  else
+    md_paths=$(printf '%s' "$api_files" | jq -rs '
+      [ .[].[]? | ((.filename? // empty), (.previous_filename? // empty))
+        | select(type == "string" and test("\\.md$"; "i")) ] | unique | .[]' 2> /dev/null || true)
+    mapfile -t roots < <(jq -r '.include_roots[]?' "$config" 2> /dev/null)
+    [ "${#roots[@]}" -gt 0 ] || roots=(.)
+    # Flatten each Rust file so a path split across lines still matches, and
+    # parse every include separately. A truncated or unparseable scan fails closed.
+    scan="$OUT/include-scan.txt"
+    raw_list="$OUT/include-raw.txt"
+    : > "$scan"
+    : > "$raw_list"
+    grep_status=0
+    "$GREP" -rnE --include='*.rs' 'include_str!' "${roots[@]}" \
+      > "$raw_list" 2> "$OUT/include-grep.err" || grep_status=$?
+    if [ "$grep_status" -gt 1 ]; then
+      docs_only=false
+      printf 'include_str! scan failed (status %s); reviewing as code.\n' "$grep_status" >> "$notes"
+    else
+      file_count=$(sed 's/:.*//' "$raw_list" | sort -u | grep -c . || true)
+      raw_count=$("$GREP" -o 'include_str!' "$raw_list" 2> /dev/null | wc -l || true)
+      if [ "$file_count" -gt 100 ]; then
+        docs_only=false
+        printf 'include_str! scan covered too many files (%s); reviewing as code.\n' "$file_count" >> "$notes"
+      else
+        parse_status=0
+        while IFS= read -r file; do
+          [ -n "$file" ] || continue
+          flat=$(tr '\n' ' ' < "$file")
+          printf '%s' "$flat" | "$GREP" -oE \
+            'include_str!\([[:space:]]*"[^"]*"|include_str!\(concat!\([[:space:]]*env!\([[:space:]]*"CARGO_MANIFEST_DIR"[[:space:]]*\)[[:space:]]*,[[:space:]]*"[^"]*"' \
+            | sed "s|^|$file:|" >> "$scan" 2> /dev/null || parse_status=$?
+        done < <(sed 's/:.*//' "$raw_list" | sort -u)
+        if [ "$parse_status" -gt 1 ]; then
+          docs_only=false
+          printf 'include_str! scan failed (status %s); reviewing as code.\n' "$parse_status" >> "$notes"
+        else
+          parsed_count=$(grep -c . "$scan" || true)
+          if [ "$raw_count" -gt "$parsed_count" ] || [ "$parsed_count" -gt 200 ]; then
+            docs_only=false
+            printf 'include_str! scan was truncated or unparseable (%s of %s includes); reviewing as code.\n' \
+              "$parsed_count" "$raw_count" >> "$notes"
+          fi
+        fi
+      fi
+    fi
+
+    if [ "$docs_only" = true ]; then
+      while IFS= read -r md; do
+        [ -n "$md" ] || continue
+        target=$(normalize_path "$md")
+        while IFS= read -r hit; do
+          [ -n "$hit" ] || continue
+          file=${hit%%:*}
+          expr=${hit#*:}
+          inc=$(printf '%s' "$expr" | grep -o '"[^"]*"' | tail -n 1 | tr -d '"')
+          [ -n "$inc" ] || continue
+          dir=${file%/*}
+          if [ "$dir" = "$file" ]; then dir='.'; fi
+          if printf '%s' "$expr" | grep -Fq 'CARGO_MANIFEST_DIR'; then
+            manifest=$(find_manifest "$dir" || true)
+            if [ -z "$manifest" ]; then
+              docs_only=false
+              printf 'include_str! with CARGO_MANIFEST_DIR could not be resolved; reviewing as code.\n' >> "$notes"
+              break
+            fi
+            inc=${inc#/}
+            resolved=$(normalize_path "$(dirname -- "$manifest")/$inc")
+          else
+            resolved=$(normalize_path "$dir/$inc")
+          fi
+          if [ "$resolved" = "$target" ]; then
+            docs_only=false
+            printf 'Markdown %s is included by include_str! in Rust; reviewing as code.\n' "$md" >> "$notes"
+            break
+          fi
+        done < "$scan"
+        if [ "$docs_only" = false ]; then break; fi
+      done <<< "$md_paths"
+    fi
+  fi
+fi
+
+printf '%s\n' "$docs_only" > "$OUT/docs-only.txt"
 
 # The capped copy is for the reviewer and may no longer be valid JSON.
 issue=$(jq -r --arg repo "$REPO" '

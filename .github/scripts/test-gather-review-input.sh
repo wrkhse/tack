@@ -33,6 +33,11 @@ cat > "$tmp/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1-}" = api && "${2-}" = --paginate && "${3-}" = "repos/o/r/pulls/1/files" ]]; then
+  cat -- "$API_FILES_FIXTURE"
+  exit 0
+fi
+
 if [[ "$#" -lt 3 || "$1" != issue || "$2" != view ]]; then
   echo 'unexpected gh command' >&2
   exit 1
@@ -122,3 +127,216 @@ file fixture.rs
 - fixture.rs:1: #[allow(dead_code)]" ]
 
 printf 'ok: fixed-later\n'
+
+# Gather-level fixtures for the docs-only classifier. The pr.json stub plays
+# the workflow's `gh pr view --json title,body,files` step and the changed-files
+# file plays its `gh api ... --jq .changed_files` step; the gh stub's api branch
+# answers `gh api --paginate repos/o/r/pulls/1/files` with the complete file
+# list read from $API_FILES_FIXTURE.
+cat > "$tmp/gh-pr-files" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -lt 2 || "$1" != pr || "$2" != view ]]; then
+  echo 'unexpected gh command' >&2
+  exit 1
+fi
+
+cat -- "$PR_FIXTURE"
+SH
+chmod +x "$tmp/gh-pr-files"
+
+run_docs_case() {
+  local name="$1" fixture="$2" api_fixture="$3" changed="$4" expected="$5"
+  local out="$tmp/docs-$name"
+
+  printf '%s\n' "$changed" > "$tmp/changed-files.txt"
+  PR_FIXTURE="$fixture" "$tmp/gh-pr-files" pr view 1 -R o/r \
+    --json title,body,files > "$tmp/pr.json"
+  BASE="$base" HEAD="$head" PR_JSON="$tmp/pr.json" REPO=o/r PR=1 \
+    CHANGED_FILES="$tmp/changed-files.txt" \
+    API_FILES_FIXTURE="$api_fixture" GH="$tmp/gh" \
+    OUT="$out" MAX_BYTES=1000 MAX_COMMITS=100 "$gather"
+
+  printf 'docs-only %s: %s\n' "$name" "$(cat -- "$out/docs-only.txt")" >&2
+  printf 'NOTES.txt for %s:\n%s\n' "$name" "$(cat -- "$out/NOTES.txt")" >&2
+  [ "$(cat -- "$out/docs-only.txt")" = "$expected" ]
+  printf 'ok: docs-only %s\n' "$name"
+}
+
+# A plain docs-only PR classifies as advisory (true).
+cat > "$tmp/plain-docs.json" <<'JSON'
+{"title":"Plain docs","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/plain-docs-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case plain-docs "$tmp/plain-docs.json" "$tmp/plain-docs-files.json" 1 true
+
+cat > "$tmp/docs.json" <<'JSON'
+{"title":"Docs","body":"","files":[{"path":"README.md"},{"path":"site/img/logo.png"}]}
+JSON
+# From wrkhse/workhorse#49 (docs-only).
+cat > "$tmp/docs-files.json" <<'JSON'
+[{"filename":"ARCHITECTURE.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case docs "$tmp/docs.json" "$tmp/docs-files.json" 1 true
+
+# Shaped from the real REST response shape: AGENTS.md is governance, so it
+# must not be classified as docs-only.
+cat > "$tmp/governance.json" <<'JSON'
+{"title":"Governance","body":"","files":[{"path":"AGENTS.md"}]}
+JSON
+cat > "$tmp/governance-files.json" <<'JSON'
+[{"filename":"AGENTS.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case governance "$tmp/governance.json" "$tmp/governance-files.json" 1 false
+
+cat > "$tmp/mdx.json" <<'JSON'
+{"title":"Docs","body":"","files":[{"path":"site/x.mdx"}]}
+JSON
+cat > "$tmp/mdx-files.json" <<'JSON'
+[{"filename":"site/x.mdx","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case mdx "$tmp/mdx.json" "$tmp/mdx-files.json" 1 false
+
+cat > "$tmp/mixed.json" <<'JSON'
+{"title":"Mixed","body":"","files":[{"path":"README.md"},{"path":"src/main.rs"}]}
+JSON
+# From wrkhse/workhorse#75 (mixed docs and code).
+cat > "$tmp/mixed-files.json" <<'JSON'
+[{"filename":"PHILOSOPHY.md","previous_filename":null,"status":"modified"},{"filename":"hub.config.ts","previous_filename":null,"status":"modified"},{"filename":"site/scripts/roadmap.test.ts","previous_filename":null,"status":"modified"},{"filename":"site/src/how-it-fits.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case mixed "$tmp/mixed.json" "$tmp/mixed-files.json" 4 false
+
+# Real REST response from wrkhse/tack#48 (a docs-to-docs rename).
+cat > "$tmp/rename-real.json" <<'JSON'
+{"title":"Rename","body":"","files":[{"path":"crates/luau/src/sandbox/README.md"}]}
+JSON
+cat > "$tmp/rename-real-files.json" <<'JSON'
+[{"filename":"crates/luau/src/sandbox/README.md","previous_filename":"crates/runtime/src/sandbox/README.md","status":"renamed"}]
+JSON
+run_docs_case rename-real "$tmp/rename-real.json" "$tmp/rename-real-files.json" 1 true
+
+# Derived from the tack#48 REST shape with a code old path (src/x.rs ->
+# README.md). No real code-to-docs rename exists in the family; this case
+# exercises the old-path guard and must not be docs-only.
+cat > "$tmp/rename-code-old.json" <<'JSON'
+{"title":"Rename","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/rename-code-old-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":"src/x.rs","status":"renamed"}]
+JSON
+run_docs_case rename-code-old "$tmp/rename-code-old.json" "$tmp/rename-code-old-files.json" 1 false
+
+# An API list shorter than CHANGED_FILES cannot be trusted.
+cat > "$tmp/truncated.json" <<'JSON'
+{"title":"Truncated","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/truncated-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case truncated "$tmp/truncated.json" "$tmp/truncated-files.json" 2 false
+
+# An unreadable CHANGED_FILES must fail closed, never claim docs-only.
+cat > "$tmp/unreadable.json" <<'JSON'
+{"title":"Unreadable","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/unreadable-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+out="$tmp/docs-unreadable"
+PR_FIXTURE="$tmp/unreadable.json" "$tmp/gh-pr-files" pr view 1 -R o/r \
+  --json title,body,files > "$tmp/pr.json"
+missing_changed="$tmp/no-such-changed-files.txt"
+[ ! -e "$missing_changed" ]
+BASE="$base" HEAD="$head" PR_JSON="$tmp/pr.json" REPO=o/r PR=1 \
+  CHANGED_FILES="$missing_changed" \
+  API_FILES_FIXTURE="$tmp/unreadable-files.json" GH="$tmp/gh" \
+  OUT="$out" MAX_BYTES=1000 MAX_COMMITS=100 "$gather"
+
+[ "$(cat -- "$out/docs-only.txt")" = "false" ]
+printf 'ok: docs-only unreadable\n'
+
+# Instruction files are governance at any depth, whatever their case.
+cat > "$tmp/nested-governance.json" <<'JSON'
+{"title":"Nested governance","body":"","files":[{"path":"docs/CLAUDE.md"},{"path":"crates/x/AGENTS.md"},{"path":"site/CONTRIBUTING.md"}]}
+JSON
+cat > "$tmp/nested-governance-files.json" <<'JSON'
+[{"filename":"docs/CLAUDE.md","previous_filename":null,"status":"modified"},{"filename":"crates/x/AGENTS.md","previous_filename":null,"status":"modified"},{"filename":"site/CONTRIBUTING.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case nested-governance "$tmp/nested-governance.json" "$tmp/nested-governance-files.json" 3 false
+
+# Agent and assistant configuration directories are never docs-only.
+cat > "$tmp/agent-dirs.json" <<'JSON'
+{"title":"Agent dirs","body":"","files":[{"path":".claude/notes.md"},{"path":".agents/notes.md"}]}
+JSON
+cat > "$tmp/agent-dirs-files.json" <<'JSON'
+[{"filename":".claude/notes.md","previous_filename":null,"status":"modified"},{"filename":".agents/notes.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case agent-dirs "$tmp/agent-dirs.json" "$tmp/agent-dirs-files.json" 2 false
+
+# A crate-root doc include resolves ../README.md from a nested .rs file.
+cat > "$tmp/include-str.json" <<'JSON'
+{"title":"Included doc","body":"","files":[{"path":"crates/x/README.md"}]}
+JSON
+cat > "$tmp/include-str-files.json" <<'JSON'
+[{"filename":"crates/x/README.md","previous_filename":null,"status":"modified"}]
+JSON
+mkdir -p "$tmp/crates/x/src"
+printf '%s\n' '#![doc = include_str!("../README.md")];' > "$tmp/crates/x/src/lib.rs"
+run_docs_case include-str "$tmp/include-str.json" "$tmp/include-str-files.json" 1 false
+grep -Fq 'Markdown crates/x/README.md is included by include_str! in Rust; reviewing as code.' \
+  "$tmp/docs-include-str/NOTES.txt"
+printf 'ok: docs-only include-str note\n'
+
+# Without grep the include check cannot run, so classification must fail closed.
+cat > "$tmp/no-grep.json" <<'JSON'
+{"title":"No grep","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/no-grep-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+out="$tmp/docs-no-grep"
+printf '%s\n' 1 > "$tmp/changed-files.txt"
+PR_FIXTURE="$tmp/no-grep.json" "$tmp/gh-pr-files" pr view 1 -R o/r \
+  --json title,body,files > "$tmp/pr.json"
+BASE="$base" HEAD="$head" PR_JSON="$tmp/pr.json" REPO=o/r PR=1 \
+  CHANGED_FILES="$tmp/changed-files.txt" \
+  API_FILES_FIXTURE="$tmp/no-grep-files.json" GH="$tmp/gh" GREP="$tmp/no-such-grep" \
+  OUT="$out" MAX_BYTES=1000 MAX_COMMITS=100 "$gather"
+
+[ "$(cat -- "$out/docs-only.txt")" = "false" ]
+grep -Fq 'cannot check include_str! references; reviewing as code.' "$out/NOTES.txt"
+printf 'ok: docs-only missing grep fails closed\n'
+
+# A crate-root include through concat!/CARGO_MANIFEST_DIR cannot be resolved
+# without a manifest, so classification must fail closed.
+cat > "$tmp/cargo-manifest.json" <<'JSON'
+{"title":"Crate root","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/cargo-manifest-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+mkdir -p "$tmp/unresolved/src"
+printf '%s\n' 'const DOC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md"));' \
+  > "$tmp/unresolved/src/lib.rs"
+run_docs_case cargo-manifest "$tmp/cargo-manifest.json" "$tmp/cargo-manifest-files.json" 1 false
+grep -Fq 'include_str! with CARGO_MANIFEST_DIR could not be resolved; reviewing as code.' \
+  "$tmp/docs-cargo-manifest/NOTES.txt"
+printf 'ok: docs-only unresolved CARGO_MANIFEST_DIR fails closed\n'
+
+# A raw-string include cannot be parsed, so the scan must fail closed.
+mkdir -p "$tmp/unparseable/src"
+printf '%s\n' 'const RAW: &str = include_str!(r"docs/raw.md");' \
+  > "$tmp/unparseable/src/lib.rs"
+cat > "$tmp/unparseable.json" <<'JSON'
+{"title":"Unparseable","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/unparseable-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case unparseable "$tmp/unparseable.json" "$tmp/unparseable-files.json" 1 false
+grep -Fq 'include_str! scan was truncated or unparseable' \
+  "$tmp/docs-unparseable/NOTES.txt"
+printf 'ok: docs-only unparseable include scan fails closed\n'
