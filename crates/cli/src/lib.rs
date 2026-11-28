@@ -159,8 +159,10 @@ fn validate_entry(entry: &str) -> Result<(), BuildError> {
 
 /// Audit one source by scanning every `control` occurrence. A call-shaped
 /// occurrence must be the literal `ctx.control.call("<ident>")` form, so a call
-/// hidden in a comment or string is still checked. A `control` substring in a
-/// plugin name or need string carries no call and is left alone.
+/// hidden in a comment or string is still checked. Whitespace-separated member
+/// access such as `ctx . control . call("name")` is refused rather than
+/// skipped, so spacing out the dots cannot hide a call. A `control` substring
+/// in a plugin name or need string carries no call and is left alone.
 fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
     let mut cursor = 0usize;
     let mut calls = 0usize;
@@ -179,10 +181,15 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             .ok_or(BuildError::DynamicCapability)?;
         let literal = after.strip_prefix(CALL_PREFIX);
 
+        let whitespace_after = after
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_whitespace());
         let call_shaped = after.starts_with(".call(")
             || after.starts_with(":call(")
             || after.starts_with("\"].call(")
-            || after.starts_with("'].call(");
+            || after.starts_with("'].call(")
+            || whitespace_after;
         let qualified = source
             .get(..at)
             .and_then(|head| head.strip_suffix(CONTROL_QUALIFIER))
@@ -259,8 +266,7 @@ fn audit_capabilities(plugin_dir: &Path, manifest: &PluginManifest) -> Result<()
     let mut visited = 0usize;
 
     while let Some((path, depth)) = stack.pop() {
-        visited = visited.checked_add(1).ok_or(BuildError::AuditLimit)?;
-        if visited > MAX_AUDIT_ENTRIES || depth > MAX_AUDIT_DEPTH {
+        if depth > MAX_AUDIT_DEPTH {
             return Err(BuildError::AuditLimit);
         }
 
@@ -273,6 +279,11 @@ fn audit_capabilities(plugin_dir: &Path, manifest: &PluginManifest) -> Result<()
             let mut entries = Vec::new();
 
             for entry in std::fs::read_dir(&path).map_err(BuildError::Io)? {
+                visited = visited.checked_add(1).ok_or(BuildError::AuditLimit)?;
+                if visited > MAX_AUDIT_ENTRIES {
+                    return Err(BuildError::AuditLimit);
+                }
+
                 let entry = entry.map_err(BuildError::Io)?;
                 let name = entry.file_name();
                 let name = name.to_string_lossy();

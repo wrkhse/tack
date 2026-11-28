@@ -711,6 +711,11 @@ mod audit_tests {
     }
 
     #[test]
+    fn a_whitespace_separated_capability_call_is_refused() {
+        dynamic(&source("", "ctx . control . call(\"navigate\", p)"));
+    }
+
+    #[test]
     fn a_colon_method_call_is_dynamic() {
         dynamic(&source("", "control:call(\"navigate\", payload)"));
     }
@@ -1019,6 +1024,33 @@ mod audit_tests {
 
             let error = build(scratch.path(), &out, BuildOptions::default())
                 .expect_err("the 65th Luau source is refused");
+            assert!(
+                matches!(&error, tack_cli::BuildError::AuditLimit),
+                "expected AuditLimit, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn more_than_256_plugin_entries_are_an_audit_limit() {
+        for (count, ok) in [(256usize, true), (257usize, false)] {
+            let scratch = Scratch::new();
+            scratch.write("plugin.luau", &source("", ""));
+
+            for i in 0..count - 1 {
+                scratch.write(&format!("entry{i}.txt"), "x");
+            }
+
+            let out = scratch.path().join("dist");
+
+            if ok {
+                build(scratch.path(), &out, BuildOptions::default())
+                    .expect("256 plugin entries build");
+                continue;
+            }
+
+            let error = build(scratch.path(), &out, BuildOptions::default())
+                .expect_err("the 257th plugin entry is refused");
             assert!(
                 matches!(&error, tack_cli::BuildError::AuditLimit),
                 "expected AuditLimit, got {error:?}"
