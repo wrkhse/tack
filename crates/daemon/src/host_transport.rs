@@ -691,6 +691,39 @@ mod tests {
         })
     }
 
+    // A one-shot fake host that delays its host.start reply by `delay`, then
+    // answers the framed call made on the same connection.
+    fn slow_start_host(socket: &Path, delay: Duration) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+
+            reader.read_line(&mut line).unwrap();
+            let start: Value = serde_json::from_str(line.trim_end()).unwrap();
+
+            assert_eq!(start["jsonrpc"].as_str(), Some("2.0"));
+            assert_eq!(start["id"].as_u64(), Some(HOST_START_ID));
+            assert_eq!(start["method"].as_str(), Some(method::HOST_START));
+            assert_eq!(
+                start["params"]["pid"].as_u64(),
+                Some(u64::from(std::process::id()))
+            );
+            assert_eq!(start["params"]["token"].as_str(), Some(TOKEN));
+
+            thread::sleep(delay);
+            writeln!(stream, "{START_REPLY}").unwrap();
+
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request.trim_end(), CALL_FRAME);
+
+            writeln!(stream, "{CALL_REPLY}").unwrap();
+        })
+    }
+
     #[test]
     fn host_start_line_is_exact() {
         let expected = format!(
@@ -1334,6 +1367,22 @@ mod tests {
         );
 
         signal.send(()).unwrap();
+        host.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_stall_start_does_not_spend_the_call_budget() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let host = slow_start_host(&socket, Duration::from_millis(150));
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        let deadline = Instant::now() + Duration::from_millis(100);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Ok(CALL_REPLY.to_owned())
+        );
         host.join().unwrap();
     }
 
