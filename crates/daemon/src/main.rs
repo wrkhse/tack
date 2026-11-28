@@ -705,14 +705,17 @@ mod tests {
         };
         let needs = ["control.call.navigate".to_owned()];
 
-        let explicit = parse_args_with(base(), Some(missing.clone()), None).unwrap();
+        let mut explicit_argv = base().to_vec();
+        explicit_argv.extend(["--grants".to_owned(), granted.clone()]);
+
+        let explicit = parse_args_with(explicit_argv, Some(missing.clone()), None).unwrap();
         assert_eq!(
             explicit.grants.authorize("host-grants", &needs, "navigate"),
             Ok(())
         );
-        assert!(parse_args_with(base(), None, Some(missing)).is_err());
+        assert!(parse_args_with(base(), Some(missing), None).is_err());
 
-        let fallback = parse_args_with(base(), None, Some(granted)).unwrap();
+        let fallback = parse_args_with(base(), Some(granted), None).unwrap();
         assert_eq!(
             fallback.grants.authorize("host-grants", &needs, "navigate"),
             Ok(())
