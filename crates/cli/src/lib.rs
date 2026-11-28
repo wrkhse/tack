@@ -35,6 +35,8 @@ const SUPPORTED: [&str; 4] = ["sandbox", "daemon", "opencode", SDK_MODULE];
 #[derive(Debug)]
 pub enum BuildError {
     NeedMissing(String),
+    /// A symlink was found where the build expects its own SDK output path.
+    Sdk(String),
     Sandbox(EngineError),
     Manifest(serde_json::Error),
     Render(WrapperError),
@@ -48,6 +50,7 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NeedMissing(name) => write!(f, "need_missing:{name}"),
+            Self::Sdk(message) => write!(f, "sdk:{message}"),
             Self::Sandbox(error) => write!(f, "sandbox:tack: {error}"),
             Self::Manifest(error) => write!(f, "manifest:{error}"),
             Self::Render(error) => write!(f, "render:{error}"),
@@ -63,6 +66,7 @@ impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NeedMissing(_) => None,
+            Self::Sdk(_) => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -111,6 +115,20 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     Ok((plugin_dir, manifest))
 }
 
+/// Refuse a symlink at a path the build owns, so a declaration cannot be
+/// written outside the output folder. A missing path is fine; other I/O
+/// errors are reported through BuildError::Io.
+fn refuse_symlink(path: &Path, subject: &str) -> Result<(), BuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(BuildError::Sdk(format!("the SDK {subject} is a symlink")))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BuildError::Io(error)),
+    }
+}
+
 /// Emit the SDK's strict Luau declarations for a plugin that lists the `sdk`
 /// module, and remove a stale copy for one that does not.
 ///
@@ -120,21 +138,17 @@ fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
     let dest = out.join("sdk");
     let declaration = dest.join("tack.d.luau");
 
+    refuse_symlink(&dest, "output path")?;
+    refuse_symlink(&declaration, "declaration")?;
+
     if !needs.iter().any(|need| need == SDK_MODULE) {
         match std::fs::remove_file(&declaration) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(BuildError::Io(error)),
         }
-        match std::fs::remove_dir(&dest) {
-            Ok(()) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
-                ) => {}
-            Err(error) => return Err(BuildError::Io(error)),
-        }
+        // Best effort: the folder may hold files this build does not own.
+        let _ = std::fs::remove_dir(&dest);
         return Ok(());
     }
 
@@ -463,6 +477,14 @@ mod tests {
         );
 
         assert!(BuildError::NeedMissing("daemon".into()).source().is_none());
+    }
+
+    #[test]
+    fn sdk_errors_name_their_class() {
+        let error = BuildError::Sdk("the SDK declaration is a symlink".into());
+
+        assert_eq!(error.to_string(), "sdk:the SDK declaration is a symlink");
+        assert!(error.source().is_none());
     }
 
     #[test]

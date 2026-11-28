@@ -5,7 +5,7 @@ pub const TACK_D_LUAU: &str = include_str!("../tack.d.luau");
 /// The module name a plugin lists in its manifest needs to opt into the SDK.
 pub const SDK_MODULE: &str = "sdk";
 
-/// Major of the SDK contract that TACK_D_LUAU declares.
+/// Major of the SDK contract that `TACK_D_LUAU` declares.
 pub const CONTRACT_MAJOR: u32 = 1;
 
 #[cfg(test)]
