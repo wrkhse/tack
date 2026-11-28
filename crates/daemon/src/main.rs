@@ -97,7 +97,9 @@ fn kill_and_wait(child: &mut Child) {
 
     // An uninterruptible child can ignore both signals, so never wait on it
     // without a budget: startup and shutdown must stay bounded.
-    let deadline = Instant::now().saturating_add(Duration::from_millis(500));
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(500))
+        .unwrap_or_else(Instant::now);
     if wait_bounded(child, deadline).is_err() {
         eprintln!("tack-daemon: child reap timed out");
     }
