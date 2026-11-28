@@ -71,11 +71,11 @@ impl fmt::Display for BuildError {
 impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::NeedMissing(_) => None,
-            Self::UnknownModule(_) => None,
-            Self::InvalidModuleConfig(_) => None,
-            Self::Modules(_) => None,
-            Self::UnsafeSdkPath(_) => None,
+            Self::NeedMissing(_)
+            | Self::UnknownModule(_)
+            | Self::InvalidModuleConfig(_)
+            | Self::Modules(_)
+            | Self::UnsafeSdkPath(_) => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
