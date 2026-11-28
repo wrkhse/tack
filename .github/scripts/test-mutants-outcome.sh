@@ -3,6 +3,7 @@ set -euo pipefail
 
 script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/mutants-outcome.sh"
 fixture="$(dirname -- "$script")/fixtures/empty-shard.txt"
+list_fixture="$(dirname -- "$script")/fixtures/empty-shard-list.txt"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 
@@ -76,7 +77,7 @@ set -e
 
 [ "$d_status" -ne 0 ]
 [ ! -e "$tmp/d/outcomes.json" ]
-grep -Fq "did not report 'No mutants to filter'" "$tmp/d.out"
+grep -Fq "did not report a zero-mutants line" "$tmp/d.out"
 printf 'ok: missing exact line fails with a named reason\n'
 
 # A nonzero exit fails even when an outcomes file is already present.
@@ -139,3 +140,30 @@ set -e
 [ ! -e "$tmp/i/outcomes.json" ]
 grep -Fq 'cargo mutants exited 7; its outcome cannot be used' "$tmp/i.out"
 printf 'ok: nonzero exit with the empty-shard line fails with a named reason\n'
+
+# A near-miss with trailing text is not the exact whole zero-mutants line.
+printf 'Found 0 mutants to test (after filters)\n' > "$tmp/j.log"
+: > "$tmp/j.list"
+
+set +e
+run_script "$tmp/j.out" 0 "$tmp/j.log" "$tmp/j.list" \
+  "$tmp/j/outcomes.json" "$tmp/j.github-output"
+j_status=$?
+set -e
+
+[ "$j_status" -ne 0 ]
+[ ! -e "$tmp/j/outcomes.json" ]
+grep -Fq 'did not report a zero-mutants line' "$tmp/j.out"
+printf 'ok: near-miss line fails with a named reason\n'
+
+# The empty shard's --list diagnostics, including a WARN prefix, are not mutants.
+cp -- "$fixture" "$tmp/k.log"
+cp -- "$list_fixture" "$tmp/k.list"
+run_script "$tmp/k.out" 0 "$tmp/k.log" "$tmp/k.list" \
+  "$tmp/k/outcomes.json" "$tmp/k.github-output"
+
+[ -f "$tmp/k/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/k/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/k.github-output"
+printf 'ok: empty-shard list diagnostics are not mutants\n'

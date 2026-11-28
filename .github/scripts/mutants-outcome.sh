@@ -27,13 +27,19 @@ for input in "$MUTANTS_LOG" "$MUTANTS_LIST"; do
 done
 
 # cargo-mutants logs through a colored tracing formatter. Strip ANSI codes,
-# trim each line, then drop a leading log level so the message can be
-# matched exactly as a whole line.
+# trim each line, then drop a leading log level so each message can be
+# matched exactly as a whole line. The --list output gets the same treatment:
+# its zero-mutant diagnostics can carry the same WARN prefix.
+normalize() {
+  sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g' "$1" |
+    sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^(INFO|WARN|ERROR|DEBUG|TRACE)[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
 normalized=$(mktemp)
-trap 'rm -f -- "$normalized"' EXIT
-sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g' "$MUTANTS_LOG" |
-  sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^(INFO|WARN|ERROR|DEBUG|TRACE)[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
-  > "$normalized"
+normalized_list=$(mktemp)
+trap 'rm -f -- "$normalized" "$normalized_list"' EXIT
+normalize "$MUTANTS_LOG" > "$normalized"
+normalize "$MUTANTS_LIST" > "$normalized_list"
 
 # cargo-mutants prints its own zero-mutants summary ("Found 0 mutants to test",
 # with a WARN that nothing matched the active filters) when a shard has no
@@ -55,7 +61,7 @@ list_has_mutants() {
     $0 == "No mutants found under the active filters" { next }
     { found = 1 }
     END { exit found ? 0 : 1 }
-  ' "$MUTANTS_LIST"
+  ' "$normalized_list"
 }
 
 if [ "$MUTANTS_STATUS" -eq 0 ] \
@@ -72,7 +78,7 @@ fi
 
 if [ ! -f "$OUTCOMES" ]; then
   if ! reports_no_mutants "$normalized"; then
-    echo "::error::cargo mutants did not report 'No mutants to filter' and wrote no $OUTCOMES" >&2
+    echo "::error::cargo mutants did not report a zero-mutants line and wrote no $OUTCOMES" >&2
   else
     echo "::error::cargo mutants --list found mutants but wrote no $OUTCOMES" >&2
   fi
