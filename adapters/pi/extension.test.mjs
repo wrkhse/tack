@@ -182,12 +182,7 @@ test("every Bash command goes to tack-hook and other tools skip it", async () =>
 
   const invocation = [
     "tack-hook",
-    [
-      "--plugin",
-      "/plugins/safe-push",
-      "--plugin-name",
-      "safe-push",
-    ],
+    ["--plugin", "/plugins/safe-push", "--plugin-name", "safe-push"],
     { stdio: ["pipe", "pipe", "ignore"] },
   ];
   const requests = commands.map((command, index) => ({
@@ -255,12 +250,7 @@ test("a valid deny and tool success each append one line with their request id",
   };
   const invocation = [
     "tack-hook",
-    [
-      "--plugin",
-      "/plugins/safe-push",
-      "--plugin-name",
-      "safe-push",
-    ],
+    ["--plugin", "/plugins/safe-push", "--plugin-name", "safe-push"],
     { stdio: ["pipe", "pipe", "ignore"] },
   ];
 
