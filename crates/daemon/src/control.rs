@@ -494,6 +494,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_ordinary_line_is_not_a_control_frame() {
+        let broker = granted_broker(None);
+        let control = control_line(1, PROTOCOL_VERSION, "navigate", json!({}));
+        let ordinary = br#"{"type":"hook","id":22,"outcome":"allow"}"#;
+
+        assert!(broker.is_control(&control));
+        assert!(!broker.is_control(ordinary));
+    }
+
+    #[test]
+    fn a_max_size_control_frame_is_not_rejected_as_too_large() {
+        let broker = granted_broker(None);
+        let empty = raw_control_line(
+            1,
+            PROTOCOL_VERSION,
+            "navigate",
+            Value::String(String::new()),
+        );
+        let pad = MAX_FRAME_BYTES
+            .checked_sub(empty.len())
+            .expect("the empty frame fits under the cap");
+        let line = raw_control_line(
+            1,
+            PROTOCOL_VERSION,
+            "navigate",
+            Value::String("x".repeat(pad)),
+        );
+
+        assert_eq!(line.len(), MAX_FRAME_BYTES);
+        assert!(broker.is_control(&line));
+        assert_eq!(
+            reply_from(&broker.try_handle(&line, test_deadline()).unwrap()),
+            error("harness_socket_missing")
+        );
+    }
+
     // A harness that reads the call, then drips bytes without ending a line
     // until its own write budget runs out. The caller must not wait for it.
     fn slow_drip_harness(socket: &Path) -> thread::JoinHandle<()> {
