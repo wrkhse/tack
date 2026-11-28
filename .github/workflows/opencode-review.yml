@@ -322,8 +322,8 @@ jobs:
       - name: Review (fallback)
         id: review_fallback
         if: >-
-          always() &&
-          (steps.review_primary.outcome != 'success' ||
+          always() && steps.carry_forward.outcome == 'skipped' &&
+          (steps.review_primary.outcome == 'failure' ||
            steps.review_primary.outputs.failed == 'true')
         timeout-minutes: 8
         env:
