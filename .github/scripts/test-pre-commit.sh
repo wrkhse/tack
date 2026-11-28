@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -z "${CI:-}" ]]; then
+  echo '::error::hook selftest must run in CI' >&2
+  exit 1
+fi
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 work="$(mktemp -d)"
@@ -7,6 +11,12 @@ trap 'rm -rf "$work"' EXIT
 
 export TIDY_CACHE_ROOT="$work/cache"
 mkdir -p "$work/repo/.githooks" "$work/repo/.github" "$TIDY_CACHE_ROOT"
+cp "$repo_root/rust-toolchain.toml" "$work/repo/rust-toolchain.toml"
+for cfg in tidy.json rustfmt.toml .rustfmt.toml; do
+  if [[ -f "$repo_root/$cfg" ]]; then
+    cp "$repo_root/$cfg" "$work/repo/$cfg"
+  fi
+done
 cd "$work/repo"
 git init -q -b main
 git config user.email precommit@example.invalid
@@ -123,6 +133,79 @@ if [ -f "$TIDY_CACHE_ROOT/tidy-$zeros/tidy.tar.gz" ]; then
   exit 1
 fi
 git restore --staged --worktree .github/tidy.env
+
+while IFS= read -r line; do
+  case "$line" in
+    TIDY_*ASSET=*) ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done < "$work/tidy.env.orig" > .github/tidy.env
+git add .github/tidy.env
+if git commit -qm 'test: missing pin' > "$work/missing.out" 2>&1; then
+  echo 'missing pin commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at tidy pin' "$work/missing.out"
+cp "$work/tidy.env.orig" .github/tidy.env
+git restore --staged --worktree .github/tidy.env
+
+while IFS= read -r line; do
+  case "$line" in
+    TIDY_*SHA256=*) printf '%s\n' "${line%%=*}=nothex" ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done < "$work/tidy.env.orig" > .github/tidy.env
+git add .github/tidy.env
+if git commit -qm 'test: bad sha format' > "$work/badsha.out" 2>&1; then
+  echo 'bad SHA format commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at tidy pin' "$work/badsha.out"
+cp "$work/tidy.env.orig" .github/tidy.env
+git restore --staged --worktree .github/tidy.env
+
+printf '# platform\n' > platform.md
+git add platform.md
+if TIDY_PLATFORM=Unknown-test git commit -qm 'test: unknown platform' > "$work/platform.out" 2>&1; then
+  echo 'unknown platform commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at tidy platform' "$work/platform.out"
+git restore --staged --worktree platform.md
+rm -f platform.md
+
+ones="$(printf '1%.0s' {1..64})"
+while IFS= read -r line; do
+  case "$line" in
+    TIDY_RELEASE_BASE=*) printf '%s\n' "${line%%=*}=https://127.0.0.1:9/unreachable" ;;
+    TIDY_*SHA256=*) printf '%s\n' "${line%%=*}=$ones" ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done < "$work/tidy.env.orig" > .github/tidy.env
+git add .github/tidy.env
+printf '# download failure\n' > download.md
+git add download.md
+if git commit -qm 'test: download failure' > "$work/download.out" 2>&1; then
+  echo 'download failure commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at tidy download' "$work/download.out"
+cp "$work/tidy.env.orig" .github/tidy.env
+git restore --staged --worktree .github/tidy.env
+git restore --staged --worktree download.md
+rm -f download.md
+
+# Prove the hook works under the system bash on macOS with no staged Rust files.
+printf '# bash probe\n' > bash32.md
+git add bash32.md
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  /bin/bash --version
+  if ! /bin/bash .githooks/pre-commit; then
+    echo 'hook failed under /bin/bash' >&2
+    exit 1
+  fi
+fi
+git commit -qm 'fmt: system bash probe'
 
 printf 'probe\n' > "$work/outside-target.md"
 ln -s "$work/outside-target.md" staged-link.md
