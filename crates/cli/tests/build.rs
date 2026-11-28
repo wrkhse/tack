@@ -952,7 +952,7 @@ mod audit_tests {
         let modules = ["sandbox", "daemon", "opencode", "sdk"];
 
         for (count, ok) in [(128usize, true), (129usize, false)] {
-            let needs = (0..count)
+            let needs = (0..count.saturating_sub(1))
                 .map(|i| format!("\"{}\"", modules[i % modules.len()]))
                 .collect::<Vec<_>>()
                 .join(", ");
