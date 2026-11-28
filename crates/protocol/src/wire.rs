@@ -62,6 +62,7 @@ pub enum ReplyError {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum Request {
     Hook {
         id: u64,
@@ -77,20 +78,28 @@ pub enum Request {
         name: String,
         input: Value,
     },
+    Control {
+        id: u64,
+        version: u32,
+        call: String,
+        input: Value,
+    },
 }
 
 impl Request {
     #[must_use]
     pub const fn id(&self) -> u64 {
         match self {
-            Self::Hook { id, .. } | Self::Tool { id, .. } => *id,
+            Self::Hook { id, .. } | Self::Tool { id, .. } | Self::Control { id, .. } => *id,
         }
     }
 
     #[must_use]
     pub const fn version(&self) -> u32 {
         match self {
-            Self::Hook { version, .. } | Self::Tool { version, .. } => *version,
+            Self::Hook { version, .. }
+            | Self::Tool { version, .. }
+            | Self::Control { version, .. } => *version,
         }
     }
 }
@@ -140,6 +149,7 @@ pub struct Content {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Reply {
     Hook {
         id: u64,
@@ -150,6 +160,11 @@ pub enum Reply {
         id: u64,
         version: u32,
         content: Vec<Content>,
+    },
+    Control {
+        id: u64,
+        version: u32,
+        result: Value,
     },
     Error {
         id: u64,
@@ -554,6 +569,95 @@ mod tests {
         };
         assert_eq!(tool.id(), 11);
         assert_eq!(tool.version(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn request_version_returns_the_frame_version() {
+        let request = Request::Control {
+            id: 1,
+            version: 7,
+            call: "navigate".into(),
+            input: serde_json::json!({}),
+        };
+        let hook = Request::Hook {
+            id: 2,
+            version: 42,
+            hook: "toolBefore".into(),
+            call: ToolCall {
+                tool: "shell".into(),
+                name: "shell".into(),
+                input: serde_json::json!({}),
+                session_id: None,
+            },
+            _meta: None,
+        };
+
+        assert_eq!(request.version(), 7);
+        assert_eq!(hook.version(), 42);
+    }
+
+    #[test]
+    fn control_frames_round_trip_with_the_control_kind() {
+        let request = Request::Control {
+            id: 12,
+            version: PROTOCOL_VERSION,
+            call: "default_deny".into(),
+            input: serde_json::json!({ "grants": [] }),
+        };
+
+        let line = encode_line(&request).unwrap();
+        let value: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["kind"], serde_json::json!("control"));
+
+        let decoded: Request = serde_json::from_slice(&line).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(decoded.id(), 12);
+        assert_eq!(decoded.version(), PROTOCOL_VERSION);
+
+        let reply = Reply::Control {
+            id: 12,
+            version: PROTOCOL_VERSION,
+            result: serde_json::json!({ "denied": true }),
+        };
+
+        let line = encode_line(&reply).unwrap();
+        let value: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["kind"], serde_json::json!("control"));
+
+        let decoded: Reply = serde_json::from_slice(&line).unwrap();
+        assert_eq!(decoded, reply);
+    }
+
+    #[test]
+    fn control_request_rejects_unknown_fields() {
+        let mut value = serde_json::to_value(Request::Control {
+            id: 12,
+            version: PROTOCOL_VERSION,
+            call: "default_deny".into(),
+            input: serde_json::json!({}),
+        })
+        .unwrap();
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("extra".into(), serde_json::json!(1));
+
+        assert!(serde_json::from_value::<Request>(value).is_err());
+    }
+
+    #[test]
+    fn control_request_rejects_a_plugin_field() {
+        let frame = serde_json::json!({
+            "kind": "control",
+            "id": 12,
+            "version": PROTOCOL_VERSION,
+            "plugin": "host-grants",
+            "call": "default_deny",
+            "input": {}
+        });
+
+        assert!(serde_json::from_value::<Request>(frame).is_err());
     }
 
     #[test]
