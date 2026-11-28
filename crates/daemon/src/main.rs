@@ -19,7 +19,7 @@ use tack_daemon::stall::{Clock, StallClient, SystemClock};
 use tack_daemon::transport::{TransportError, bind};
 use tack_daemon::{
     ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, STALL_STARTUP_MS,
-    frames, socket_in_state_dir, state_dir,
+    STALL_STARTUP_TIMEOUT, frames, socket_in_state_dir, state_dir,
 };
 use tack_protocol::wire::{
     DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
@@ -435,7 +435,7 @@ fn launch_from_child(
         kill_and_wait(reaper.child);
         reaper.disarm();
 
-        return Err(PipeError::Missing);
+        return Err(PipeError::Error(STALL_STARTUP_TIMEOUT.to_owned()));
     };
 
     let endpoint = match result {
@@ -1008,14 +1008,17 @@ mod tests {
     }
 
     #[test]
-    fn a_child_that_never_writes_is_a_named_missing() {
+    fn a_child_that_never_writes_reports_the_startup_timeout() {
         let script = Script::new("sleep 5");
         let mut child = script.child();
         let start = Instant::now();
 
         let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
-        assert_eq!(result, Err(PipeError::Missing));
+        assert_eq!(
+            result,
+            Err(PipeError::Error("stall_startup_timeout".to_owned()))
+        );
         assert!(start.elapsed() < Duration::from_secs(2));
         assert_reaped(&mut child);
     }
@@ -1266,7 +1269,7 @@ sleep 5"#
     #[ignore = "run only by the explicit CI 50x step"]
     fn launching_tests_hold_across_fifty_runs_in_ci() {
         for _ in 0..50 {
-            a_child_that_never_writes_is_a_named_missing();
+            a_child_that_never_writes_reports_the_startup_timeout();
             an_error_line_reaps_the_helper_group();
             an_error_line_timeout_reaps_the_helper_group();
             a_child_without_a_stdout_pipe_is_reaped();

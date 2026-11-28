@@ -79,6 +79,7 @@ pub struct HostTransport {
     next_id: u64,
     failed: bool,
     broker: Option<Arc<dyn ControlBroker>>,
+    startup: Duration,
 }
 
 impl HostTransport {
@@ -91,6 +92,7 @@ impl HostTransport {
             next_id: HOST_START_ID,
             failed: false,
             broker: None,
+            startup: Duration::from_millis(STALL_STARTUP_MS),
         }
     }
 
@@ -103,6 +105,7 @@ impl HostTransport {
             next_id: HOST_START_ID,
             failed: false,
             broker: Some(broker),
+            startup: Duration::from_millis(STALL_STARTUP_MS),
         }
     }
 
@@ -115,7 +118,7 @@ impl HostTransport {
 
         if self.stream.is_none() {
             let startup = Instant::now()
-                .checked_add(Duration::from_millis(STALL_STARTUP_MS))
+                .checked_add(self.startup)
                 .unwrap_or_else(Instant::now);
 
             self.handshake(startup).map_err(|error| match error {
@@ -1400,6 +1403,52 @@ mod tests {
             tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
             Ok(CALL_REPLY.to_owned())
         );
+        host.join().unwrap();
+    }
+
+    // A fake host that validates host.start, then holds the connection open
+    // without answering so the transport's startup deadline expires.
+    fn silent_host(socket: &Path) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+
+            reader.read_line(&mut line).unwrap();
+            let start: Value = serde_json::from_str(line.trim_end()).unwrap();
+
+            assert_eq!(start["jsonrpc"].as_str(), Some("2.0"));
+            assert_eq!(start["id"].as_u64(), Some(HOST_START_ID));
+            assert_eq!(start["method"].as_str(), Some(method::HOST_START));
+
+            thread::sleep(Duration::from_millis(200));
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_silent_host_reports_the_named_startup_timeout_and_latches() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let host = silent_host(&socket);
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::new(endpoint);
+        transport.startup = Duration::from_millis(50);
+        let deadline = Instant::now() + Duration::from_millis(100);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Io("stall_startup_timeout".to_owned()))
+        );
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Io("host handshake failed; no retry".into()))
+        );
+
         host.join().unwrap();
     }
 
