@@ -18,8 +18,8 @@ use tack_daemon::pipe::{self, PipeError};
 use tack_daemon::stall::{Clock, StallClient, SystemClock};
 use tack_daemon::transport::{TransportError, bind};
 use tack_daemon::{
-    ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, frames,
-    socket_in_state_dir, state_dir,
+    ERR_SOCKET_MISMATCH, EXIT_ENGINE, EXIT_LOCK_BUSY, EXIT_USAGE, SOCKET_NAME, STALL_STARTUP_MS,
+    STALL_STARTUP_TIMEOUT, frames, socket_in_state_dir, state_dir,
 };
 use tack_protocol::wire::{
     DEFAULT_DEADLINE_MS, Outcome, PROTOCOL_VERSION, Reply, ReplyError, Request,
@@ -435,7 +435,7 @@ fn launch_from_child(
         kill_and_wait(reaper.child);
         reaper.disarm();
 
-        return Err(PipeError::Missing);
+        return Err(PipeError::Error(STALL_STARTUP_TIMEOUT.to_owned()));
     };
 
     let endpoint = match result {
@@ -510,9 +510,15 @@ fn launch_stall_with(
         .command()
         .spawn()
         .map_err(|error| unavailable(&format!("barn launch failed: {}", error.kind())))?;
-    let deadline = SystemClock.deadline(Duration::from_millis(DEFAULT_DEADLINE_MS));
-    let client =
+    let deadline = SystemClock.deadline(Duration::from_millis(STALL_STARTUP_MS));
+    let mut client =
         launch_from_child(&mut child, deadline, broker).map_err(|error| error.to_string())?;
+    let ready = SystemClock.deadline(Duration::from_millis(STALL_STARTUP_MS));
+
+    if let Err(error) = client.transport_mut().connect(ready) {
+        kill_and_wait(&mut child);
+        return Err(unavailable(&error.to_string()));
+    }
 
     Ok(Stall::Host { client, child })
 }
@@ -549,7 +555,8 @@ async fn run(args: Args, state: PathBuf) -> i32 {
         }
     };
 
-    let stall = match launch_stall(&args.plugin, &state, broker) {
+    let launched = tokio::task::block_in_place(|| launch_stall(&args.plugin, &state, broker));
+    let stall = match launched {
         Ok(stall) => stall,
         Err(reason) => {
             eprintln!("tack-daemon: {reason}");
@@ -1008,14 +1015,17 @@ mod tests {
     }
 
     #[test]
-    fn a_child_that_never_writes_is_a_named_missing() {
+    fn a_child_that_never_writes_reports_the_startup_timeout() {
         let script = Script::new("sleep 5");
         let mut child = script.child();
         let start = Instant::now();
 
         let result = launch_from_child(&mut child, short_deadline(), test_broker()).map(|_| ());
 
-        assert_eq!(result, Err(PipeError::Missing));
+        assert_eq!(
+            result,
+            Err(PipeError::Error("stall_startup_timeout".to_owned()))
+        );
         assert!(start.elapsed() < Duration::from_secs(2));
         assert_reaped(&mut child);
     }
@@ -1266,10 +1276,88 @@ sleep 5"#
     #[ignore = "run only by the explicit CI 50x step"]
     fn launching_tests_hold_across_fifty_runs_in_ci() {
         for _ in 0..50 {
-            a_child_that_never_writes_is_a_named_missing();
+            a_child_that_never_writes_reports_the_startup_timeout();
             an_error_line_reaps_the_helper_group();
             an_error_line_timeout_reaps_the_helper_group();
             a_child_without_a_stdout_pipe_is_reaped();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_host_start_is_not_charged_to_the_call_budget() {
+        use barn_stall::{FRAMED_VERSION, Outcome, Reply, Request, ToolCall};
+        use std::io::{BufRead, Write as IoWrite};
+        use std::os::unix::net::UnixListener;
+
+        let scratch = Script::new("exit 0");
+        let socket = scratch.0.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let host = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+
+            reader.read_line(&mut line).unwrap();
+            let start: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+            assert_eq!(start["jsonrpc"].as_str(), Some("2.0"));
+            assert_eq!(start["id"].as_u64(), Some(21));
+            assert_eq!(start["method"].as_str(), Some("host.start"));
+
+            thread::sleep(Duration::from_millis(150));
+            stream
+                .write_all(
+                    b"{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{\"stall\":\"sourcefed\"}}\n",
+                )
+                .unwrap();
+
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            stream
+                .write_all(b"{\"type\":\"hook\",\"id\":22,\"outcome\":\"allow\"}\n")
+                .unwrap();
+        });
+
+        let endpoint = format!(
+            "{{\"protocol\":1,\"socket_path\":\"{}\",\"token\":\"t\"}}",
+            socket.display()
+        );
+        let barn = Script::new(&format!("sleep 0.15; echo '{endpoint}'; sleep 5"));
+        let override_bin = barn.0.join("barn").to_string_lossy().into_owned();
+        let plugin = std::env::temp_dir();
+        let state = barn.0.join("state");
+
+        let mut stall = tokio::task::block_in_place(|| {
+            launch_stall_with(Some(&override_bin), &plugin, &state, test_broker())
+        })
+        .expect("a stall that writes its endpoint and host within startup bounds");
+
+        let request = Request::Hook {
+            id: 22,
+            version: FRAMED_VERSION,
+            hook: "PreToolUse".to_owned(),
+            call: ToolCall {
+                tool: "bash".to_owned(),
+                name: "run".to_owned(),
+                input: serde_json::json!({}),
+                session_id: None,
+            },
+            _meta: None,
+        };
+        let expected = Reply::Hook {
+            id: 22,
+            outcome: Outcome::Allow,
+        };
+
+        let result = tokio::task::block_in_place(|| {
+            let Stall::Host { client, .. } = &mut stall else {
+                panic!("a launched barn yields a host stall");
+            };
+            client.call(&request)
+        });
+
+        drop(stall);
+        host.join().unwrap();
+
+        assert_eq!(result, Ok(expected));
     }
 }
