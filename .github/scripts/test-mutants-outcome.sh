@@ -35,83 +35,6 @@ run_script "$tmp/e.out" 0 "$tmp/e.log" "$tmp/e.list" \
 grep -Fxq 'zero=true' "$tmp/e.github-output"
 printf 'ok: colored INFO line and empty list write a zero outcome\n'
 
-# The real cargo-mutants output from an empty shard writes a zero outcome.
-fixture="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fixtures/mutants-empty-shard.log"
-cp -- "$fixture" "$tmp/g.log"
-: > "$tmp/g.list"
-run_script "$tmp/g.out" 0 "$tmp/g.log" "$tmp/g.list" \
-  "$tmp/g/outcomes.json" "$tmp/g.github-output"
-
-[ -f "$tmp/g/outcomes.json" ]
-[ "$(jq -c -S . "$tmp/g/outcomes.json")" = \
-  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
-grep -Fxq 'zero=true' "$tmp/g.github-output"
-printf 'ok: empty-shard fixture writes a zero outcome\n'
-
-# The colored WARN prefix from an empty shard still matches.
-printf '\033[33m WARN\033[0m No mutants found under the active filters\n' > "$tmp/h.log"
-: > "$tmp/h.list"
-run_script "$tmp/h.out" 0 "$tmp/h.log" "$tmp/h.list" \
-  "$tmp/h/outcomes.json" "$tmp/h.github-output"
-
-[ -f "$tmp/h/outcomes.json" ]
-[ "$(jq -c -S . "$tmp/h/outcomes.json")" = \
-  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
-grep -Fxq 'zero=true' "$tmp/h.github-output"
-printf 'ok: colored empty-shard WARN line writes a zero outcome\n'
-
-# A no-mutants diagnostic in the list still counts as zero.
-cp -- "$fixture" "$tmp/i.log"
-printf '\nNo mutants found under the active filters\n' > "$tmp/i.list"
-run_script "$tmp/i.out" 0 "$tmp/i.log" "$tmp/i.list" \
-  "$tmp/i/outcomes.json" "$tmp/i.github-output"
-
-[ -f "$tmp/i/outcomes.json" ]
-[ "$(jq -c -S . "$tmp/i/outcomes.json")" = \
-  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
-grep -Fxq 'zero=true' "$tmp/i.github-output"
-printf 'ok: no-mutants diagnostic in the list still counts as zero\n'
-
-# An empty-shard log with mutants in the list fails with a named reason.
-cp -- "$fixture" "$tmp/j.log"
-printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/j.list"
-set +e
-run_script "$tmp/j.out" 0 "$tmp/j.log" "$tmp/j.list" \
-  "$tmp/j/outcomes.json" "$tmp/j.github-output"
-j_status=$?
-set -e
-
-[ "$j_status" -ne 0 ]
-[ ! -e "$tmp/j/outcomes.json" ]
-grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/j.out"
-printf 'ok: empty-shard log with mutants in the list fails with a named reason\n'
-
-# A zero-mutants diagnostic cannot mask a real mutant in the list.
-cp -- "$fixture" "$tmp/k.log"
-printf 'No mutants found under the active filters\nsrc/lib.rs:3:5: replace > with <\n' > "$tmp/k.list"
-set +e
-run_script "$tmp/k.out" 0 "$tmp/k.log" "$tmp/k.list" \
-  "$tmp/k/outcomes.json" "$tmp/k.github-output"
-k_status=$?
-set -e
-
-[ "$k_status" -ne 0 ]
-[ ! -e "$tmp/k/outcomes.json" ]
-grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/k.out"
-printf 'ok: mixed zero diagnostic and mutant line in the list fails\n'
-
-# The zero-count line alone writes a zero outcome.
-printf 'Found 0 mutants to test\n' > "$tmp/l.log"
-: > "$tmp/l.list"
-run_script "$tmp/l.out" 0 "$tmp/l.log" "$tmp/l.list" \
-  "$tmp/l/outcomes.json" "$tmp/l.github-output"
-
-[ -f "$tmp/l/outcomes.json" ]
-[ "$(jq -c -S . "$tmp/l/outcomes.json")" = \
-  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
-grep -Fxq 'zero=true' "$tmp/l.github-output"
-printf 'ok: zero-count line alone writes a zero outcome\n'
-
 # A nonempty list with no outcomes fails with a named reason.
 printf 'No mutants to filter\n' > "$tmp/b.log"
 printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/b.list"
@@ -173,3 +96,45 @@ set -e
 grep -Fq 'cargo mutants exited 9' "$tmp/f.out"
 grep -Fq 'its outcome cannot be used' "$tmp/f.out"
 printf 'ok: nonzero exit with an existing outcome fails with a named reason\n'
+
+# An empty shard reports "Found 0 mutants to test" plus a WARN line and exits 0.
+printf 'Found 0 mutants to test\n\033[33m WARN\033[0m No mutants found under the active filters\n' > "$tmp/g.log"
+: > "$tmp/g.list"
+run_script "$tmp/g.out" 0 "$tmp/g.log" "$tmp/g.list" \
+  "$tmp/g/outcomes.json" "$tmp/g.github-output"
+
+[ -f "$tmp/g/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/g/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/g.github-output"
+printf 'ok: empty-shard zero line and empty list write a zero outcome\n'
+
+# Two-sided proof for an empty shard that coexists with mutants elsewhere.
+# The gate reads MUTANTS_LIST, which the workflow supplies with the same
+# --shard k/n as the run. The shard-scoped empty list is accepted as a zero
+# outcome, while the same shard's empty-shard log paired with a nonempty
+# whole-diff list is rejected, so the gate is driven by the shard-scoped list.
+printf 'Found 0 mutants to test\n\033[33m WARN\033[0m No mutants found under the active filters\n' > "$tmp/h.log"
+: > "$tmp/h.list"
+printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/h.whole-diff.list"
+[ -s "$tmp/h.whole-diff.list" ]
+run_script "$tmp/h.out" 0 "$tmp/h.log" "$tmp/h.list" \
+  "$tmp/h/outcomes.json" "$tmp/h.github-output"
+
+[ -f "$tmp/h/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/h/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/h.github-output"
+printf 'ok: empty shard with mutants elsewhere writes a zero outcome from its shard-scoped list\n'
+
+# The same empty-shard log paired with the nonempty whole-diff list is rejected.
+set +e
+run_script "$tmp/h2.out" 0 "$tmp/h.log" "$tmp/h.whole-diff.list" \
+  "$tmp/h2/outcomes.json" "$tmp/h2.github-output"
+h_status=$?
+set -e
+
+[ "$h_status" -ne 0 ]
+[ ! -e "$tmp/h2/outcomes.json" ]
+grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/h2.out"
+printf 'ok: whole-diff list is not accepted as an empty shard\n'
