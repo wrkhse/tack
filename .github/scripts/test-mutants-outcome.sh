@@ -86,6 +86,32 @@ set -e
 grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/j.out"
 printf 'ok: empty-shard log with mutants in the list fails with a named reason\n'
 
+# A zero-mutants diagnostic cannot mask a real mutant in the list.
+cp -- "$fixture" "$tmp/k.log"
+printf 'No mutants found under the active filters\nsrc/lib.rs:3:5: replace > with <\n' > "$tmp/k.list"
+set +e
+run_script "$tmp/k.out" 0 "$tmp/k.log" "$tmp/k.list" \
+  "$tmp/k/outcomes.json" "$tmp/k.github-output"
+k_status=$?
+set -e
+
+[ "$k_status" -ne 0 ]
+[ ! -e "$tmp/k/outcomes.json" ]
+grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/k.out"
+printf 'ok: mixed zero diagnostic and mutant line in the list fails\n'
+
+# The zero-count line alone writes a zero outcome.
+printf 'Found 0 mutants to test\n' > "$tmp/l.log"
+: > "$tmp/l.list"
+run_script "$tmp/l.out" 0 "$tmp/l.log" "$tmp/l.list" \
+  "$tmp/l/outcomes.json" "$tmp/l.github-output"
+
+[ -f "$tmp/l/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/l/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/l.github-output"
+printf 'ok: zero-count line alone writes a zero outcome\n'
+
 # A nonempty list with no outcomes fails with a named reason.
 printf 'No mutants to filter\n' > "$tmp/b.log"
 printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/b.list"
