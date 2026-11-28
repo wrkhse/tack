@@ -729,6 +729,11 @@ mod audit_tests {
     }
 
     #[test]
+    fn a_single_quote_bracket_indexed_call_is_dynamic() {
+        dynamic(&source("", "ctx['control'].call(\"navigate\", payload)"));
+    }
+
+    #[test]
     fn an_aliased_control_is_dynamic() {
         dynamic(&source(
             "",

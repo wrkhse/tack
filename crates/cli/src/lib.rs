@@ -249,7 +249,6 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
         let call_shaped = after.starts_with(".call(")
             || after.starts_with(":call(")
             || after.starts_with("\"].call(")
-            || after.starts_with("'].call(")
             || bracket_indexed_call(after)
             || whitespace_after;
         let has_ctx_qualifier = source
