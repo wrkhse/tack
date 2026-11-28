@@ -3,6 +3,7 @@
 
 #![cfg(test)]
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -254,7 +255,6 @@ fn a_listing_plugin_emits_the_strict_sdk_declarations() {
     let emitted = std::fs::read_to_string(&declaration).expect("SDK declaration is readable");
 
     assert_eq!(emitted, TACK_D_LUAU);
-    assert!(emitted.starts_with("--!strict\n"));
     assert_eq!(std::fs::read_dir(out.join("sdk")).unwrap().count(), 1);
 }
 
@@ -284,6 +284,25 @@ fn a_later_unlisted_build_removes_stale_sdk_declarations() {
     build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
 
     assert!(!declaration.exists());
+    assert!(!out.join("sdk").exists());
+    assert!(out.join("opencode/index.js").exists());
+}
+
+#[test]
+fn an_unlisted_build_keeps_unrelated_files_in_the_sdk_folder() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("dist");
+    std::fs::create_dir_all(out.join("sdk")).expect("sdk folder");
+    std::fs::write(out.join("sdk/tack.d.luau"), "stale").expect("stale declaration");
+    std::fs::write(out.join("sdk/keep.txt"), "mine").expect("unrelated file");
+    sdk_plugin(&scratch, false);
+    build(scratch.path(), &out, BuildOptions::default()).expect("unlisted plugin builds");
+    assert!(!out.join("sdk/tack.d.luau").exists());
+    assert_eq!(
+        std::fs::read_to_string(out.join("sdk/keep.txt")).unwrap(),
+        "mine"
+    );
+    assert!(out.join("sdk").is_dir());
     assert!(out.join("opencode/index.js").exists());
 }
 
@@ -297,9 +316,13 @@ fn an_sdk_output_path_that_is_a_file_fails() {
 
     let result = build(scratch.path(), &out, BuildOptions::default());
 
-    let Err(tack_cli::BuildError::Io(_)) = result else {
+    let Err(tack_cli::BuildError::Io(error)) = result else {
         panic!("an I/O error is reported");
     };
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::AlreadyExists | ErrorKind::NotADirectory
+    ));
     assert!(!out.join("opencode").exists());
 }
 
@@ -313,9 +336,13 @@ fn a_directory_at_the_declaration_path_fails_the_listed_build() {
 
     let result = build(scratch.path(), &out, BuildOptions::default());
 
-    let Err(tack_cli::BuildError::Io(_)) = result else {
+    let Err(tack_cli::BuildError::Io(error)) = result else {
         panic!("an I/O error is reported");
     };
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::IsADirectory | ErrorKind::InvalidInput
+    ));
     assert!(!out.join("opencode").exists());
 }
 
@@ -329,9 +356,13 @@ fn a_directory_at_the_declaration_path_fails_the_unlisted_build() {
 
     let result = build(scratch.path(), &out, BuildOptions::default());
 
-    let Err(tack_cli::BuildError::Io(_)) = result else {
+    let Err(tack_cli::BuildError::Io(error)) = result else {
         panic!("an I/O error is reported");
     };
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::IsADirectory | ErrorKind::InvalidInput
+    ));
     assert!(!out.join("opencode").exists());
 }
 

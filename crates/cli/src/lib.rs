@@ -126,6 +126,15 @@ fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(BuildError::Io(error)),
         }
+        match std::fs::remove_dir(&dest) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => return Err(BuildError::Io(error)),
+        }
         return Ok(());
     }
 
