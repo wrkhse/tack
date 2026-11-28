@@ -14,8 +14,8 @@ export type AnnotateResult = { annotate: { [string]: any } }
 export type DropResult = { drop: true }
 export type AllowResult = { allow: true }
 export type HookResult = DenyResult | RewriteResult | AnnotateResult | DropResult | AllowResult | nil
+export type ToolBeforeResult = HookResult
 export type OnError = "deliver" | "deny"
-export type ToolBeforeResult = DenyResult | RewriteResult | nil
 
 -- Rust-backed helpers passed as the second hook and tool argument.
 export type HookCtx = {
@@ -44,6 +44,13 @@ export type HookHandler = {
     run: (payload: any, ctx: HookCtx) -> HookResult?,
 }
 export type HookTable = { HookHandler } | HookHandler
+export type ToolBeforeHandler = {
+    priority: number?,
+    budgetMs: number?,
+    onError: OnError?,
+    run: (payload: any, ctx: ToolBeforeCtx) -> ToolBeforeResult?,
+}
+export type ToolBeforeHookTable = { ToolBeforeHandler } | ToolBeforeHandler
 export type ToolBeforeFn = (payload: any, ctx: ToolBeforeCtx) -> ToolBeforeResult
 export type EventBeforeFn = (payload: any, ctx: HookCtx) -> HookResult
 
@@ -61,7 +68,7 @@ export type ToolDef = {
 export type Plugin = {
     name: string,
     needs: { string }?,
-    toolBefore: (ToolBeforeFn | HookTable)?,
+    toolBefore: (ToolBeforeFn | ToolBeforeHookTable)?,
     eventBefore: (EventBeforeFn | HookTable)?,
     tools: { [string]: ToolDef }?,
 }
