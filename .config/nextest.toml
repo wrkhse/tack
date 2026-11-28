@@ -1,3 +1,13 @@
 [profile.default]
 # A hung test is killed and named after four 30-second periods.
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Measured at ~70 s and ~251 s in a recent green CI run; these stability
+# proofs outlive the blanket bound above.
+[[profile.default.overrides]]
+filter = 'test(=host_transport::tests::timing_proofs_hold_across_fifty_runs_in_ci)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
+[[profile.default.overrides]]
+filter = 'test(=tests::launching_tests_hold_across_fifty_runs_in_ci)'
+slow-timeout = { period = "60s", terminate-after = 6 }
