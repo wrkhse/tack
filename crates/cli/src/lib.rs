@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::ErrorKind;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 use tack_adapter_claude::{ModConfig, ModError};
@@ -29,7 +30,7 @@ pub const DAEMON_BIN: &str = "tack-daemon";
 /// resolves it.
 pub const HOOK_BIN: &str = "tack-hook";
 
-const SUPPORTED: [&str; 3] = ["sandbox", "daemon", "opencode"];
+const SUPPORTED: [&str; 4] = ["sandbox", "daemon", "opencode", tack_sdk::SDK_NEED];
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -91,7 +92,7 @@ impl Default for BuildOptions {
 }
 
 /// Canonicalize a plugin folder, read its manifest in the sandbox, and check
-/// its needs.
+/// its needs. `sdk` is an opt-in need that emits typed Luau declarations.
 fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
     let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
@@ -115,6 +116,65 @@ fn deny_reasons() -> Vec<&'static str> {
         .iter()
         .map(|reason| reason.as_str())
         .collect()
+}
+
+/// Emit the SDK's typed Luau declarations only when the plugin opts in,
+/// returning the path of the emitted file. When the plugin does not opt in,
+/// remove any declarations left by an earlier build so a reused output
+/// directory cannot keep a stale SDK file, and return `None`. The parent
+/// folder is checked for symlinks, and every metadata error other than a
+/// missing folder is propagated and named `cannot inspect SDK output folder`.
+/// The declarations file is unlinked and then created with `create_new`, so
+/// the final operation cannot follow a symlink planted at the leaf between
+/// those two steps.
+fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<Option<PathBuf>, BuildError> {
+    let dest = out.join("sdk");
+    let declarations = dest.join("tack.d.luau");
+
+    match std::fs::symlink_metadata(&dest) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(BuildError::Io(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "symlink in SDK output path",
+            )));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(BuildError::Io(std::io::Error::new(
+                err.kind(),
+                format!("cannot inspect SDK output folder: {err}"),
+            )));
+        }
+    }
+
+    let remove_stale = || -> Result<(), BuildError> {
+        match std::fs::remove_file(&declarations) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(BuildError::Io(err)),
+        }
+        Ok(())
+    };
+
+    if !manifest.needs.iter().any(|need| need == tack_sdk::SDK_NEED) {
+        remove_stale()?;
+        // A folder holding other files is left alone.
+        let _ = std::fs::remove_dir(&dest);
+        return Ok(None);
+    }
+
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    remove_stale()?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&declarations)
+        .map_err(BuildError::Io)?;
+    file.write_all(tack_sdk::TACK_D_LUAU.as_bytes())
+        .map_err(BuildError::Io)?;
+
+    Ok(Some(declarations))
 }
 
 /// Read one plugin, check its needs, and emit the `OpenCode` wrapper and manifest.
@@ -160,6 +220,7 @@ pub fn build(
         BuildError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
     std::fs::write(&descriptor, pretty).map_err(BuildError::Io)?;
+    let _ = emit_sdk(out, &manifest)?;
 
     Ok((index, descriptor))
 }
@@ -206,6 +267,10 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
         written.push(path);
     }
 
+    if let Some(path) = emit_sdk(out, &manifest)? {
+        written.push(path);
+    }
+
     Ok(written)
 }
 
@@ -218,13 +283,14 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
 /// contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderExtension`] when the extension cannot be rendered.
 pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir)?;
     let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
 
     let dest = out.join("pi");
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
     let extension = dest.join(EXTENSION_JS);
     std::fs::write(&extension, script).map_err(BuildError::Io)?;
+    let _ = emit_sdk(out, &manifest)?;
 
     Ok(extension)
 }
@@ -319,7 +385,7 @@ pub fn build_codex(
     out: &Path,
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, manifest) = load(plugin_dir)?;
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
@@ -353,6 +419,9 @@ pub fn build_codex(
     written.push(installed.hooks);
     written.push(installed.config);
     written.push(installed.hashes);
+    if let Some(path) = emit_sdk(out, &manifest)? {
+        written.push(path);
+    }
 
     Ok(written)
 }
@@ -489,5 +558,27 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::NotADirectory);
         assert_eq!(std::fs::read(&file).expect("still a file"), b"x");
         assert!(file.is_file());
+    }
+
+    #[test]
+    fn sdk_folder_metadata_errors_are_named() {
+        let scratch = Scratch::new();
+        let file = scratch.root.join("not-a-folder");
+        std::fs::write(&file, "x").expect("file");
+
+        let manifest = PluginManifest {
+            name: "x".into(),
+            needs: Vec::new(),
+            tools: Vec::new(),
+        };
+
+        let error = emit_sdk(&file, &manifest).expect_err("named error");
+
+        match error {
+            BuildError::Io(io) => {
+                assert!(io.to_string().contains("cannot inspect SDK output folder"));
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
     }
 }
