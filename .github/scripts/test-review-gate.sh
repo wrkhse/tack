@@ -17,7 +17,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 owners=()
 for candidate in "$root"/.github/workflows/*.yml; do
   [ -f "$candidate" ] || continue
-  if rg -q '^  review:' "$candidate"; then
+  if grep -qE '^  review:' "$candidate"; then
     owners+=("$candidate")
   fi
 done
@@ -107,7 +107,7 @@ extract_step_field() {
 require_condition() {
   local step="$1" cond="$2"
 
-  if ! rg -q -F -- "- name: $step" "$workflow"; then
+  if ! grep -qF -- "- name: $step" "$workflow"; then
     printf 'FAIL: step "%s" is missing from the review workflow\n' "$step" >&2
     exit 1
   fi
@@ -247,6 +247,13 @@ check_paths() {
 
   actual=$(translate "$failclosed_cond")
   expect "$name - Require a fresh posted review" "$actual" "$want_failclosed"
+
+  if [ "$want_enforce" = "$want_failclosed" ]; then
+    printf 'FAIL: %s - exactly one of Enforce and fail-closed must be true\n' "$name" >&2
+    exit 1
+  fi
+
+  printf 'ok: %s - exactly one gate path runs\n' "$name"
 }
 
 set_scenario true skipped false
@@ -273,14 +280,44 @@ fi
 
 printf '%s\n' "$failclosed_run" > "$tmp/failclosed-run.txt"
 
-if ! rg -q -F 'No fresh review was posted at this head; the merge gate cannot pass.' "$tmp/failclosed-run.txt"; then
+if ! grep -qF 'No fresh review was posted at this head; the merge gate cannot pass.' "$tmp/failclosed-run.txt"; then
   echo 'FAIL: fail-closed step does not emit the named error' >&2
   exit 1
 fi
 
-if ! rg -q -F 'exit 1' "$tmp/failclosed-run.txt"; then
+# The extracted block above joins its lines with spaces, so also keep the
+# raw run lines: an "exit 1" buried mid-line must not satisfy the gate.
+awk '
+  /-[[:space:]]*name:[[:space:]]*Require a fresh posted review[[:space:]]*$/ { in_step = 1; next }
+  in_step && /^[[:space:]]*run:[[:space:]]*[|][[:space:]]*$/ { in_run = 1; next }
+  in_step && !in_run && /^[[:space:]]*-[[:space:]]+/ { exit }
+  in_step && !in_run && /^  [^[:space:]#]/ { exit }
+  in_run && /^  [^[:space:]#]/ { exit }
+  in_run { print }
+' "$workflow" > "$tmp/failclosed-run-raw.txt"
+
+if ! grep -qE '^[[:space:]]*exit 1[[:space:]]*$' "$tmp/failclosed-run-raw.txt"; then
   echo 'FAIL: fail-closed step does not exit 1' >&2
   exit 1
 fi
 
 printf 'ok: fail-closed step emits named error and exits 1\n'
+
+# ---------------------------------------------------------------------------
+# 6. continue-on-error would let a skipped gate read as a passing one, so
+#    neither the review job nor any of its steps may set it.
+# ---------------------------------------------------------------------------
+
+awk '
+  /^  review:/ { in_review = 1; print; next }
+  in_review && /^  [^[:space:]#]/ { exit }
+  in_review && /^[^[:space:]#]/ { exit }
+  in_review { print }
+' "$workflow" > "$tmp/review-job.yml"
+
+if grep -qE 'continue-on-error:[[:space:]]*true' "$tmp/review-job.yml"; then
+  printf 'FAIL: review job or a gate step uses continue-on-error\n' >&2
+  exit 1
+fi
+
+printf 'ok: no continue-on-error in review job\n'
