@@ -158,6 +158,8 @@ run_docs_case() {
     API_FILES_FIXTURE="$api_fixture" GH="$tmp/gh" \
     OUT="$out" MAX_BYTES=1000 MAX_COMMITS=100 "$gather"
 
+  printf 'docs-only %s: %s\n' "$name" "$(cat -- "$out/docs-only.txt")" >&2
+  printf 'NOTES.txt for %s:\n%s\n' "$name" "$(cat -- "$out/NOTES.txt")" >&2
   [ "$(cat -- "$out/docs-only.txt")" = "$expected" ]
   printf 'ok: docs-only %s\n' "$name"
 }
