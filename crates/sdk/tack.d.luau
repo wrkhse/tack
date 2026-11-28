@@ -32,8 +32,11 @@ export type OnError = "deliver" | "deny"
 -- a capability counts as a call (conservative fail-closed).
 --
 -- There is one accepted spelling of a capability call: the hook parameter is
--- named `ctx`, and the call is `ctx.control.call("<ident>", ...)`. tack build
--- refuses any other spelling with the named `control_call_form` error.
+-- named `ctx`, and the call is `ctx.control.call("<ident>", ...)`. A wrong
+-- or glued qualifier, such as `myctx.control.call`, is refused with the named
+-- `control_call_form` error. Aliases, bracket and colon calls, member access
+-- split by whitespace, and non-literal names are refused with the named
+-- `dynamic_capability` error.
 --
 -- ## Known bypasses
 -- The build audit cannot prove these at runtime:

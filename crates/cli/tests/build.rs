@@ -507,7 +507,7 @@ fn sdk_declarations_pin_hook_table_types() {
         "annotate: (fields:",
         "drop: () ->",
         "export type Control",
-        "control: Control?",
+        "control: Control,",
     ] {
         assert!(declarations.contains(name), "missing declaration: {name}");
     }
