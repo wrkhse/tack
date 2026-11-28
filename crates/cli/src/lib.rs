@@ -127,13 +127,13 @@ fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<Option<PathBuf>, Bu
     let declarations = dest.join("tack.d.luau");
 
     for path in [&dest, &declarations] {
-        if let Ok(meta) = std::fs::symlink_metadata(path) {
-            if meta.file_type().is_symlink() {
-                return Err(BuildError::Io(std::io::Error::new(
-                    ErrorKind::InvalidInput,
-                    "symlink in SDK output path",
-                )));
-            }
+        if let Ok(meta) = std::fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(BuildError::Io(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "symlink in SDK output path",
+            )));
         }
     }
 
