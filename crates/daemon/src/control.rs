@@ -303,8 +303,8 @@ mod tests {
         .unwrap()
     }
 
-    fn reply_from(line: Vec<u8>) -> Reply {
-        serde_json::from_slice(&line).unwrap()
+    fn reply_from(line: &[u8]) -> Reply {
+        serde_json::from_slice(line).unwrap()
     }
 
     fn test_deadline() -> Instant {
@@ -400,7 +400,7 @@ mod tests {
         let line = control_line(1, PROTOCOL_VERSION, "navigate", json!({}));
 
         let reply = reply_from(
-            broker
+            &broker
                 .try_handle(&line, test_deadline())
                 .expect("a control frame gets a reply"),
         );
@@ -414,7 +414,7 @@ mod tests {
         let line = control_line(1, PROTOCOL_VERSION.saturating_add(1), "navigate", json!({}));
 
         let reply = reply_from(
-            broker
+            &broker
                 .try_handle(&line, test_deadline())
                 .expect("a control frame gets a reply"),
         );
@@ -440,7 +440,7 @@ mod tests {
 
         let reply = tokio::task::block_in_place(|| {
             reply_from(
-                broker
+                &broker
                     .try_handle(&line, test_deadline())
                     .expect("a control frame gets a reply"),
             )
@@ -467,7 +467,7 @@ mod tests {
 
         let reply = tokio::task::block_in_place(|| {
             reply_from(
-                broker
+                &broker
                     .try_handle(&line, test_deadline())
                     .expect("a control frame gets a reply"),
             )
@@ -486,7 +486,7 @@ mod tests {
         assert!(line.len() > MAX_FRAME_BYTES);
         assert_eq!(
             reply_from(
-                broker
+                &broker
                     .try_handle(&line, test_deadline())
                     .expect("a control frame gets a reply")
             ),
@@ -529,7 +529,7 @@ mod tests {
 
         let reply = tokio::task::block_in_place(|| {
             reply_from(
-                broker
+                &broker
                     .try_handle(&line, deadline)
                     .expect("a control frame gets a reply"),
             )
