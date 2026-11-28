@@ -96,3 +96,15 @@ set -e
 grep -Fq 'cargo mutants exited 9' "$tmp/f.out"
 grep -Fq 'its outcome cannot be used' "$tmp/f.out"
 printf 'ok: nonzero exit with an existing outcome fails with a named reason\n'
+
+# An empty shard reports "Found 0 mutants to test" plus a WARN line and exits 0.
+printf 'Found 0 mutants to test\n\033[33m WARN\033[0m No mutants found under the active filters\n' > "$tmp/g.log"
+: > "$tmp/g.list"
+run_script "$tmp/g.out" 0 "$tmp/g.log" "$tmp/g.list" \
+  "$tmp/g/outcomes.json" "$tmp/g.github-output"
+
+[ -f "$tmp/g/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/g/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/g.github-output"
+printf 'ok: empty-shard zero line and empty list write a zero outcome\n'
