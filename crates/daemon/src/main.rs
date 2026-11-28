@@ -100,15 +100,20 @@ fn kill_and_wait(child: &mut Child) {
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(500))
         .unwrap_or_else(Instant::now);
-    if wait_bounded(|| child.try_wait(), deadline) == Reaped::Timeout {
+    if reap_timed_out(wait_bounded(|| child.try_wait(), deadline)) {
         eprintln!("tack-daemon: child reap timed out");
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reaped {
     Exited(ExitStatus),
     Timeout,
+}
+
+/// Only a missing exit is a timeout; an observed exit is not.
+fn reap_timed_out(result: Reaped) -> bool {
+    result == Reaped::Timeout
 }
 
 /// Wait for an exit inside the budget; an absent exit is not a success.
@@ -798,6 +803,16 @@ mod tests {
         );
 
         assert_eq!(reaped, Reaped::Exited(status));
+    }
+
+    #[test]
+    fn reap_timed_out_distinguishes_timeout_from_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let exited = Reaped::Exited(ExitStatus::from_raw(0));
+
+        assert!(reap_timed_out(Reaped::Timeout));
+        assert!(!reap_timed_out(exited));
     }
 
     #[test]
