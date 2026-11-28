@@ -478,12 +478,16 @@ jobs:
           git checkout "$BASE_SHA" -- .github/scripts
           # These four files are new in this PR, so they are absent from the
           # base SHA; the manager's merge guard checks their content. Restore
-          # only them from the checked-out PR tree, never a pre-existing script.
-          git checkout HEAD -- \
+          # only them from the checked-out PR tree, after a git cat-file check
+          # confirms they are absent from the base, never a pre-existing script.
+          for f in \
             .github/scripts/review-prompt.txt \
             .github/scripts/enforce-review-verdict.sh \
             .github/scripts/enforce-review-verdict.jq \
             .github/scripts/test-enforce-verdict.sh
+          do
+            git cat-file -e "$BASE_SHA:$f" 2>/dev/null || git checkout HEAD -- "$f"
+          done
           git status --short -- .github/scripts
       # One read of the head's check runs. The three conformance checks stay
       # independently required; this only catches a failed or cancelled run
