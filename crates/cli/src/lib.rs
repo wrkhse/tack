@@ -123,9 +123,10 @@ fn deny_reasons() -> Vec<&'static str> {
 /// remove any declarations left by an earlier build so a reused output
 /// directory cannot keep a stale SDK file, and return `None`. The parent
 /// folder is checked for symlinks, and every metadata error other than a
-/// missing folder is propagated. The declarations file is unlinked and then
-/// created with `create_new`, so the final operation cannot follow a symlink
-/// planted at the leaf between those two steps.
+/// missing folder is propagated and named `cannot inspect SDK output folder`.
+/// The declarations file is unlinked and then created with `create_new`, so
+/// the final operation cannot follow a symlink planted at the leaf between
+/// those two steps.
 fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<Option<PathBuf>, BuildError> {
     let dest = out.join("sdk");
     let declarations = dest.join("tack.d.luau");
@@ -140,7 +141,12 @@ fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<Option<PathBuf>, Bu
         Ok(_) => {}
         Err(err) => match err.kind() {
             ErrorKind::NotFound => {}
-            _ => return Err(BuildError::Io(err)),
+            _ => {
+                return Err(BuildError::Io(std::io::Error::new(
+                    err.kind(),
+                    format!("cannot inspect SDK output folder: {err}"),
+                )));
+            }
         },
     }
 
@@ -556,5 +562,27 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::NotADirectory);
         assert_eq!(std::fs::read(&file).expect("still a file"), b"x");
         assert!(file.is_file());
+    }
+
+    #[test]
+    fn sdk_folder_metadata_errors_are_named() {
+        let scratch = Scratch::new();
+        let file = scratch.root.join("not-a-folder");
+        std::fs::write(&file, "x").expect("file");
+
+        let manifest = PluginManifest {
+            name: "x".into(),
+            needs: Vec::new(),
+            tools: Vec::new(),
+        };
+
+        let error = emit_sdk(&file, &manifest).expect_err("named error");
+
+        match error {
+            BuildError::Io(io) => {
+                assert!(io.to_string().contains("cannot inspect SDK output folder"));
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
     }
 }
