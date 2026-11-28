@@ -37,6 +37,11 @@ export type ToolBeforeCtx = HookCtx & {
 -- A hook field may be a function, one handler, or an array of handlers. The
 -- barn engine runs handlers in descending priority, within each handler's
 -- budget.
+-- Defaults applied by the barn engine: priority 0; budgetMs the sandbox's
+-- per-call cap; onError "deny" (fails closed).
+-- Handlers with equal priority run in array order. A priority or budgetMs that
+-- is NaN, fractional or out of range is rejected by name.
+-- `{ allow = true }` is a valid result.
 export type HookHandler = {
     priority: number?,
     budgetMs: number?,
