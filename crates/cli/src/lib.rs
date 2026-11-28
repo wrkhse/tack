@@ -199,6 +199,30 @@ fn bracket_indexed_call(after: &str) -> bool {
     space(after).starts_with(']')
 }
 
+/// Check that the `control` at `at` is preceded by the exact `ctx.` qualifier
+/// and not glued to a preceding identifier. An out-of-range qualifier reads as
+/// dynamic; a wrong or glued qualifier is a `ControlCallForm` error.
+fn check_qualifier(source: &str, at: usize) -> Result<(), BuildError> {
+    let qualifier_start = at
+        .checked_sub(CONTROL_QUALIFIER.len())
+        .ok_or(BuildError::DynamicCapability)?;
+    let qualifier = source
+        .get(qualifier_start..at)
+        .ok_or(BuildError::DynamicCapability)?;
+    if qualifier != CONTROL_QUALIFIER {
+        return Err(BuildError::ControlCallForm);
+    }
+    let glued = source
+        .get(..qualifier_start)
+        .and_then(|head| head.bytes().next_back())
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if glued {
+        return Err(BuildError::ControlCallForm);
+    }
+
+    Ok(())
+}
+
 /// Audit one source by scanning every `control` occurrence. A call-shaped
 /// occurrence must be the literal `ctx.control.call("<ident>")` form, so a call
 /// hidden in a comment or string is still checked. Whitespace-separated member
@@ -252,22 +276,7 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             return Err(BuildError::DynamicCapability);
         }
 
-        let qualifier_start = at
-            .checked_sub(CONTROL_QUALIFIER.len())
-            .ok_or(BuildError::DynamicCapability)?;
-        let qualifier = source
-            .get(qualifier_start..at)
-            .ok_or(BuildError::DynamicCapability)?;
-        if qualifier != CONTROL_QUALIFIER {
-            return Err(BuildError::ControlCallForm);
-        }
-        let glued = source
-            .get(..qualifier_start)
-            .and_then(|head| head.bytes().next_back())
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-        if glued {
-            return Err(BuildError::ControlCallForm);
-        }
+        check_qualifier(source, at)?;
 
         calls = calls.checked_add(1).ok_or(BuildError::AuditLimit)?;
         if calls > MAX_AUDIT_CALLS {
