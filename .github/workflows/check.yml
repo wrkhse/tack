@@ -692,7 +692,7 @@ jobs:
       # verdict for a docs-only PR let the review job pass.
       - name: Enforce posted review verdict
         if: >-
-          always() && steps.post_review.outcome == 'success'
+          always() && (steps.carry_forward.outputs.carried == 'true' || steps.post_review.outcome == 'success')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
