@@ -31,9 +31,18 @@ pub const HOOK_BIN: &str = "tack-hook";
 
 const SUPPORTED: [&str; 3] = ["sandbox", "daemon", "opencode"];
 
+/// The opt-in module whose typed declarations `build_sdk` emits.
+const SDK_MODULE: &str = "sdk";
+/// Modules a plugin may list in its `modules` table. Any other name is refused.
+const MODULES: [&str; 1] = [SDK_MODULE];
+/// Longest plugin name that becomes a declaration file name.
+const MAX_NAME_BYTES: usize = 64;
+
 #[derive(Debug)]
 pub enum BuildError {
     NeedMissing(String),
+    ModuleMissing(String),
+    PluginName(String),
     Sandbox(EngineError),
     Manifest(serde_json::Error),
     Render(WrapperError),
@@ -47,6 +56,8 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NeedMissing(name) => write!(f, "need_missing:{name}"),
+            Self::ModuleMissing(name) => write!(f, "module_missing:{name}"),
+            Self::PluginName(name) => write!(f, "plugin_name:{name}"),
             Self::Sandbox(error) => write!(f, "sandbox:tack: {error}"),
             Self::Manifest(error) => write!(f, "manifest:{error}"),
             Self::Render(error) => write!(f, "render:{error}"),
@@ -62,6 +73,7 @@ impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NeedMissing(_) => None,
+            Self::ModuleMissing(_) | Self::PluginName(_) => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -91,13 +103,15 @@ impl Default for BuildOptions {
 }
 
 /// Canonicalize a plugin folder, read its manifest in the sandbox, and check
-/// its needs.
-fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
+/// its needs and modules. The modules are returned beside the manifest because
+/// the wire contract does not carry them.
+fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest, Vec<String>), BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
     let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
         .and_then(|limits| Sandbox::new(&plugin_dir, limits, Capabilities::default()))
         .and_then(|sandbox| sandbox.manifest())
         .map_err(BuildError::Sandbox)?;
+    let modules = declared_modules(&metadata)?;
     let manifest: PluginManifest =
         serde_json::from_value(metadata).map_err(BuildError::Manifest)?;
 
@@ -107,7 +121,20 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
         }
     }
 
-    Ok((plugin_dir, manifest))
+    for module in &modules {
+        if !MODULES.contains(&module.as_str()) {
+            return Err(BuildError::ModuleMissing(module.clone()));
+        }
+    }
+
+    Ok((plugin_dir, manifest, modules))
+}
+
+/// The module names a plugin lists, read from the `modules` array that the
+/// sandbox puts in the manifest JSON.
+fn declared_modules(metadata: &serde_json::Value) -> Result<Vec<String>, BuildError> {
+    let listed = metadata.get("modules").cloned().unwrap_or_default();
+    serde_json::from_value(listed).map_err(BuildError::Manifest)
 }
 
 fn deny_reasons() -> Vec<&'static str> {
@@ -136,7 +163,7 @@ pub fn build(
     out: &Path,
     options: BuildOptions,
 ) -> Result<(PathBuf, PathBuf), BuildError> {
-    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let (plugin_dir, manifest, _) = load(plugin_dir)?;
     let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = WrapperConfig {
@@ -179,7 +206,7 @@ pub fn build(
 /// wire contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderMod`] when the mod cannot be rendered.
 pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, manifest) = load(plugin_dir)?;
+    let (plugin_dir, manifest, _) = load(plugin_dir)?;
     let reasons = deny_reasons();
     let plugin = plugin_dir.to_string_lossy();
     let config = ModConfig {
@@ -218,7 +245,7 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
 /// contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderExtension`] when the extension cannot be rendered.
 pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, _, _) = load(plugin_dir)?;
     let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
 
     let dest = out.join("pi");
@@ -227,6 +254,60 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
     std::fs::write(&extension, script).map_err(BuildError::Io)?;
 
     Ok(extension)
+}
+
+/// Read one plugin and, when it lists the `sdk` module, emit the SDK's typed
+/// declarations to `<out>/sdk/<name>.d.luau`. A plugin that does not list the
+/// module emits nothing and creates no folder.
+///
+/// # Errors
+///
+/// Returns [`BuildError::Io`] when the output folder or file cannot be
+/// written, [`BuildError::Sandbox`] when the plugin cannot be loaded or read,
+/// [`BuildError::Manifest`] when the manifest does not match the wire
+/// contract, [`BuildError::NeedMissing`] for an unsupported need,
+/// [`BuildError::ModuleMissing`] for an unknown module, and
+/// [`BuildError::PluginName`] when the name of a plugin that lists the module
+/// is not a plain file name.
+pub fn build_sdk(plugin_dir: &Path, out: &Path) -> Result<Option<PathBuf>, BuildError> {
+    let (_, manifest, modules) = load(plugin_dir)?;
+
+    if !modules.iter().any(|module| module == SDK_MODULE) {
+        return Ok(None);
+    }
+
+    let stem = declaration_stem(&manifest.name)?;
+    let dest = out.join("sdk");
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    let path = dest.join(format!("{stem}.d.luau"));
+    std::fs::write(&path, declarations()).map_err(BuildError::Io)?;
+
+    Ok(Some(path))
+}
+
+/// A plugin name as a declaration file name: ASCII letters, digits, `-` and
+/// `_`, starting with a letter or digit, at most `MAX_NAME_BYTES` long.
+fn declaration_stem(name: &str) -> Result<&str, BuildError> {
+    let plain = name.len() <= MAX_NAME_BYTES
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+
+    if plain {
+        Ok(name)
+    } else {
+        Err(BuildError::PluginName(name.to_owned()))
+    }
+}
+
+/// The SDK's declarations as one file: the contract text, then its version.
+fn declarations() -> String {
+    format!(
+        "{}export type ContractVersion = {}\n",
+        tack_sdk::TACK_D_LUAU,
+        tack_sdk::CONTRACT_VERSION
+    )
 }
 
 /// Where `path` will resolve once its folders exist, without creating
@@ -319,7 +400,7 @@ pub fn build_codex(
     out: &Path,
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, _) = load(plugin_dir)?;
+    let (plugin_dir, _, _) = load(plugin_dir)?;
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {

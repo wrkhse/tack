@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use tack_cli::{BuildError, BuildOptions, build, build_claude, build_codex, build_pi};
+use tack_cli::{BuildError, BuildOptions, build, build_claude, build_codex, build_pi, build_sdk};
 
 const MAX_TIMEOUT_MS: u64 = 60_000;
 
@@ -101,14 +101,16 @@ fn run_build(
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<Vec<PathBuf>, BuildError> {
     let out = Path::new(args.out);
+    // Validated first: a refused module or name writes nothing.
+    let mut written: Vec<PathBuf> = build_sdk(plugin_dir, out)?.into_iter().collect();
 
     match args.target {
         Target::OpenCode => {
             let (index, manifest) = build(plugin_dir, out, args.options)?;
-            Ok(vec![index, manifest])
+            written.extend([index, manifest]);
         }
-        Target::Claude => build_claude(plugin_dir, out),
-        Target::Pi => build_pi(plugin_dir, out).map(|path| vec![path]),
+        Target::Claude => written.extend(build_claude(plugin_dir, out)?),
+        Target::Pi => written.push(build_pi(plugin_dir, out)?),
         Target::Codex => {
             let codex_home = env("CODEX_HOME");
             let home = env("HOME");
@@ -116,9 +118,11 @@ fn run_build(
                 tack_adapter_codex::resolve_home(codex_home.as_deref(), home.as_deref())
                     .map_err(BuildError::Codex)?;
 
-            build_codex(plugin_dir, out, &codex_home)
+            written.extend(build_codex(plugin_dir, out, &codex_home)?);
         }
     }
+
+    Ok(written)
 }
 
 /// Run one command, reading the environment through `env` and handing each
@@ -609,6 +613,56 @@ mod tests {
             panic!("unknown need must be refused");
         };
         assert_eq!(need, "barn");
+        assert_eq!(lines, Vec::<String>::new());
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn dispatch_build_emits_the_sdk_declarations_before_the_target_paths() {
+        let scratch = Scratch::new();
+        let out = scratch.root.join("dist");
+        std::fs::write(
+            scratch.root.join("plugin.luau"),
+            r#"return { name = "guard", modules = { sdk = {} }, tools = {} }"#,
+        )
+        .expect("fixture file");
+        let plugin = scratch.root.to_str().expect("UTF-8 plugin path");
+        let out_arg = out.to_str().expect("UTF-8 output path");
+
+        let lines = dispatched(&["build", plugin, "--out", out_arg, "--target", "pi"]);
+
+        assert_eq!(
+            lines,
+            vec![
+                out.join("sdk/guard.d.luau").display().to_string(),
+                out.join("pi/extension.js").display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_build_refuses_an_unknown_module_before_writing_anything() {
+        let scratch = Scratch::new();
+        let out = scratch.root.join("dist");
+        std::fs::write(
+            scratch.root.join("plugin.luau"),
+            r#"return { name = "guard", modules = { bogus = {} }, tools = {} }"#,
+        )
+        .expect("fixture file");
+
+        let (result, lines) = run(&[
+            "build",
+            scratch.root.to_str().expect("UTF-8 plugin path"),
+            "--out",
+            out.to_str().expect("UTF-8 output path"),
+            "--target",
+            "pi",
+        ]);
+
+        let Err(CliError::Build(BuildError::ModuleMissing(module))) = result else {
+            panic!("unknown module must be refused");
+        };
+        assert_eq!(module, "bogus");
         assert_eq!(lines, Vec::<String>::new());
         assert!(!out.exists());
     }

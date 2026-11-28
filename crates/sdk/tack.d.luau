@@ -37,10 +37,12 @@ export type ToolDef = {
     run: (input: any, ctx: HookCtx) -> ToolResult,
 }
 
--- The table plugin.luau must return.
+-- The table plugin.luau must return. A module is opt-in: a plugin lists it in
+-- `modules`, and one that does not list it gets none of its declarations.
 export type Plugin = {
     name: string,
     needs: { string }?,
+    modules: { [string]: {} }?,
     toolBefore: ((payload: any, ctx: ToolBeforeCtx) -> ToolBeforeResult)?,
     tools: { [string]: ToolDef }?,
 }
