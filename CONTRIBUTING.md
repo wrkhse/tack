@@ -11,7 +11,7 @@ git config core.hooksPath .githooks
 On each commit the hook formats only staged files: rustfmt (edition 2024) on staged
 .rs paths, and tidy v2.0.0 on the other staged files using the repository's
 tidy.json, then re-stages them. tidy skips file types it does
-not recognize. A recognized file it cannot parse, a partially staged file, a staged symlink or non-regular path, or a tidy
+not recognize. A recognized file it cannot parse, a partially staged file, or a tidy
 download/checksum/platform failure stops the commit with a named reason. It runs no
 clippy, compile or tests. The tidy pins are plain data in .github/tidy.env; the
 binary is verified by SHA-256 on first use and the cached archive is verified on
