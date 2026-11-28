@@ -304,6 +304,12 @@ pub enum Output {
 /// The SDK step is planned before the target writes, so a refused module, name
 /// or path writes nothing. It is applied only once the target has succeeded.
 ///
+/// Path refusal is a one-shot check at plan time, assuming `out` is a build-owned
+/// folder that no other process modifies concurrently; it needs no added
+/// dependency or unsafe FFI. Concurrent replacement of an entry is out of scope
+/// (see [`build_sdk`]): a path swapped in after planning may be a symlink the
+/// check never saw and can be followed, so no guarantee against that is made.
+///
 /// # Errors
 ///
 /// Returns the errors of the target build, and [`BuildError::DeclarationPath`]
@@ -334,6 +340,13 @@ pub fn build_plugin(
 /// A plugin that lists the `sdk` module gets `<name>.d.luau`. A plugin that does
 /// not list it loses the declaration an earlier build wrote, and the folder once
 /// that leaves it empty.
+///
+/// Path refusal is a one-shot check at plan time: the folder and file are
+/// inspected as they stand, without following symlinks. That needs no added
+/// dependency or unsafe FFI, but assumes `out` is build-owned and not modified
+/// concurrently. Concurrent replacement is out of scope: an entry swapped in
+/// after planning can be a symlink the check never saw and may be followed, so
+/// no guarantee against that case is made.
 ///
 /// # Errors
 ///
@@ -386,7 +399,10 @@ fn plan_sdk(loaded: &Loaded, out: &Path) -> Result<SdkStep, BuildError> {
     let path = folder.join(format!("{stem}.d.luau"));
 
     match entry_at(&folder)? {
-        Some(metadata) if metadata.is_dir() => Ok(SdkStep::Clear { folder, path }),
+        Some(metadata) if metadata.is_dir() => {
+            refuse_other_entry(&path)?;
+            Ok(SdkStep::Clear { folder, path })
+        }
         Some(_) => Err(BuildError::DeclarationPath(folder.display().to_string())),
         None => Ok(SdkStep::Nothing),
     }

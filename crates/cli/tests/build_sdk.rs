@@ -348,6 +348,39 @@ fn an_unlisted_plugin_refuses_a_symlinked_sdk_folder_without_following_it() {
 }
 
 #[test]
+fn an_unlisted_plugin_refuses_a_symlinked_declaration_without_following_it() {
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    let elsewhere = scratch.path().join("elsewhere.d.luau");
+    std::fs::create_dir_all(out.join("sdk")).expect("sdk folder");
+    std::fs::write(&elsewhere, "keep").expect("elsewhere file");
+    std::os::unix::fs::symlink(&elsewhere, out.join("sdk").join("guard.d.luau")).expect("symlink");
+    scratch.write_plugin(r#"return { name = "guard", tools = {} }"#);
+
+    let Err(error) = build_sdk(scratch.path(), &out) else {
+        panic!("an unlisted plugin refuses a symlinked declaration");
+    };
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "declaration_path:{}",
+            out.join("sdk").join("guard.d.luau").display()
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(&elsewhere).expect("elsewhere is readable"),
+        "keep"
+    );
+    assert!(
+        std::fs::symlink_metadata(out.join("sdk").join("guard.d.luau"))
+            .expect("guard still exists")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
 fn an_output_path_that_is_a_file_is_an_io_error_even_when_unlisted() {
     let scratch = Scratch::new();
     std::fs::write(scratch.out(), "not a folder").expect("output file");
