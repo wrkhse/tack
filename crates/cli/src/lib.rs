@@ -127,10 +127,9 @@ fn emit_sdk(out: &Path, needs: &[String]) -> Result<(), BuildError> {
     let declaration = dest.join("tack.d.luau");
 
     if !needs.iter().any(|need| need == SDK_MODULE) {
-        if let Ok(metadata) = std::fs::symlink_metadata(&dest) {
-            if metadata.file_type().is_symlink() {
-                return Err(BuildError::Sdk("the SDK output path is a symlink".into()));
-            }
+        if std::fs::symlink_metadata(&dest).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(BuildError::Sdk("the SDK output path is a symlink".into()));
         }
         match std::fs::remove_file(&declaration) {
             Ok(()) => {
