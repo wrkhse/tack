@@ -372,9 +372,14 @@ fn declared_needs_are_rendered_as_hook_arguments() {
     fixture.manifest.needs = vec!["daemon".into(), "control.call.navigate".into()];
 
     let [_, _, register] = render(&fixture.config()).expect("render");
-    let lines: Vec<&str> = register.contents.lines().map(str::trim).collect();
 
-    assert!(lines.contains(&"const NEEDS = [\"daemon\",\"control.call.navigate\"];"));
+    assert!(
+        register
+            .contents
+            .lines()
+            .map(str::trim)
+            .any(|line| { line == "const NEEDS = [\"daemon\",\"control.call.navigate\"];" })
+    );
 }
 
 #[test]

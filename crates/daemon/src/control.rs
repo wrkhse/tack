@@ -6,14 +6,14 @@
 //! while a host call awaits its reply. Every reply echoes the frame's id and
 //! version and is either one control result or one named daemon error.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tack_protocol::wire::{
-    self as wire, MAX_FRAME_BYTES, PROTOCOL_VERSION, Reply, ReplyError, Request, WireError,
+    self as wire, MAX_FRAME_BYTES, PROTOCOL_VERSION, Reply, Request, WireError,
 };
 use tokio::net::UnixStream as AsyncUnixStream;
 use tokio::runtime::Handle;
@@ -82,20 +82,30 @@ impl ControlBroker {
     /// claimed, a reply is always produced: parse, version and grant failures
     /// become named errors before any socket work is attempted.
     #[must_use]
-    pub fn try_handle(&self, line: &[u8]) -> Option<Vec<u8>> {
+    pub fn try_handle(&self, line: &[u8], deadline: Instant) -> Option<Vec<u8>> {
         let probe: Value = serde_json::from_slice(line).ok()?;
 
-        if probe.get("kind").and_then(Value::as_str) != Some("control") {
+        if !control_probe(&probe) {
             return None;
         }
 
         let fallback_id = probe.get("id").and_then(Value::as_u64).unwrap_or_default();
 
-        Some(self.handle_control(fallback_id, line))
+        Some(self.handle_control(fallback_id, line, deadline))
+    }
+
+    /// Recognize a control frame without authorizing, forwarding or counting it.
+    #[must_use]
+    pub fn is_control(&self, line: &[u8]) -> bool {
+        let Ok(probe) = serde_json::from_slice::<Value>(line) else {
+            return false;
+        };
+
+        control_probe(&probe)
     }
 
     /// Handle a claimed frame without letting any failure escape.
-    fn handle_control(&self, fallback_id: u64, line: &[u8]) -> Vec<u8> {
+    fn handle_control(&self, fallback_id: u64, line: &[u8], deadline: Instant) -> Vec<u8> {
         if line.len() > MAX_FRAME_BYTES {
             return error_line(fallback_id, ERR_CONTROL_FRAME);
         }
@@ -122,7 +132,7 @@ impl ControlBroker {
             return error_line(id, ERR_GRANT);
         }
 
-        match self.harness_result(&call, &input) {
+        match self.harness_result(&call, &input, deadline) {
             Ok(result) => encode_reply(
                 id,
                 &Reply::Control {
@@ -135,49 +145,94 @@ impl ControlBroker {
         }
     }
 
-    /// Exchange exactly one line with the harness inside the bounded deadline.
-    fn harness_result(&self, call: &str, input: &Value) -> Result<Value, &'static str> {
-        let socket = self.harness_socket.as_deref().ok_or(ERR_SOCKET)?;
-        let outgoing =
-            wire::encode_line(&json!({ "call": call, "input": input })).map_err(|_| ERR_FRAME)?;
-        let deadline = Instant::now()
+    /// Exchange exactly one line with the harness inside the caller's budget.
+    fn harness_result(
+        &self,
+        call: &str,
+        input: &Value,
+        deadline: Instant,
+    ) -> Result<Value, &'static str> {
+        let socket = self.harness_socket.clone().ok_or(ERR_SOCKET)?;
+        let call = call.to_owned();
+        let input = input.clone();
+
+        // The host call bounds the whole exchange; the harness budget stays as
+        // an extra cap so a generous caller cannot leave the socket open.
+        let cap = Instant::now()
             .checked_add(HARNESS_DEADLINE)
             .ok_or(ERR_TIMEOUT)?;
-        let stream = connect_bounded(socket, deadline)?;
+        let deadline = cap.min(deadline);
+        let budget = remaining(deadline)?;
 
-        stream
-            .set_write_timeout(remaining(deadline)?)
-            .map_err(|_| ERR_IO)?;
-        stream.write_all(&outgoing).map_err(|_| ERR_IO)?;
+        let handle = Handle::try_current().map_err(|_| ERR_RUNTIME)?;
+        let joined = handle.block_on(async move {
+            let join = tokio::task::spawn_blocking(move || {
+                harness_exchange(&socket, &call, &input, deadline)
+            });
 
-        let mut reader = BufReader::new(stream);
-        reader
-            .get_mut()
-            .set_read_timeout(remaining(deadline)?)
-            .map_err(|_| ERR_IO)?;
+            timeout(budget, join).await
+        });
 
-        let mut incoming = Vec::new();
-        match wire::read_line(&mut reader) {
-            Ok(Some(line)) => incoming = line,
-            Ok(None) | Err(WireError::Closed) => return Err(ERR_REPLY),
-            Err(WireError::TooLarge) => return Err(ERR_FRAME),
-            Err(WireError::Io | WireError::Malformed) => return Err(ERR_TIMEOUT),
-        }
-
-        let reply: Value = serde_json::from_slice(&incoming).map_err(|_| ERR_REPLY)?;
-
-        if reply.get("error").is_some() {
-            return Err(ERR_HARNESS);
-        }
-
-        reply.get("result").cloned().ok_or(ERR_REPLY)
+        joined.map_err(|_| ERR_TIMEOUT)?.map_err(|_| ERR_IO)
     }
 }
 
-impl ControlBrokerTrait for ControlBroker {
-    fn try_handle(&self, line: &[u8]) -> Option<Vec<u8>> {
-        ControlBroker::try_handle(self, line)
+/// One blocking harness exchange.
+///
+/// Socket waits still carry the remaining budget, but a peer that drips
+/// bytes renews them; the outer timeout in `harness_result` is the bound
+/// that cannot be reset.
+fn harness_exchange(
+    socket: &Path,
+    call: &str,
+    input: &Value,
+    deadline: Instant,
+) -> Result<Value, &'static str> {
+    let outgoing =
+        wire::encode_line(&json!({ "call": call, "input": input })).map_err(|_| ERR_FRAME)?;
+    let stream = connect_bounded(socket, deadline)?;
+
+    stream
+        .set_write_timeout(Some(remaining(deadline)?))
+        .map_err(|_| ERR_IO)?;
+    stream.write_all(&outgoing).map_err(|_| ERR_IO)?;
+
+    let mut reader = BufReader::new(stream);
+    reader
+        .get_mut()
+        .set_read_timeout(Some(remaining(deadline)?))
+        .map_err(|_| ERR_IO)?;
+
+    let mut incoming = Vec::new();
+    match wire::read_line(&mut reader) {
+        Ok(Some(line)) => incoming = line,
+        Ok(None) | Err(WireError::Closed) => return Err(ERR_REPLY),
+        Err(WireError::TooLarge) => return Err(ERR_FRAME),
+        Err(WireError::Io | WireError::Malformed) => return Err(ERR_TIMEOUT),
     }
+
+    let reply: Value = serde_json::from_slice(&incoming).map_err(|_| ERR_REPLY)?;
+
+    if reply.get("error").is_some() {
+        return Err(ERR_HARNESS);
+    }
+
+    reply.get("result").cloned().ok_or(ERR_REPLY)
+}
+
+impl ControlBrokerTrait for ControlBroker {
+    fn try_handle(&self, line: &[u8], deadline: Instant) -> Option<Vec<u8>> {
+        ControlBroker::try_handle(self, line, deadline)
+    }
+
+    fn is_control(&self, line: &[u8]) -> bool {
+        ControlBroker::is_control(self, line)
+    }
+}
+
+/// The one wire shape a line must have to be claimed as a control frame.
+fn control_probe(probe: &Value) -> bool {
+    probe.get("kind").and_then(Value::as_str) == Some("control")
 }
 
 /// Connect within what is left of the harness deadline, then hand back a
@@ -226,11 +281,14 @@ fn encode_reply(id: u64, reply: &Reply) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::BufRead;
     use std::os::unix::net::UnixListener;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::SystemTime;
+
+    use tack_protocol::wire::ReplyError;
 
     use super::*;
 
@@ -248,6 +306,12 @@ mod tests {
 
     fn reply_from(line: Vec<u8>) -> Reply {
         serde_json::from_slice(&line).unwrap()
+    }
+
+    fn test_deadline() -> Instant {
+        Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("the test budget is representable")
     }
 
     // No wire cap here: the oversize proof needs a frame past the cap.
@@ -338,7 +402,7 @@ mod tests {
 
         let reply = reply_from(
             broker
-                .try_handle(&line)
+                .try_handle(&line, test_deadline())
                 .expect("a control frame gets a reply"),
         );
 
@@ -352,7 +416,7 @@ mod tests {
 
         let reply = reply_from(
             broker
-                .try_handle(&line)
+                .try_handle(&line, test_deadline())
                 .expect("a control frame gets a reply"),
         );
 
@@ -364,7 +428,7 @@ mod tests {
         let broker = granted_broker(None);
         let line = wire::encode_line(&json!({ "kind": "hook", "id": 1 })).unwrap();
 
-        assert_eq!(broker.try_handle(&line), None);
+        assert_eq!(broker.try_handle(&line, test_deadline()), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -378,7 +442,7 @@ mod tests {
         let reply = tokio::task::block_in_place(|| {
             reply_from(
                 broker
-                    .try_handle(&line)
+                    .try_handle(&line, test_deadline())
                     .expect("a control frame gets a reply"),
             )
         });
@@ -405,7 +469,7 @@ mod tests {
         let reply = tokio::task::block_in_place(|| {
             reply_from(
                 broker
-                    .try_handle(&line)
+                    .try_handle(&line, test_deadline())
                     .expect("a control frame gets a reply"),
             )
         });
@@ -424,10 +488,57 @@ mod tests {
         assert_eq!(
             reply_from(
                 broker
-                    .try_handle(&line)
+                    .try_handle(&line, test_deadline())
                     .expect("a control frame gets a reply")
             ),
             error("control_frame_too_large")
         );
+    }
+
+    // A harness that reads the call, then drips bytes without ending a line
+    // until its own write budget runs out. The caller must not wait for it.
+    fn slow_drip_harness(socket: &Path) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+
+            for _ in 0..40 {
+                if stream.write_all(b"x").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_drip_harness_cannot_outlive_the_budget() {
+        let dir = TempDir::new();
+        let socket = dir.0.join("harness.sock");
+        let harness = slow_drip_harness(&socket);
+        let broker = granted_broker(Some(socket));
+        let line = control_line(1, PROTOCOL_VERSION, "navigate", json!({ "target": "demo" }));
+        let budget = Duration::from_millis(150);
+        let deadline = Instant::now()
+            .checked_add(budget)
+            .expect("the test budget is representable");
+        let started = Instant::now();
+
+        let reply = tokio::task::block_in_place(|| {
+            reply_from(
+                broker
+                    .try_handle(&line, deadline)
+                    .expect("a control frame gets a reply"),
+            )
+        });
+        let elapsed = started.elapsed();
+
+        assert_eq!(reply, error("harness_timeout"));
+        assert!(elapsed < Duration::from_secs(1));
+        harness.join().unwrap();
     }
 }

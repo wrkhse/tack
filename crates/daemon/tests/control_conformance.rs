@@ -53,7 +53,17 @@ impl Sandbox {
     }
 
     fn plugin(&self) -> PathBuf {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/control-proof");
+        self.copy_plugin("control-proof")
+    }
+
+    fn undeclared_plugin(&self) -> PathBuf {
+        self.copy_plugin("control-proof-undeclared")
+    }
+
+    fn copy_plugin(&self, fixture: &str) -> PathBuf {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures")
+            .join(fixture);
         let plugin = self.0.join("plugin");
         fs::create_dir(&plugin).unwrap();
 
@@ -188,6 +198,26 @@ impl Drop for Daemon {
 }
 
 fn start_daemon(barn: &str, sandbox: &Sandbox, plugin: &Path, grants: Option<&Path>) -> Daemon {
+    start_daemon_with(barn, sandbox, plugin, grants, true)
+}
+
+/// Launch without `--need`, so no need is declared to the daemon.
+fn start_daemon_undeclared(
+    barn: &str,
+    sandbox: &Sandbox,
+    plugin: &Path,
+    grants: Option<&Path>,
+) -> Daemon {
+    start_daemon_with(barn, sandbox, plugin, grants, false)
+}
+
+fn start_daemon_with(
+    barn: &str,
+    sandbox: &Sandbox,
+    plugin: &Path,
+    grants: Option<&Path>,
+    declare_need: bool,
+) -> Daemon {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tack-daemon"));
     command
         .arg("--socket")
@@ -195,9 +225,13 @@ fn start_daemon(barn: &str, sandbox: &Sandbox, plugin: &Path, grants: Option<&Pa
         .arg("--plugin")
         .arg(plugin)
         .arg("--plugin-name")
-        .arg("control-proof")
-        .arg("--need")
-        .arg("control.call.navigate")
+        .arg("control-proof");
+
+    if declare_need {
+        command.arg("--need").arg("control.call.navigate");
+    }
+
+    command
         .env("TACK_STATE_DIR", &sandbox.0)
         .env("TACK_BARN_BIN", barn)
         .env("TACK_HARNESS_SOCK", sandbox.harness_socket())
@@ -308,4 +342,29 @@ fn a_granted_control_call_returns_the_harness_result() {
         }
     );
     assert_eq!(harness.finish(), 1);
+}
+
+#[test]
+fn a_granted_call_without_a_declared_need_never_reaches_the_harness() {
+    let Ok(barn) = std::env::var("TACK_BARN_BIN") else {
+        println!("skipping: TACK_BARN_BIN is not set");
+        return;
+    };
+
+    let sandbox = Sandbox::new();
+    let harness = FakeHarness::start(&sandbox.harness_socket());
+    let plugin = sandbox.undeclared_plugin();
+    let grants = sandbox.grants(GRANTS);
+    let _daemon = start_daemon_undeclared(&barn, &sandbox, &plugin, Some(&grants));
+
+    assert_eq!(
+        tool_reply(&sandbox.socket()),
+        Reply::Error {
+            id: 7,
+            version: PROTOCOL_VERSION,
+            error: ReplyError::DaemonError,
+            message: "grant_denied".to_owned(),
+        }
+    );
+    assert_eq!(harness.finish(), 0);
 }

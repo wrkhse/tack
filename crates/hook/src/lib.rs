@@ -111,9 +111,11 @@ pub struct HookArgs {
     pub needs: Vec<String>,
 }
 
-/// Parse the hook's arguments in any order. Names and needs are non-empty
-/// ASCII `[a-z0-9_.-]` strings of at most `MAX_IDENTITY_BYTES` bytes, so the
-/// daemon can adopt them without escaping; at most `MAX_NEEDS` needs are kept.
+/// Parse the hook's arguments in any order.
+///
+/// Names and needs are non-empty ASCII `[a-z0-9_.-]` strings of at most
+/// `MAX_IDENTITY_BYTES` bytes, so the daemon can adopt them without escaping;
+/// at most `MAX_NEEDS` needs are kept.
 ///
 /// # Errors
 ///
@@ -188,9 +190,11 @@ fn valid_identity(value: &str) -> bool {
         })
 }
 
-/// The plugin folder from `--plugin <dir>`. Without it the hook never starts
-/// a daemon. The other launch arguments are parsed and validated here too, so
-/// a caller that cold-starts a daemon uses [`parse_args`] to forward them.
+/// The plugin folder from `--plugin <dir>`.
+///
+/// Without it the hook never starts a daemon. The other launch arguments are
+/// parsed and validated here too, so a caller that cold-starts a daemon uses
+/// [`parse_args`] to forward them.
 ///
 /// # Errors
 ///

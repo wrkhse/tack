@@ -53,8 +53,14 @@ impl HostEndpoint {
 /// a normal call awaits its reply.
 pub trait ControlBroker: Send + Sync {
     /// Claim one raw control frame and return its reply line, or ignore it.
+    ///
+    /// `deadline` bounds the whole broker exchange, not just one socket wait.
     #[must_use]
-    fn try_handle(&self, line: &[u8]) -> Option<Vec<u8>>;
+    fn try_handle(&self, line: &[u8], deadline: Instant) -> Option<Vec<u8>>;
+
+    /// Recognize a control frame without authorizing, forwarding or counting it.
+    #[must_use]
+    fn is_control(&self, line: &[u8]) -> bool;
 }
 
 /// The id tack puts on its one `host.start` line.
@@ -121,17 +127,31 @@ impl HostTransport {
             body_within_cap(text)?;
             let answer = text.strip_suffix('\n').unwrap_or(text);
 
-            let Some(reply_bytes) = broker.and_then(|broker| broker.try_handle(&reply)) else {
+            let Some(broker) = broker else {
                 refused_frame(answer, id)?;
 
                 return Ok(answer.to_owned());
             };
 
+            // Only a control frame counts against the cap. A normal reply is
+            // returned regardless of how many control frames came before it.
+            if !broker.is_control(&reply) {
+                refused_frame(answer, id)?;
+
+                return Ok(answer.to_owned());
+            }
+
+            // The cap comes first: a ninth frame must not reach the broker
+            // and cause a side effect before it is refused.
             if handled >= MAX_CONTROL_FRAMES {
                 return Err(StallError::Io(format!(
                     "more than {MAX_CONTROL_FRAMES} control frames in one host call"
                 )));
             }
+
+            let Some(reply_bytes) = broker.try_handle(&reply, deadline) else {
+                return Err(StallError::Malformed);
+            };
             handled = handled.saturating_add(1);
 
             let response = std::str::from_utf8(&reply_bytes).map_err(|_| StallError::Malformed)?;
@@ -579,7 +599,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1596,16 +1616,26 @@ mod tests {
         r#"{"kind":"control","id":99,"version":1,"call":"navigate","input":{}}"#;
     const CONTROL_REPLY: &str = r#"{"kind":"control","id":99,"version":1,"result":{"ok":true}}"#;
 
+    // The test brokers share the wire probe; recognizing a frame has no side effect.
+    fn test_is_control(line: &[u8]) -> bool {
+        serde_json::from_slice::<Value>(line)
+            .is_ok_and(|value| value.get("kind").and_then(Value::as_str) == Some("control"))
+    }
+
     struct RecordingBroker {
         seen: Arc<Mutex<Vec<Vec<u8>>>>,
         reply: Vec<u8>,
     }
 
     impl ControlBroker for RecordingBroker {
-        fn try_handle(&self, line: &[u8]) -> Option<Vec<u8>> {
+        fn try_handle(&self, line: &[u8], _deadline: Instant) -> Option<Vec<u8>> {
             self.seen.lock().unwrap().push(line.to_vec());
 
             Some(self.reply.clone())
+        }
+
+        fn is_control(&self, line: &[u8]) -> bool {
+            test_is_control(line)
         }
     }
 
@@ -1667,6 +1697,99 @@ mod tests {
                 })
             );
         }
+        host.join().unwrap();
+    }
+
+    // A broker whose only observable effect is a call counter.
+    struct CountingBroker {
+        calls: Arc<AtomicUsize>,
+        reply: Vec<u8>,
+    }
+
+    impl ControlBroker for CountingBroker {
+        fn try_handle(&self, _line: &[u8], _deadline: Instant) -> Option<Vec<u8>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+
+            Some(self.reply.clone())
+        }
+
+        fn is_control(&self, line: &[u8]) -> bool {
+            test_is_control(line)
+        }
+    }
+
+    // A host that injects `count` control frames after the framed call, then
+    // the call's normal reply.
+    fn control_frames_host(socket: &Path, count: usize) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+
+            reader.read_line(&mut line).unwrap();
+            writeln!(stream, "{START_REPLY}").unwrap();
+
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim_end(), CALL_FRAME);
+
+            for _ in 0..count {
+                writeln!(stream, "{CONTROL_REQUEST}").unwrap();
+            }
+            writeln!(stream, "{CALL_REPLY}").unwrap();
+        })
+    }
+
+    // Ten frames make the ninth cross the cap before it can reach the broker.
+    fn control_flood_host(socket: &Path) -> thread::JoinHandle<()> {
+        control_frames_host(socket, 10)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frame_cap_is_enforced_before_the_broker_sees_a_ninth_frame() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let host = control_flood_host(&socket);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let broker = CountingBroker {
+            calls: Arc::clone(&calls),
+            reply: format!("{CONTROL_REPLY}\n").into_bytes(),
+        };
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::with_broker(endpoint, Arc::new(broker));
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Err(StallError::Io(
+                "more than 8 control frames in one host call".to_owned()
+            ))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 8);
+        host.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn eight_control_frames_still_allow_the_normal_reply() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("host.sock");
+        let host = control_frames_host(&socket, 8);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let broker = RecordingBroker {
+            seen: Arc::clone(&seen),
+            reply: format!("{CONTROL_REPLY}\n").into_bytes(),
+        };
+        let endpoint = HostEndpoint::new(socket, TOKEN.to_owned());
+        let mut transport = HostTransport::with_broker(endpoint, Arc::new(broker));
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(
+            tokio::task::block_in_place(|| transport.call(CALL_FRAME, deadline)),
+            Ok(CALL_REPLY.to_owned())
+        );
+        assert_eq!(seen.lock().unwrap().len(), 8);
         host.join().unwrap();
     }
 }
