@@ -313,7 +313,9 @@ fn a_denied_control_call_never_reaches_the_harness() {
             id: 7,
             version: PROTOCOL_VERSION,
             error: ReplyError::DaemonError,
-            message: "grant_denied".to_owned(),
+            message:
+                "io(host error capability: capability control.call: daemon_error: grant_denied)"
+                    .to_owned(),
         }
     );
     assert_eq!(harness.finish(), 0);
@@ -365,7 +367,8 @@ fn a_granted_call_without_a_declared_need_never_reaches_the_harness() {
             id: 7,
             version: PROTOCOL_VERSION,
             error: ReplyError::DaemonError,
-            message: "grant_denied".to_owned(),
+            message: "io(host error capability: capability control.call: no declared control need for navigate)"
+                .to_owned(),
         }
     );
     assert_eq!(harness.finish(), 0);
