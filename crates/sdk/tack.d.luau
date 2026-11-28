@@ -21,28 +21,20 @@ export type HookResult = DenyResult | RewriteResult | AnnotateResult | DropResul
 export type ToolBeforeResult = HookResult
 export type OnError = "deliver" | "deny"
 
--- Capabilities are injected into hooks by the barn stall later. Today this
--- file only declares them, and a build-time audit scans plugin sources. A
--- plugin declares the capabilities it calls in its `needs` list, such as
--- `control.call.navigate`. The audit is an early, developer-facing error that
--- can be bypassed, not a security boundary: host config grants them per plugin
--- in a later PR, and the daemon's refusal of undeclared or ungranted calls at
--- run time is the later security boundary. No runtime client module is
--- importable. The audit scans comments and string literals too, so mentioning
--- a capability counts as a call (conservative fail-closed).
+-- Capabilities are injected into hooks by the barn stall. A plugin declares
+-- the capabilities it calls in its `needs` list, such as
+-- `control.call.navigate`.
 --
--- There is one accepted spelling of a capability call: the hook parameter is
--- named `ctx`, and the call is `ctx.control.call("<ident>", ...)`. A wrong
--- or glued qualifier, such as `myctx.control.call`, is refused with the named
--- `control_call_form` error. Aliases, bracket and colon calls, member access
--- split by whitespace, and non-literal names are refused with the named
--- `dynamic_capability` error.
+-- The build audit finds literal `ctx.control.call("<ident>", ...)` forms and
+-- reports missing declarations as early, developer-facing feedback. It is not
+-- fail-closed and cannot be complete in Lua, so it is not a security boundary:
+-- aliases, computed keys, string concatenation, `pairs(ctx)` and dynamic
+-- `require` are known bypasses.
 --
--- ## Known bypasses
--- The build audit cannot prove these at runtime:
---   - a plugin that is not built by tack;
---   - a call injected after build by another loader;
---   - a runtime capability obtained outside the stall grant.
+-- The security boundary is the daemon's run-time refusal of undeclared or
+-- ungranted calls, delivered by the host-grants PR (barn#71, tack#23). Until
+-- that PR, `ctx.control` is not injected and a call fails as a script error
+-- mapped to `daemon_error`.
 export type Control = { call: (name: string, input: any) -> any }
 
 -- Rust-backed helpers passed as the second hook and tool argument.

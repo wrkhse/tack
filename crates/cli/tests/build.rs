@@ -1266,6 +1266,36 @@ return {
     }
 
     #[test]
+    fn an_absent_output_folder_skips_nothing() {
+        let scratch = Scratch::new();
+        let dist = scratch.path().join("dist");
+        std::fs::create_dir_all(&dist).expect("dist folder");
+        std::fs::write(
+            dist.join("helper.luau"),
+            r#"return {
+    run = function(ctx, p)
+        ctx.control.call("navigate", p)
+    end,
+}"#,
+        )
+        .expect("dist source");
+        scratch.write("plugin.luau", &source("", ""));
+        let out = scratch.path().join("not-yet-created-out");
+        assert!(!out.exists(), "output folder is absent");
+
+        let error = build(scratch.path(), &out, BuildOptions::default())
+            .expect_err("an absent output folder skips no source");
+
+        assert!(
+            matches!(
+                &error,
+                tack_cli::BuildError::UngrantedCapability(name) if name == "navigate"
+            ),
+            "expected the undeclared dist call, got {error:?}"
+        );
+    }
+
+    #[test]
     fn the_canonical_output_folder_is_skipped() {
         let scratch = Scratch::new();
         let out = scratch.path().join("out");

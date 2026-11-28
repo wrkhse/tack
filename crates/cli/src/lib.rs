@@ -318,10 +318,8 @@ fn audit_capabilities(
 ) -> Result<(), BuildError> {
     let root = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
     let output = match std::fs::canonicalize(out) {
-        Ok(path) => path,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            std::path::absolute(out).map_err(BuildError::Io)?
-        }
+        Ok(path) => Some(path),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(BuildError::Io(error)),
     };
     let mut stack = vec![(root.clone(), 0usize)];
@@ -348,7 +346,7 @@ fn audit_capabilities(
                 }
 
                 let entry = entry.map_err(BuildError::Io)?;
-                if entry.path() == output {
+                if output.as_deref() == Some(entry.path().as_path()) {
                     continue;
                 }
                 entries.push(entry);
