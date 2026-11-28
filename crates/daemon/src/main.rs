@@ -413,15 +413,6 @@ async fn run(args: Args, state: PathBuf) -> i32 {
         return EXIT_USAGE;
     }
 
-    let stall = match launch_stall(&args.plugin, &state) {
-        Ok(stall) => stall,
-        Err(reason) => {
-            eprintln!("tack-daemon: {reason}");
-            Stall::Unavailable(reason)
-        }
-    };
-    let client = Mutex::new(stall);
-
     let server = match bind(&state, &args.socket) {
         Ok(server) => server,
         Err(TransportError::LockBusy) => {
@@ -433,6 +424,15 @@ async fn run(args: Args, state: PathBuf) -> i32 {
             return EXIT_ENGINE;
         }
     };
+
+    let stall = match launch_stall(&args.plugin, &state) {
+        Ok(stall) => stall,
+        Err(reason) => {
+            eprintln!("tack-daemon: {reason}");
+            Stall::Unavailable(reason)
+        }
+    };
+    let client = Mutex::new(stall);
 
     if let Err(error) = server.serve(move |request| handle(&request, &client)).await {
         eprintln!("tack-daemon: serve: {error}");
