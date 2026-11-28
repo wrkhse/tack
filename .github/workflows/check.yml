@@ -37,7 +37,7 @@ jobs:
           key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features tack_daemon/control-conformance --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: Run the 50-iteration timing stability proof
         run: cargo test --workspace --locked -- --ignored timing_proofs_hold_across_fifty_runs_in_ci
