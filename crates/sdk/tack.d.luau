@@ -1,7 +1,8 @@
 --!strict
 
--- The SDK contract major is 1. A plugin built against another major is refused
--- with a named contract_major_mismatch error.
+-- The SDK contract major is 1. The pure major check is used by build-time
+-- tests; the running daemon's named contract_major_mismatch refusal comes
+-- later with the barn engine.
 
 -- The scoped module loader bound into each module chunk's environment, with
 -- Luau's stock require absent. A specifier resolves relative to the requiring
@@ -20,9 +21,14 @@ export type HookResult = DenyResult | RewriteResult | AnnotateResult | DropResul
 export type ToolBeforeResult = HookResult
 export type OnError = "deliver" | "deny"
 
--- Capabilities are injected into hooks by the barn stall. No runtime client
--- module is importable, and the default grant is none: a plugin must be
--- granted `control.call.<name>` at build time to call that control.
+-- Capabilities are injected into hooks by the barn stall later. Today this
+-- file only declares them and a build-time audit scans plugin sources; that
+-- audit is an early developer-facing check that can be bypassed, not a
+-- security boundary. The runtime refusal comes later with the barn engine.
+-- No runtime client module is importable, and the default grant is none: a
+-- plugin must be granted `control.call.<name>` at build time to call it. The
+-- audit scans comments and string literals too, so mentioning a capability
+-- counts as a call (conservative fail-closed).
 export type Control = { call: (name: string, input: any) -> any }
 
 -- Rust-backed helpers passed as the second hook and tool argument.

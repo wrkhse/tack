@@ -12,6 +12,7 @@ pub const SDK_CONTRACT_MAJOR: u32 = 1;
 
 /// The plugin declares a contract major this SDK does not support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContractError {
     WrongMajor { found: u32 },
 }
@@ -30,7 +31,12 @@ impl fmt::Display for ContractError {
 impl std::error::Error for ContractError {}
 
 /// Accept `found` only when it matches this SDK's contract major.
-pub fn check_contract_major(found: u32) -> Result<(), ContractError> {
+///
+/// # Errors
+///
+/// Returns `ContractError::WrongMajor` when `found` differs from this SDK's
+/// contract major.
+pub const fn check_contract_major(found: u32) -> Result<(), ContractError> {
     if found == SDK_CONTRACT_MAJOR {
         Ok(())
     } else {
