@@ -74,8 +74,10 @@ impl fmt::Display for BuildError {
 impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::NeedMissing(_) => None,
-            Self::ModuleMissing(_) | Self::PluginName(_) | Self::DeclarationPath(_) => None,
+            Self::NeedMissing(_)
+            | Self::ModuleMissing(_)
+            | Self::PluginName(_)
+            | Self::DeclarationPath(_) => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -104,10 +106,17 @@ impl Default for BuildOptions {
     }
 }
 
-/// Canonicalize a plugin folder, read its manifest in the sandbox, and check
-/// its needs and modules. The modules are returned beside the manifest because
-/// the wire contract does not carry them.
-fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest, Vec<String>), BuildError> {
+/// A plugin read once: its canonical folder, its manifest and the modules it lists.
+struct Loaded {
+    dir: PathBuf,
+    manifest: PluginManifest,
+    modules: Vec<String>,
+}
+
+/// Canonicalize a plugin folder, read its manifest in the sandbox, and check its
+/// needs and modules. The modules sit beside the manifest because the wire
+/// contract does not carry them.
+fn load(plugin_dir: &Path) -> Result<Loaded, BuildError> {
     let plugin_dir = std::fs::canonicalize(plugin_dir).map_err(BuildError::Io)?;
     let metadata = Limits::new(DEFAULT_MEMORY_BYTES, DEFAULT_DEADLINE_MS)
         .and_then(|limits| Sandbox::new(&plugin_dir, limits, Capabilities::default()))
@@ -129,7 +138,11 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest, Vec<String>), Bui
         }
     }
 
-    Ok((plugin_dir, manifest, modules))
+    Ok(Loaded {
+        dir: plugin_dir,
+        manifest,
+        modules,
+    })
 }
 
 /// The module names a plugin lists, read from the `modules` array that the
@@ -165,11 +178,19 @@ pub fn build(
     out: &Path,
     options: BuildOptions,
 ) -> Result<(PathBuf, PathBuf), BuildError> {
-    let (plugin_dir, manifest, _) = load(plugin_dir)?;
+    opencode(&load(plugin_dir)?, out, options)
+}
+
+/// Emit the `OpenCode` wrapper and manifest for a plugin that is already read.
+fn opencode(
+    loaded: &Loaded,
+    out: &Path,
+    options: BuildOptions,
+) -> Result<(PathBuf, PathBuf), BuildError> {
     let reasons = deny_reasons();
-    let plugin = plugin_dir.to_string_lossy();
+    let plugin = loaded.dir.to_string_lossy();
     let config = WrapperConfig {
-        manifest: &manifest,
+        manifest: &loaded.manifest,
         daemon_bin: DAEMON_BIN,
         plugin_dir: plugin.as_ref(),
         protocol_version: PROTOCOL_VERSION,
@@ -185,7 +206,7 @@ pub fn build(
     let descriptor = dest.join("manifest.json");
     std::fs::write(&index, script).map_err(BuildError::Io)?;
 
-    let pretty = serde_json::to_string_pretty(&manifest).map_err(|error| {
+    let pretty = serde_json::to_string_pretty(&loaded.manifest).map_err(|error| {
         BuildError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
     std::fs::write(&descriptor, pretty).map_err(BuildError::Io)?;
@@ -208,11 +229,15 @@ pub fn build(
 /// wire contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderMod`] when the mod cannot be rendered.
 pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, manifest, _) = load(plugin_dir)?;
+    claude(&load(plugin_dir)?, out)
+}
+
+/// Emit the Claude Code mod for a plugin that is already read.
+fn claude(loaded: &Loaded, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
     let reasons = deny_reasons();
-    let plugin = plugin_dir.to_string_lossy();
+    let plugin = loaded.dir.to_string_lossy();
     let config = ModConfig {
-        manifest: &manifest,
+        manifest: &loaded.manifest,
         hook_bin: HOOK_BIN,
         plugin_dir: plugin.as_ref(),
         protocol_version: PROTOCOL_VERSION,
@@ -247,8 +272,12 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
 /// contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderExtension`] when the extension cannot be rendered.
 pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
-    let (plugin_dir, _, _) = load(plugin_dir)?;
-    let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
+    pi(&load(plugin_dir)?, out)
+}
+
+/// Emit the Pi extension for a plugin that is already read.
+fn pi(loaded: &Loaded, out: &Path) -> Result<PathBuf, BuildError> {
+    let script = tack_adapter_pi::render(&loaded.dir).map_err(BuildError::RenderExtension)?;
 
     let dest = out.join("pi");
     std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
@@ -258,8 +287,51 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
     Ok(extension)
 }
 
-/// Read one plugin and sync its declarations under `<out>/sdk/`. A plugin that
-/// lists the `sdk` module gets `<name>.d.luau` written there. A plugin that does
+/// The agent a build emits for, with what its target needs.
+pub enum Output {
+    /// The `OpenCode` wrapper and manifest, with their timeouts.
+    OpenCode(BuildOptions),
+    /// The Claude Code mod.
+    Claude,
+    /// The Pi extension.
+    Pi,
+    /// The Codex adapter, installed into this Codex home.
+    Codex(PathBuf),
+}
+
+/// Read one plugin once, emit its target, then sync its SDK declarations.
+///
+/// The SDK step is planned before the target writes, so a refused module, name
+/// or path writes nothing. It is applied only once the target has succeeded.
+///
+/// # Errors
+///
+/// Returns the errors of the target build, and [`BuildError::DeclarationPath`]
+/// or [`BuildError::PluginName`] when the SDK step cannot use its path or name.
+pub fn build_plugin(
+    plugin_dir: &Path,
+    out: &Path,
+    output: &Output,
+) -> Result<Vec<PathBuf>, BuildError> {
+    let loaded = load(plugin_dir)?;
+    let sdk = plan_sdk(&loaded, out)?;
+    let mut written = match output {
+        Output::OpenCode(options) => {
+            let (index, manifest) = opencode(&loaded, out, *options)?;
+            vec![index, manifest]
+        }
+        Output::Claude => claude(&loaded, out)?,
+        Output::Pi => vec![pi(&loaded, out)?],
+        Output::Codex(codex_home) => codex(&loaded, out, codex_home)?,
+    };
+    written.extend(apply_sdk(sdk)?);
+
+    Ok(written)
+}
+
+/// Sync one plugin's SDK declarations under `<out>/sdk/`.
+///
+/// A plugin that lists the `sdk` module gets `<name>.d.luau`. A plugin that does
 /// not list it loses the declaration an earlier build wrote, and the folder once
 /// that leaves it empty.
 ///
@@ -274,44 +346,87 @@ pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<PathBuf, BuildError> {
 /// [`BuildError::DeclarationPath`] when the folder or file a declaration goes to
 /// is a symlink or any other entry.
 pub fn build_sdk(plugin_dir: &Path, out: &Path) -> Result<Option<PathBuf>, BuildError> {
-    let (_, manifest, modules) = load(plugin_dir)?;
-
-    if !modules.iter().any(|module| module == SDK_MODULE) {
-        clear_stale_declarations(out, &manifest.name)?;
-        return Ok(None);
-    }
-
-    let stem = declaration_stem(&manifest.name)?;
-    let dest = declarations_folder(out)?;
-    let path = dest.join(format!("{stem}.d.luau"));
-    refuse_other_entry(&path)?;
-    std::fs::write(&path, declarations()).map_err(BuildError::Io)?;
-
-    Ok(Some(path))
+    let loaded = load(plugin_dir)?;
+    apply_sdk(plan_sdk(&loaded, out)?)
 }
 
-/// The entry at `path` as it is, without following a symlink, or `None` when
-/// nothing is there.
+/// What the SDK step writes or removes. It is decided before any target writes.
+enum SdkStep {
+    /// Nothing to write and nothing to remove.
+    Nothing,
+    /// Write the declaration at `path`, creating `folder` when it is missing.
+    Write { folder: PathBuf, path: PathBuf },
+    /// Remove the declaration at `path`, and `folder` once it is empty.
+    Clear { folder: PathBuf, path: PathBuf },
+}
+
+/// Decide the SDK step from a plugin that is already read. It only reads `out`,
+/// so every refusal comes before any target writes.
+fn plan_sdk(loaded: &Loaded, out: &Path) -> Result<SdkStep, BuildError> {
+    let folder = out.join("sdk");
+
+    if loaded.modules.iter().any(|module| module == SDK_MODULE) {
+        let stem = declaration_stem(&loaded.manifest.name)?;
+        let path = folder.join(format!("{stem}.d.luau"));
+
+        match entry_at(&folder)? {
+            Some(metadata) if !metadata.is_dir() => {
+                return Err(BuildError::DeclarationPath(folder.display().to_string()));
+            }
+            Some(_) => refuse_other_entry(&path)?,
+            None => {}
+        }
+
+        return Ok(SdkStep::Write { folder, path });
+    }
+
+    let Ok(stem) = declaration_stem(&loaded.manifest.name) else {
+        return Ok(SdkStep::Nothing);
+    };
+    let path = folder.join(format!("{stem}.d.luau"));
+
+    match entry_at(&folder)? {
+        Some(metadata) if metadata.is_dir() => Ok(SdkStep::Clear { folder, path }),
+        Some(_) => Err(BuildError::DeclarationPath(folder.display().to_string())),
+        None => Ok(SdkStep::Nothing),
+    }
+}
+
+/// Carry out a planned SDK step. Writing creates the folder when it is missing.
+/// Clearing removes the declaration when it is a regular file, then the folder
+/// once it is empty.
+fn apply_sdk(step: SdkStep) -> Result<Option<PathBuf>, BuildError> {
+    match step {
+        SdkStep::Nothing => Ok(None),
+        SdkStep::Write { folder, path } => {
+            std::fs::create_dir_all(&folder).map_err(BuildError::Io)?;
+            std::fs::write(&path, declarations()).map_err(BuildError::Io)?;
+            Ok(Some(path))
+        }
+        SdkStep::Clear { folder, path } => {
+            if entry_at(&path)?.is_some_and(|metadata| metadata.is_file()) {
+                std::fs::remove_file(&path).map_err(BuildError::Io)?;
+            }
+            if std::fs::read_dir(&folder)
+                .map_err(BuildError::Io)?
+                .next()
+                .is_none()
+            {
+                std::fs::remove_dir(&folder).map_err(BuildError::Io)?;
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// The entry at `path` as it is, without following a symlink, or `None` when it
+/// is missing.
 fn entry_at(path: &Path) -> Result<Option<std::fs::Metadata>, BuildError> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(BuildError::Io(error)),
     }
-}
-
-/// The `sdk` folder under `out`, created when missing. A symlink or any other
-/// entry there is refused, so no declaration can land outside `out`.
-fn declarations_folder(out: &Path) -> Result<PathBuf, BuildError> {
-    let dest = out.join("sdk");
-
-    match entry_at(&dest)? {
-        Some(metadata) if metadata.is_dir() => {}
-        Some(_) => return Err(BuildError::DeclarationPath(dest.display().to_string())),
-        None => std::fs::create_dir_all(&dest).map_err(BuildError::Io)?,
-    }
-
-    Ok(dest)
 }
 
 /// Refuse a declaration path that holds anything but a regular file. A regular
@@ -323,37 +438,6 @@ fn refuse_other_entry(path: &Path) -> Result<(), BuildError> {
         }
         _ => Ok(()),
     }
-}
-
-/// Remove the declaration an earlier build wrote for `name`, then the `sdk`
-/// folder when it is empty. A symlink or other entry is left as it is, and a
-/// name that is not a plain file name never had a declaration to remove.
-fn clear_stale_declarations(out: &Path, name: &str) -> Result<(), BuildError> {
-    let Ok(stem) = declaration_stem(name) else {
-        return Ok(());
-    };
-    let dest = out.join("sdk");
-
-    let Some(folder) = entry_at(&dest)? else {
-        return Ok(());
-    };
-    if !folder.is_dir() {
-        return Ok(());
-    }
-
-    let path = dest.join(format!("{stem}.d.luau"));
-    if entry_at(&path)?.is_some_and(|metadata| metadata.is_file()) {
-        std::fs::remove_file(&path).map_err(BuildError::Io)?;
-    }
-    if std::fs::read_dir(&dest)
-        .map_err(BuildError::Io)?
-        .next()
-        .is_none()
-    {
-        std::fs::remove_dir(&dest).map_err(BuildError::Io)?;
-    }
-
-    Ok(())
 }
 
 /// A plugin name as a declaration file name: ASCII letters, digits, `-` and
@@ -471,11 +555,15 @@ pub fn build_codex(
     out: &Path,
     codex_home: &Path,
 ) -> Result<Vec<PathBuf>, BuildError> {
-    let (plugin_dir, _, _) = load(plugin_dir)?;
+    codex(&load(plugin_dir)?, out, codex_home)
+}
+
+/// Emit the Codex adapter for a plugin that is already read, and install it into `codex_home`.
+fn codex(loaded: &Loaded, out: &Path, codex_home: &Path) -> Result<Vec<PathBuf>, BuildError> {
     let dest = planned_dir(&out.join("codex")).map_err(BuildError::Io)?;
 
     let adapter = tack_adapter_codex::render(&tack_adapter_codex::Config {
-        plugin_dir: &plugin_dir,
+        plugin_dir: &loaded.dir,
         codex_dir: &dest,
         version: env!("CARGO_PKG_VERSION"),
     })

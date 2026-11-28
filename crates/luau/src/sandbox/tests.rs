@@ -988,9 +988,10 @@ fn manifest_refuses_a_module_that_is_not_named() {
 #[test]
 fn manifest_limits_the_number_of_modules() {
     let scratch = Scratch::new();
-    let entries: String = (0..=MAX_ENTRIES)
-        .map(|index| format!("m{index} = {{}},\n"))
-        .collect();
+    let mut entries = String::new();
+    for index in 0..=MAX_ENTRIES {
+        entries.push_str(&format!("m{index} = {{}},\n"));
+    }
     scratch.write(
         "plugin.luau",
         &format!("return {{\n    name = \"safe-push\",\n    modules = {{\n{entries}    }},\n}}\n"),

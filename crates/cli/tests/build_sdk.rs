@@ -1,8 +1,7 @@
-//! In-process proofs of the SDK declarations: emitted for a plugin that lists
-//! the `sdk` module, removed for one that stops listing it, and refused by
-//! name when a module, plugin name or path is not acceptable. No daemon, VM run
-//! or child process starts; only the library API and a temporary folder are
-//! used.
+//! In-process proofs of the SDK declarations.
+//!
+//! No daemon, VM run or child process starts; only the library API and a
+//! temporary folder are used.
 
 #![cfg(test)]
 
@@ -10,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tack_cli::{BuildOptions, build, build_sdk};
+use tack_cli::{BuildError, BuildOptions, Output, build, build_plugin, build_sdk};
 use tack_sdk::CONTRACT_VERSION;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -319,7 +318,7 @@ fn a_directory_where_a_declaration_goes_is_refused() {
 }
 
 #[test]
-fn a_stale_symlinked_sdk_folder_is_left_alone_when_the_module_is_unlisted() {
+fn an_unlisted_plugin_refuses_a_symlinked_sdk_folder_without_following_it() {
     let scratch = Scratch::new();
     let out = scratch.out();
     let elsewhere = scratch.path().join("elsewhere");
@@ -329,11 +328,67 @@ fn a_stale_symlinked_sdk_folder_is_left_alone_when_the_module_is_unlisted() {
     std::os::unix::fs::symlink(&elsewhere, out.join("sdk")).expect("symlink");
     scratch.write_plugin(r#"return { name = "guard", tools = {} }"#);
 
-    let unlisted = build_sdk(scratch.path(), &out).expect("unlisted plugin builds");
+    let Err(error) = build_sdk(scratch.path(), &out) else {
+        panic!("an unlisted plugin refuses a symlinked sdk folder");
+    };
 
-    assert_eq!(unlisted, None);
+    assert_eq!(
+        error.to_string(),
+        format!("declaration_path:{}", out.join("sdk").display())
+    );
     assert_eq!(
         std::fs::read_to_string(elsewhere.join("guard.d.luau")).expect("elsewhere is readable"),
         "keep"
     );
+}
+
+#[test]
+fn an_output_path_that_is_a_file_is_an_io_error_even_when_unlisted() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.out(), "not a folder").expect("output file");
+    scratch.write_plugin(r#"return { name = "guard", tools = {} }"#);
+
+    let Err(error) = build_sdk(scratch.path(), &scratch.out()) else {
+        panic!("an output path that is a file is refused");
+    };
+
+    assert!(matches!(error, BuildError::Io(_)));
+}
+
+#[test]
+fn the_declarations_are_named_for_the_manifest_the_target_built() {
+    let scratch = Scratch::new();
+    scratch.write_plugin(&plugin("guard", "{ sdk = {} }"));
+    let out = scratch.out();
+
+    let written = build_plugin(
+        scratch.path(),
+        &out,
+        &Output::OpenCode(BuildOptions::default()),
+    )
+    .expect("listing plugin builds");
+
+    let manifest_bytes =
+        std::fs::read(out.join("opencode").join("manifest.json")).expect("manifest is readable");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("manifest parses");
+    assert_eq!(manifest["name"], "guard");
+    assert_eq!(written.last(), Some(&out.join("sdk").join("guard.d.luau")));
+}
+
+#[test]
+fn a_target_that_is_refused_leaves_no_declarations_behind() {
+    let scratch = Scratch::new();
+    let home = scratch.path().join("codex-home");
+    std::fs::create_dir_all(&home).expect("codex home");
+    std::fs::write(home.join("config.toml"), "hooks = {}\n").expect("config");
+    std::fs::write(home.join("hooks.json"), "{}\n").expect("hooks");
+    scratch.write_plugin(&plugin("guard", "{ sdk = {} }"));
+    let out = scratch.out();
+
+    let Err(BuildError::Codex(_)) = build_plugin(scratch.path(), &out, &Output::Codex(home)) else {
+        panic!("a Codex home tack cannot merge into is refused");
+    };
+
+    assert!(!out.join("sdk").exists());
 }

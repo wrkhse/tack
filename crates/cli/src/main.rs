@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use tack_cli::{BuildError, BuildOptions, build, build_claude, build_codex, build_pi, build_sdk};
+use tack_cli::{BuildError, BuildOptions, Output, build_plugin};
 
 const MAX_TIMEOUT_MS: u64 = 60_000;
 
@@ -100,18 +100,10 @@ fn run_build(
     args: &BuildArgs,
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<Vec<PathBuf>, BuildError> {
-    let out = Path::new(args.out);
-    // Validated first: a refused module or name writes nothing. The target
-    // build loads the plugin again, since each build owns its own sandbox.
-    let mut written: Vec<PathBuf> = build_sdk(plugin_dir, out)?.into_iter().collect();
-
-    match args.target {
-        Target::OpenCode => {
-            let (index, manifest) = build(plugin_dir, out, args.options)?;
-            written.extend([index, manifest]);
-        }
-        Target::Claude => written.extend(build_claude(plugin_dir, out)?),
-        Target::Pi => written.push(build_pi(plugin_dir, out)?),
+    let output = match args.target {
+        Target::OpenCode => Output::OpenCode(args.options),
+        Target::Claude => Output::Claude,
+        Target::Pi => Output::Pi,
         Target::Codex => {
             let codex_home = env("CODEX_HOME");
             let home = env("HOME");
@@ -119,11 +111,11 @@ fn run_build(
                 tack_adapter_codex::resolve_home(codex_home.as_deref(), home.as_deref())
                     .map_err(BuildError::Codex)?;
 
-            written.extend(build_codex(plugin_dir, out, &codex_home)?);
+            Output::Codex(codex_home)
         }
-    }
+    };
 
-    Ok(written)
+    build_plugin(plugin_dir, Path::new(args.out), &output)
 }
 
 /// Run one command, reading the environment through `env` and handing each
@@ -619,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_build_emits_the_sdk_declarations_before_the_target_paths() {
+    fn dispatch_build_emits_the_sdk_declarations_after_the_target_paths() {
         let scratch = Scratch::new();
         let out = scratch.root.join("dist");
         std::fs::write(
@@ -635,10 +627,39 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                out.join("sdk/guard.d.luau").display().to_string(),
                 out.join("pi/extension.js").display().to_string(),
+                out.join("sdk/guard.d.luau").display().to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_build_leaves_no_declarations_when_the_codex_home_is_refused() {
+        let scratch = Scratch::new();
+        let out = scratch.root.join("dist");
+        let home = scratch.root.join("codex-home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join("config.toml"), "hooks = {}\n").expect("config");
+        std::fs::write(home.join("hooks.json"), "{}\n").expect("hooks");
+        std::fs::write(
+            scratch.root.join("plugin.luau"),
+            r#"return { name = "guard", modules = { sdk = {} }, tools = {} }"#,
+        )
+        .expect("fixture file");
+        let plugin = scratch.root.to_str().expect("UTF-8 plugin path");
+        let out_arg = out.to_str().expect("UTF-8 output path");
+
+        let (result, lines) = run_with_env(
+            &["build", plugin, "--out", out_arg, "--target", "codex"],
+            &[("CODEX_HOME", &home)],
+        );
+
+        let Err(CliError::Build(BuildError::Codex(_))) = result else {
+            panic!("a Codex home tack cannot merge into is refused");
+        };
+        assert_eq!(lines, Vec::<String>::new());
+        assert!(!out.join("sdk").exists());
+        assert!(!out.join("codex").exists());
     }
 
     #[test]
