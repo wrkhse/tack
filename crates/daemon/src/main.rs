@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process_group};
+use tack_daemon::grants::Grants;
 use tack_daemon::host_transport::{HostEndpoint, HostTransport};
 use tack_daemon::pipe::{self, PipeError};
 use tack_daemon::stall::{Clock, StallClient, SystemClock};
@@ -35,24 +36,33 @@ fn unavailable(reason: &str) -> String {
 struct Args {
     socket: PathBuf,
     plugin: PathBuf,
+    grants: Grants,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut socket = None;
     let mut plugin = None;
+    let mut grants: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--socket" => socket = Some(args.next().ok_or("--socket needs a path")?.into()),
             "--plugin" => plugin = Some(args.next().ok_or("--plugin needs a dir")?.into()),
+            "--grants" => grants = Some(args.next().ok_or("--grants needs a path")?.into()),
             other => return Err(format!("unknown argument {other}")),
         }
     }
 
+    let grants = match grants {
+        Some(path) => Grants::from_file(&path).map_err(|error| format!("grants: {error}"))?,
+        None => Grants::default(),
+    };
+
     Ok(Args {
         socket: socket.ok_or("missing --socket <path>")?,
         plugin: plugin.ok_or("missing --plugin <dir>")?,
+        grants,
     })
 }
 
@@ -162,6 +172,7 @@ impl Drop for Reaper<'_> {
 /// Route one wire request through the stall and back into a wire reply.
 fn handle(request: &Request, client: &Mutex<Stall>) -> Reply {
     let id = request.id();
+
     let frame = match frames::to_stall(request) {
         Ok(frame) => frame,
         Err(error) => return daemon_error(id, error),
@@ -432,6 +443,10 @@ fn launch_stall_with(
 /// Return a code instead of exiting here so `client` and its live `Stall`
 /// are dropped first; `Stall::drop` then reaps the barn child on every exit.
 async fn run(args: Args, state: PathBuf) -> i32 {
+    // Grants are parsed and validated at startup; keep the field read without
+    // logging its contents, which can name configured plugins and calls.
+    let _ = &args.grants;
+
     if !socket_in_state_dir(&state, &args.socket) {
         eprintln!(
             "tack-daemon: {ERR_SOCKET_MISMATCH}: expected {} got {}",
@@ -499,8 +514,11 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
     use std::process::Command;
+    use std::str::FromStr;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
+
+    use tack_daemon::grants::GrantError;
 
     use super::*;
 
@@ -575,6 +593,7 @@ mod tests {
         let args = Args {
             socket: PathBuf::from("/tmp/tack-not-in-state.sock"),
             plugin: PathBuf::from("/tmp"),
+            grants: Grants::default(),
         };
 
         let result = run(args, PathBuf::from("/tmp/tack-run-test-state")).await;
@@ -1021,6 +1040,52 @@ sleep 5"#
                 error: ReplyError::DaemonError,
                 message: "tack: plugin unavailable: barn not found".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn a_control_request_on_tack_sock_is_a_named_error() {
+        let request = Request::Control {
+            id: 9,
+            version: PROTOCOL_VERSION,
+            call: "navigate".into(),
+            input: serde_json::json!({}),
+        };
+
+        let reply = handle(
+            &request,
+            &Mutex::new(Stall::Unavailable("a frame reached the stall".to_owned())),
+        );
+
+        assert_eq!(
+            reply,
+            Reply::Error {
+                id: 9,
+                version: PROTOCOL_VERSION,
+                error: ReplyError::DaemonError,
+                message: "unsupported_outcome".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn grants_deny_undeclared_calls() {
+        let text = r#"{"grants":{"host-grants":{"control":{"calls":["navigate"]}}}}"#;
+        let grants = Grants::from_str(text).expect("one grant parses");
+
+        assert_eq!(
+            grants.authorize("plugin", &["control.call.navigate".to_owned()], "navigate"),
+            Err(GrantError::Denied {
+                plugin: "plugin".to_owned(),
+                call: "navigate".to_owned(),
+            })
+        );
+        assert_eq!(
+            grants.authorize("host-grants", &[], "navigate"),
+            Err(GrantError::Denied {
+                plugin: "host-grants".to_owned(),
+                call: "navigate".to_owned(),
+            })
         );
     }
 

@@ -5,6 +5,7 @@
 //! named reply; no request turns into an implicit allow.
 
 pub mod frames;
+pub mod grants;
 pub mod host_transport;
 pub mod pipe;
 pub mod stall;
