@@ -442,3 +442,17 @@ fn a_symlinked_sdk_declaration_is_replaced_not_followed() {
         "sentinel"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_directory_at_the_sdk_declaration_path_is_a_named_error() {
+    let scratch = Scratch::new();
+    let out = scratch.path().join("out");
+    let declarations = out.join("sdk").join("tack.d.luau");
+    std::fs::create_dir_all(&declarations).expect("declaration directory");
+
+    let error = build(&fixture(), &out, BuildOptions::default()).expect_err("directory is refused");
+
+    assert!(matches!(error, tack_cli::BuildError::Io(_)));
+    assert!(error.to_string().contains("Is a directory"));
+}
