@@ -13,7 +13,7 @@ static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 struct TempDir(PathBuf);
 
 impl TempDir {
-    fn new() -> Self {
+    fn new() -> std::io::Result<Self> {
         let seq = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -24,9 +24,9 @@ impl TempDir {
             "tack-state-dir-{}-{nanos}-{seq}",
             std::process::id()
         ));
-        fs::create_dir_all(&path).unwrap();
+        fs::create_dir_all(&path)?;
 
-        Self(path)
+        Ok(Self(path))
     }
 
     fn path(&self) -> &Path {
@@ -41,12 +41,12 @@ impl Drop for TempDir {
 }
 
 #[test]
-fn the_state_dir_comes_from_tack_state_dir() {
-    let dir = TempDir::new();
+fn the_state_dir_comes_from_tack_state_dir() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
     let state = dir.path().join("state");
     let wrong = dir.path().join("elsewhere.sock");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_tack-daemon"))
+    let launched = Command::new(env!("CARGO_BIN_EXE_tack-daemon"))
         .arg("--socket")
         .arg(&wrong)
         .arg("--plugin")
@@ -57,16 +57,21 @@ fn the_state_dir_comes_from_tack_state_dir() {
         .env_remove("TACK_GRANTS")
         .env_remove("TACK_HARNESS_SOCK")
         .stdin(Stdio::null())
-        .output()
-        .unwrap();
+        .output();
+
+    let out = launched?;
 
     assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr)?;
+
     assert_eq!(
-        String::from_utf8(out.stderr).unwrap(),
+        stderr,
         format!(
             "tack-daemon: socket_not_in_state_dir: expected {} got {}\n",
             state.join("tack.sock").display(),
             wrong.display()
         )
     );
+
+    Ok(())
 }
