@@ -173,7 +173,7 @@ impl ControlBroker {
             timeout(budget, join).await
         });
 
-        joined.map_err(|_| ERR_TIMEOUT)?.map_err(|_| ERR_IO)
+        joined.map_err(|_| ERR_TIMEOUT)??
     }
 }
 
@@ -190,7 +190,7 @@ fn harness_exchange(
 ) -> Result<Value, &'static str> {
     let outgoing =
         wire::encode_line(&json!({ "call": call, "input": input })).map_err(|_| ERR_FRAME)?;
-    let stream = connect_bounded(socket, deadline)?;
+    let mut stream = connect_bounded(socket, deadline)?;
 
     stream
         .set_write_timeout(Some(remaining(deadline)?))
@@ -203,13 +203,12 @@ fn harness_exchange(
         .set_read_timeout(Some(remaining(deadline)?))
         .map_err(|_| ERR_IO)?;
 
-    let mut incoming = Vec::new();
-    match wire::read_line(&mut reader) {
-        Ok(Some(line)) => incoming = line,
+    let incoming = match wire::read_line(&mut reader) {
+        Ok(Some(line)) => line,
         Ok(None) | Err(WireError::Closed) => return Err(ERR_REPLY),
         Err(WireError::TooLarge) => return Err(ERR_FRAME),
         Err(WireError::Io | WireError::Malformed) => return Err(ERR_TIMEOUT),
-    }
+    };
 
     let reply: Value = serde_json::from_slice(&incoming).map_err(|_| ERR_REPLY)?;
 
