@@ -1,6 +1,5 @@
 --!strict
 -- SDK contract major: 1
--- A host refuses a plugin written against another major with a named error.
 
 -- The scoped module loader bound into each module chunk's environment, with
 -- Luau's stock require absent. A specifier resolves relative to the requiring

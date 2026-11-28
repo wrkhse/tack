@@ -65,8 +65,7 @@ impl fmt::Display for BuildError {
 impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::NeedMissing(_) => None,
-            Self::Sdk(_) => None,
+            Self::NeedMissing(_) | Self::Sdk(_) => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -116,17 +115,18 @@ fn load(plugin_dir: &Path) -> Result<(PathBuf, PluginManifest), BuildError> {
 }
 
 /// Refuse a symlink at a path the build owns, so a declaration cannot be
-/// written outside the output folder. A missing path is fine; other I/O
-/// errors are reported through BuildError::Io.
+/// written outside the output folder. If the path cannot be inspected, the
+/// file operation that follows reports any real I/O error.
 fn refuse_symlink(path: &Path, subject: &str) -> Result<(), BuildError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(BuildError::Sdk(format!("the SDK {subject} is a symlink")))
-        }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(BuildError::Io(error)),
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+
+    if metadata.file_type().is_symlink() {
+        return Err(BuildError::Sdk(format!("the SDK {subject} is a symlink")));
     }
+
+    Ok(())
 }
 
 /// Emit the SDK's strict Luau declarations for a plugin that lists the `sdk`

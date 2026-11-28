@@ -255,6 +255,7 @@ fn a_listing_plugin_emits_the_strict_sdk_declarations() {
     let emitted = std::fs::read_to_string(&declaration).expect("SDK declaration is readable");
 
     assert_eq!(emitted, TACK_D_LUAU);
+    assert!(TACK_D_LUAU.starts_with("--!strict\n"));
     assert_eq!(std::fs::read_dir(out.join("sdk")).unwrap().count(), 1);
 }
 
