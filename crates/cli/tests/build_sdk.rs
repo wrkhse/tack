@@ -3,6 +3,8 @@
 
 #![cfg(test)]
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -224,4 +226,108 @@ fn a_modules_value_that_is_not_a_table_fails_by_name_before_writing_outputs() {
 
     assert_eq!(error.to_string(), "modules:modules must be a table");
     assert_nothing_written(&out, &home);
+}
+
+#[test]
+#[cfg(unix)]
+fn sdk_opt_in_refuses_a_symlinked_sdk_folder() {
+    let scratch = Scratch::new();
+    let plugin = scratch.plugin("linked-folder", SDK_PLUGIN);
+    let out = scratch.out("linked-folder");
+    std::fs::create_dir_all(&out).expect("output folder");
+    let home = scratch.home("linked-folder");
+
+    let outside = scratch.root.join("outside-folder");
+    std::fs::create_dir_all(&outside).expect("outside folder");
+    symlink(&outside, out.join("sdk")).expect("sdk symlink");
+
+    let error = build_target("pi", &plugin, &out, &home).expect_err("a symlink is refused");
+
+    assert_eq!(error.to_string(), "unsafe_sdk_path:sdk");
+    assert!(
+        !outside.join("tack.d.luau").exists(),
+        "nothing is written through the link"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn sdk_opt_in_refuses_a_symlinked_declaration() {
+    let scratch = Scratch::new();
+    let plugin = scratch.plugin("linked-declaration", SDK_PLUGIN);
+    let out = scratch.out("linked-declaration");
+    std::fs::create_dir_all(&out).expect("output folder");
+    let home = scratch.home("linked-declaration");
+
+    let target = scratch.root.join("outside-declaration.luau");
+    std::fs::write(&target, "unchanged").expect("target file");
+    std::fs::create_dir_all(out.join("sdk")).expect("real sdk folder");
+    symlink(&target, out.join("sdk/tack.d.luau")).expect("declaration symlink");
+
+    let error = build_target("pi", &plugin, &out, &home).expect_err("a symlink is refused");
+
+    assert_eq!(error.to_string(), "unsafe_sdk_path:sdk/tack.d.luau");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("target still readable"),
+        "unchanged"
+    );
+}
+
+#[test]
+fn sdk_opt_in_refuses_a_file_at_the_sdk_folder() {
+    let scratch = Scratch::new();
+    let plugin = scratch.plugin("file-at-sdk", SDK_PLUGIN);
+    let out = scratch.out("file-at-sdk");
+    std::fs::create_dir_all(&out).expect("output folder");
+    let home = scratch.home("file-at-sdk");
+
+    std::fs::write(out.join("sdk"), "unchanged").expect("file at sdk");
+
+    let error = build_target("pi", &plugin, &out, &home).expect_err("a file is refused");
+
+    assert_eq!(error.to_string(), "unsafe_sdk_path:sdk");
+    assert_eq!(
+        std::fs::read_to_string(out.join("sdk")).expect("file still readable"),
+        "unchanged"
+    );
+}
+
+#[test]
+fn sdk_opt_in_refuses_a_directory_at_the_declaration() {
+    let scratch = Scratch::new();
+    let plugin = scratch.plugin("dir-at-declaration", SDK_PLUGIN);
+    let out = scratch.out("dir-at-declaration");
+    std::fs::create_dir_all(&out).expect("output folder");
+    let home = scratch.home("dir-at-declaration");
+
+    std::fs::create_dir_all(out.join("sdk/tack.d.luau")).expect("directory at declaration");
+
+    let error = build_target("pi", &plugin, &out, &home).expect_err("a directory is refused");
+
+    assert_eq!(error.to_string(), "unsafe_sdk_path:sdk/tack.d.luau");
+}
+
+#[test]
+fn opting_out_removes_a_stale_declaration_and_empty_folder() {
+    let scratch = Scratch::new();
+    let plugin = scratch.plugin("stale", SDK_PLUGIN);
+    let out = scratch.out("stale");
+    std::fs::create_dir_all(&out).expect("output folder");
+    let home = scratch.home("stale");
+
+    let written = build_target("pi", &plugin, &out, &home).expect("opt-in builds");
+    let mut expected = base_outputs("pi", &out, &home);
+    expected.push(out.join("sdk/tack.d.luau"));
+
+    assert_eq!(written, expected);
+    assert_eq!(
+        std::fs::read(out.join("sdk/tack.d.luau")).expect("declaration"),
+        TACK_D_LUAU.as_bytes()
+    );
+
+    let no_modules = scratch.plugin("stale-opt-out", NO_MODULES);
+    let written = build_target("pi", &no_modules, &out, &home).expect("opt-out builds");
+
+    assert_eq!(written, base_outputs("pi", &out, &home));
+    assert!(!out.join("sdk").exists(), "the stale SDK folder is removed");
 }

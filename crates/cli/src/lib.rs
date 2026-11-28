@@ -6,6 +6,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::fs::Metadata;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
@@ -38,6 +39,7 @@ pub enum BuildError {
     UnknownModule(String),
     InvalidModuleConfig(String),
     Modules(String),
+    UnsafeSdkPath(String),
     Sandbox(EngineError),
     Manifest(serde_json::Error),
     Render(WrapperError),
@@ -54,6 +56,7 @@ impl fmt::Display for BuildError {
             Self::UnknownModule(name) => write!(f, "unknown_module:{name}"),
             Self::InvalidModuleConfig(name) => write!(f, "invalid_module_config:{name}"),
             Self::Modules(message) => write!(f, "modules:{message}"),
+            Self::UnsafeSdkPath(name) => write!(f, "unsafe_sdk_path:{name}"),
             Self::Sandbox(error) => write!(f, "sandbox:tack: {error}"),
             Self::Manifest(error) => write!(f, "manifest:{error}"),
             Self::Render(error) => write!(f, "render:{error}"),
@@ -72,6 +75,7 @@ impl Error for BuildError {
             Self::UnknownModule(_) => None,
             Self::InvalidModuleConfig(_) => None,
             Self::Modules(_) => None,
+            Self::UnsafeSdkPath(_) => None,
             Self::Sandbox(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Render(error) => Some(error),
@@ -134,18 +138,60 @@ fn read_modules(value: &Value) -> Result<Modules, BuildError> {
     Ok(Modules { sdk: true })
 }
 
-/// Write the fixed SDK declaration into `<out>/sdk` when the plugin opts in.
+/// Read one SDK output path without following a link.
+///
+/// A missing path is fine. A symlink is refused so the build never writes
+/// through one a caller placed in the output tree; this is one check, not
+/// protection against a concurrent writer.
+fn sdk_path_metadata(path: &Path, name: &'static str) -> Result<Option<Metadata>, BuildError> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(BuildError::UnsafeSdkPath(name.to_owned()))
+        }
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BuildError::Io(error)),
+    }
+}
+
+/// Write the fixed SDK declaration into out/sdk when the plugin opts in,
+/// and clear a stale one when it does not.
 fn emit_sdk(out: &Path, modules: Modules, written: &mut Vec<PathBuf>) -> Result<(), BuildError> {
+    let dest = out.join("sdk");
+    let declaration = dest.join("tack.d.luau");
+    let dest_metadata = sdk_path_metadata(&dest, "sdk")?;
+
+    if dest_metadata.is_some_and(|metadata| !metadata.is_dir()) {
+        return Err(BuildError::UnsafeSdkPath("sdk".to_owned()));
+    }
+
+    let declaration_metadata = sdk_path_metadata(&declaration, "sdk/tack.d.luau")?;
+
     if !modules.sdk {
+        let stale = declaration_metadata.is_some_and(|metadata| metadata.is_file());
+
+        if stale {
+            std::fs::remove_file(&declaration).map_err(BuildError::Io)?;
+
+            match std::fs::remove_dir(&dest) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(BuildError::Io(error)),
+            }
+        }
+
         return Ok(());
     }
 
-    let dest = out.join("sdk");
-    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
-    let path = dest.join("tack.d.luau");
-    std::fs::write(&path, tack_sdk::TACK_D_LUAU).map_err(BuildError::Io)?;
+    if declaration_metadata.is_some_and(|metadata| !metadata.is_file()) {
+        return Err(BuildError::UnsafeSdkPath("sdk/tack.d.luau".to_owned()));
+    }
 
-    written.push(path);
+    std::fs::create_dir_all(&dest).map_err(BuildError::Io)?;
+    std::fs::write(&declaration, tack_sdk::TACK_D_LUAU).map_err(BuildError::Io)?;
+
+    written.push(declaration);
     Ok(())
 }
 
@@ -209,7 +255,8 @@ fn deny_reasons() -> Vec<&'static str> {
 /// an unsupported need, [`BuildError::Render`] when the wrapper cannot be
 /// rendered, and [`BuildError::UnknownModule`],
 /// [`BuildError::InvalidModuleConfig`] or [`BuildError::Modules`] when the
-/// `modules` table is malformed.
+/// `modules` table is malformed, and [`BuildError::UnsafeSdkPath`] when an SDK
+/// output path is a symlink or the wrong file kind.
 pub fn build(
     plugin_dir: &Path,
     out: &Path,
@@ -261,7 +308,9 @@ pub fn build(
 /// wire contract, [`BuildError::NeedMissing`] for an unsupported need,
 /// [`BuildError::RenderMod`] when the mod cannot be rendered, and
 /// [`BuildError::UnknownModule`], [`BuildError::InvalidModuleConfig`] or
-/// [`BuildError::Modules`] when the `modules` table is malformed.
+/// [`BuildError::Modules`] when the `modules` table is malformed, and
+/// [`BuildError::UnsafeSdkPath`] when an SDK output path is a symlink or the
+/// wrong file kind.
 pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
     let (plugin_dir, manifest, modules) = load(plugin_dir)?;
     let reasons = deny_reasons();
@@ -305,7 +354,9 @@ pub fn build_claude(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, Build
 /// contract, [`BuildError::NeedMissing`] for an unsupported need, and
 /// [`BuildError::RenderExtension`] when the extension cannot be rendered,
 /// and [`BuildError::UnknownModule`], [`BuildError::InvalidModuleConfig`]
-/// or [`BuildError::Modules`] when the `modules` table is malformed.
+/// or [`BuildError::Modules`] when the `modules` table is malformed, and
+/// [`BuildError::UnsafeSdkPath`] when an SDK output path is a symlink or the
+/// wrong file kind.
 pub fn build_pi(plugin_dir: &Path, out: &Path) -> Result<Vec<PathBuf>, BuildError> {
     let (plugin_dir, _, modules) = load(plugin_dir)?;
     let script = tack_adapter_pi::render(&plugin_dir).map_err(BuildError::RenderExtension)?;
@@ -408,7 +459,8 @@ fn planned_dir(path: &Path) -> std::io::Result<PathBuf> {
 /// [`BuildError::Codex`] when the adapter cannot be rendered or the Codex home
 /// cannot be merged, and [`BuildError::UnknownModule`],
 /// [`BuildError::InvalidModuleConfig`] or [`BuildError::Modules`] when the
-/// `modules` table is malformed.
+/// `modules` table is malformed, and [`BuildError::UnsafeSdkPath`] when an
+/// SDK output path is a symlink or the wrong file kind.
 pub fn build_codex(
     plugin_dir: &Path,
     out: &Path,

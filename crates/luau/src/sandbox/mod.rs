@@ -245,10 +245,9 @@ impl Sandbox {
     }
 
     fn read_modules(&self) -> Result<Value, EngineError> {
-        match self.plugin.get::<Option<LuaValue>>("modules")? {
-            Some(value) => lua_to_json(value, 0),
-            None => Ok(Value::Null),
-        }
+        self.plugin
+            .get::<Option<LuaValue>>("modules")?
+            .map_or(Ok(Value::Null), |value| lua_to_json(value, 0))
     }
 
     fn read_needs(&self) -> Result<Vec<String>, EngineError> {

@@ -37,10 +37,17 @@ export type ToolDef = {
     run: (input: any, ctx: HookCtx) -> ToolResult,
 }
 
+-- Build-time modules a plugin opts into. tack build writes the typed
+-- declarations only when sdk is listed.
+export type Modules = {
+    sdk: {}?,
+}
+
 -- The table plugin.luau must return.
 export type Plugin = {
     name: string,
     needs: { string }?,
+    modules: Modules?,
     toolBefore: ((payload: any, ctx: ToolBeforeCtx) -> ToolBeforeResult)?,
     tools: { [string]: ToolDef }?,
 }
