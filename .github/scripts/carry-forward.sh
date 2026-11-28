@@ -9,8 +9,9 @@ set -euo pipefail
   "${PR:?PR is required}" \
   "${HEAD_SHA:?HEAD_SHA is required}" \
   "${BASE_SHA:?BASE_SHA is required}" \
-  "${BODY_HASH:?BODY_HASH is required}"
+  "${PR_JSON:?PR_JSON is required}"
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 marker='<!-- opencode-review -->'
 author_id=41898282
 prefix='<!-- opencode-review-meta '
@@ -25,6 +26,12 @@ lookup_failed() {
   printf '::error::Carry-forward lookup failed: %s\n' "${message:-unknown error}" >&2
 }
 
+# Writer and reader must hash the body the same way; a failure reviews fresh.
+body_hash=''
+if ! body_hash=$(PR_JSON="$PR_JSON" bash "$script_dir/pr-body-hash.sh" 2> "$err"); then
+  lookup_failed
+fi
+
 comments=''
 if ! comments=$(gh api --paginate --jq '.[] | {id, user: {id: .user.id}, body}' \
     "repos/$REPO/issues/$PR/comments" 2> "$err"); then
@@ -32,7 +39,7 @@ if ! comments=$(gh api --paginate --jq '.[] | {id, user: {id: .user.id}, body}' 
   comments=''
 fi
 
-if [ -n "$comments" ]; then
+if [ -n "$comments" ] && [ -n "$body_hash" ]; then
   body=''
   if ! body=$(printf '%s\n' "$comments" | jq -rs \
       --arg marker "$marker" --argjson author "$author_id" '
@@ -60,7 +67,7 @@ if [ -n "$comments" ]; then
         verdict_ok=''
         if ! verdict_ok=$(printf '%s' "$json" | jq -r \
             --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
-            --arg body "$BODY_HASH" '
+            --arg body "$body_hash" '
               if (.head == $head and .base == $base and .body == $body
                   and .verdict == "MERGE AS IS") then "true" else "false" end
             ' 2> "$err"); then

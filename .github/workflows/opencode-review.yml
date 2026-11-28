@@ -67,6 +67,10 @@ jobs:
       pull-requests: write
       issues: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
       - name: Resolve proof-run inputs
         id: dispatch
         if: github.event_name == 'workflow_dispatch'
@@ -104,6 +108,13 @@ jobs:
           read -r head base <<< "$info"
           echo "pr_head=$head" >> "$GITHUB_OUTPUT"
           echo "pr_base=$base" >> "$GITHUB_OUTPUT"
+      - name: Fetch PR metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr_number }}
+        shell: bash
+        run: gh pr view "$PR" -R "$REPO" --json title,body,files > "$RUNNER_TEMP/pr.json"
       # A title/body-only edit has no new commits. Reuse the most recent
       # completed review verdict for this exact head SHA; never run the model.
       - name: Carry forward review on title edit
@@ -119,7 +130,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BODY_HASH: ${{ env.PR_BODY_HASH }}
+          PR_JSON: ${{ runner.temp }}/pr.json
         shell: bash
         run: bash .github/scripts/carry-forward.sh
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -176,8 +187,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh pr view "$PR" -R "$REPO" --json title,body,files > "$PR_JSON"
-          body_hash=$(jq -r '.body // ""' "$PR_JSON" | sha256sum | cut -d' ' -f1)
+          body_hash=$(PR_JSON="$PR_JSON" bash .github/scripts/pr-body-hash.sh)
           echo "PR_BODY_HASH=$body_hash" >> "$GITHUB_ENV"
           gh api "repos/$REPO/pulls/$PR" --jq .changed_files > "$CHANGED_FILES"
           # Keep it out of git status, so the run never sees it as a change.

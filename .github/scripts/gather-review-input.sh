@@ -153,7 +153,7 @@ if [ "$config_ok" = true ] && [[ "$changed" =~ ^[0-9]+$ ]] &&
       | any($c.governance_names[]; . as $n | ($n | ascii_downcase) == $last)
         or any($c.governance_paths[]; . as $g | ($g | ascii_downcase) == $p)
         or any($c.non_docs_globs[]; . as $g
-            | ($g | ascii_downcase | rtrimstr("**") | rtrimstr("*")) as $prefix
+            | ($g | ascii_downcase | split("*")[0]) as $prefix
             | ($p | startswith($prefix)));
 
     if (length == 0 or any(.[]; type != "array")) then
@@ -196,6 +196,20 @@ normalize_path() {
   (IFS=/; printf '%s' "${out[*]}")
 }
 
+find_manifest() {
+  local dir="$1"
+  while :; do
+    if [ -f "$dir/Cargo.toml" ]; then
+      printf '%s\n' "$dir/Cargo.toml"
+      return 0
+    fi
+    if [ "$dir" = . ]; then break; fi
+    dir=$(dirname -- "$dir")
+    [ -n "$dir" ] || dir=.
+  done
+  return 1
+}
+
 if [ "$docs_only" = true ]; then
   if ! command -v "$RG" > /dev/null 2>&1; then
     printf '%s is unavailable; cannot check include_str! references; reviewing as code.\n' "$RG" >> "$notes"
@@ -203,31 +217,70 @@ if [ "$docs_only" = true ]; then
   else
     md_paths=$(printf '%s' "$api_files" | jq -rs '
       [ .[].[]? | ((.filename? // empty), (.previous_filename? // empty))
-        | select(type == "string" and endswith(".md")) ] | unique | .[]' 2> /dev/null || true)
+        | select(type == "string" and test("\\.md$"; "i")) ] | unique | .[]' 2> /dev/null || true)
     mapfile -t roots < <(jq -r '.include_roots[]?' "$config" 2> /dev/null)
     [ "${#roots[@]}" -gt 0 ] || roots=(.)
-    includes=$("$RG" -n --no-heading --max-count 1 --max-filesize 2000000 \
-      --glob '*.rs' --glob '!target/**' 'include_str!.*"[^"]+"' \
-      "${roots[@]}" 2> /dev/null | head -n 200 || true)
-    while IFS= read -r md; do
-      [ -n "$md" ] || continue
-      target=$(normalize_path "$md")
-      while IFS= read -r hit; do
-        [ -n "$hit" ] || continue
-        file=${hit%%:*}
-        inc=$(printf '%s\n' "$hit" | sed -n 's/.*include_str!.*"\([^"]*\)".*/\1/p')
-        [ -n "$inc" ] || continue
-        dir=${file%/*}
-        if [ "$dir" = "$file" ]; then dir='.'; fi
-        resolved=$(normalize_path "$dir/$inc")
-        if [ "$resolved" = "$target" ]; then
-          docs_only=false
-          printf 'Markdown %s is included by include_str! in Rust; reviewing as code.\n' "$md" >> "$notes"
-          break
-        fi
-      done <<< "$includes"
-      if [ "$docs_only" = false ]; then break; fi
-    done <<< "$md_paths"
+    # Flatten each Rust file so a path split across lines still matches, and
+    # parse every include separately. A truncated or unparseable scan fails closed.
+    scan="$OUT/include-scan.txt"
+    : > "$scan"
+    files=$("$RG" -l --glob '*.rs' --glob '!target/**' 'include_str!' "${roots[@]}" 2> /dev/null || true)
+    file_count=$(printf '%s\n' "$files" | grep -c . || true)
+    raw_count=0
+    if [ "$file_count" -gt 100 ]; then
+      docs_only=false
+      printf 'include_str! scan covered too many files (%s); reviewing as code.\n' "$file_count" >> "$notes"
+    else
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        flat=$(tr '\n' ' ' < "$file")
+        n=$(printf '%s' "$flat" | "$RG" -o 'include_str!' 2> /dev/null | wc -l || true)
+        raw_count=$((raw_count + n))
+        printf '%s' "$flat" | "$RG" --label "$file" -o --no-heading \
+          'include_str!\s*\(\s*"[^"]*"|include_str!\s*\(concat!\s*\(\s*env!\s*\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*"[^"]*"' \
+          >> "$scan" 2> /dev/null || true
+      done <<< "$files"
+      parsed_count=$(grep -c . "$scan" || true)
+      if [ "$raw_count" -gt "$parsed_count" ] || [ "$parsed_count" -gt 200 ]; then
+        docs_only=false
+        printf 'include_str! scan was truncated or unparseable (%s of %s includes); reviewing as code.\n' \
+          "$parsed_count" "$raw_count" >> "$notes"
+      fi
+    fi
+
+    if [ "$docs_only" = true ]; then
+      while IFS= read -r md; do
+        [ -n "$md" ] || continue
+        target=$(normalize_path "$md")
+        while IFS= read -r hit; do
+          [ -n "$hit" ] || continue
+          file=${hit%%:*}
+          expr=${hit#*:}
+          inc=$(printf '%s' "$expr" | grep -o '"[^"]*"' | tail -n 1 | tr -d '"')
+          [ -n "$inc" ] || continue
+          dir=${file%/*}
+          if [ "$dir" = "$file" ]; then dir='.'; fi
+          if printf '%s' "$expr" | grep -Fq 'CARGO_MANIFEST_DIR'; then
+            manifest=$(find_manifest "$dir" || true)
+            if [ -z "$manifest" ]; then
+              docs_only=false
+              printf 'include_str! with CARGO_MANIFEST_DIR could not be resolved; reviewing as code.\n' >> "$notes"
+              break
+            fi
+            inc=${inc#/}
+            resolved=$(normalize_path "$(dirname -- "$manifest")/$inc")
+          else
+            resolved=$(normalize_path "$dir/$inc")
+          fi
+          if [ "$resolved" = "$target" ]; then
+            docs_only=false
+            printf 'Markdown %s is included by include_str! in Rust; reviewing as code.\n' "$md" >> "$notes"
+            break
+          fi
+        done < "$scan"
+        if [ "$docs_only" = false ]; then break; fi
+      done <<< "$md_paths"
+    fi
   fi
 fi
 

@@ -298,3 +298,34 @@ BASE="$base" HEAD="$head" PR_JSON="$tmp/pr.json" REPO=o/r PR=1 \
 [ "$(cat -- "$out/docs-only.txt")" = "false" ]
 grep -Fq 'cannot check include_str! references; reviewing as code.' "$out/NOTES.txt"
 printf 'ok: docs-only missing rg fails closed\n'
+
+# A crate-root include through concat!/CARGO_MANIFEST_DIR cannot be resolved
+# without a manifest, so classification must fail closed.
+cat > "$tmp/cargo-manifest.json" <<'JSON'
+{"title":"Crate root","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/cargo-manifest-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+mkdir -p "$tmp/unresolved/src"
+printf '%s\n' 'const DOC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md"));' \
+  > "$tmp/unresolved/src/lib.rs"
+run_docs_case cargo-manifest "$tmp/cargo-manifest.json" "$tmp/cargo-manifest-files.json" 1 false
+grep -Fq 'include_str! with CARGO_MANIFEST_DIR could not be resolved; reviewing as code.' \
+  "$tmp/docs-cargo-manifest/NOTES.txt"
+printf 'ok: docs-only unresolved CARGO_MANIFEST_DIR fails closed\n'
+
+# A raw-string include cannot be parsed, so the scan must fail closed.
+mkdir -p "$tmp/unparseable/src"
+printf '%s\n' 'const RAW: &str = include_str!(r"docs/raw.md");' \
+  > "$tmp/unparseable/src/lib.rs"
+cat > "$tmp/unparseable.json" <<'JSON'
+{"title":"Unparseable","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/unparseable-files.json" <<'JSON'
+[{"filename":"README.md","previous_filename":null,"status":"modified"}]
+JSON
+run_docs_case unparseable "$tmp/unparseable.json" "$tmp/unparseable-files.json" 1 false
+grep -Fq 'include_str! scan was truncated or unparseable' \
+  "$tmp/docs-unparseable/NOTES.txt"
+printf 'ok: docs-only unparseable include scan fails closed\n'

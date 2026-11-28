@@ -11,5 +11,5 @@
     ".agents/**",
     ".opencode/**"
   ],
-  "include_roots": ["crates"]
+  "include_roots": ["."]
 }
