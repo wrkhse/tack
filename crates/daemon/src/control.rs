@@ -531,6 +531,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trait_dispatch_recognizes_control_and_ordinary_lines() {
+        let broker: std::sync::Arc<dyn ControlBrokerTrait> =
+            std::sync::Arc::new(granted_broker(None));
+        let control = control_line(1, PROTOCOL_VERSION, "navigate", json!({}));
+        let ordinary = br#"{"type":"hook","id":22,"outcome":"allow"}"#;
+
+        assert!(broker.is_control(&control));
+        assert!(!broker.is_control(ordinary));
+    }
+
+    #[test]
+    fn trait_dispatch_returns_the_named_refusal() {
+        let broker: std::sync::Arc<dyn ControlBrokerTrait> = std::sync::Arc::new(
+            ControlBroker::new(LaunchIdentity::default(), Grants::default(), None),
+        );
+        let line = control_line(1, PROTOCOL_VERSION, "navigate", json!({}));
+
+        let reply = broker
+            .try_handle(&line, test_deadline())
+            .expect("a control frame gets a reply");
+
+        assert_eq!(reply_from(&reply), error("grant_denied"));
+    }
+
     // A harness that reads the call, then drips bytes without ending a line
     // until its own write budget runs out. The caller must not wait for it.
     fn slow_drip_harness(socket: &Path) -> thread::JoinHandle<()> {
