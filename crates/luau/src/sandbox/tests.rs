@@ -913,25 +913,24 @@ fn manifest_reads_the_listed_module() {
 }
 
 #[test]
-fn manifest_reads_every_listed_module() {
+fn manifest_reads_every_listed_module_in_name_order() {
     let scratch = Scratch::new();
     scratch.write(
         "plugin.luau",
-        r#"return { name = "safe-push", modules = { sdk = {}, other = {} } }"#,
+        r#"return { name = "safe-push", modules = { zeta = {}, alpha = {}, mu = {}, beta = {}, omega = {} } }"#,
     );
     let sandbox = Sandbox::new(scratch.path(), default_limits(), Capabilities::default())
         .expect("fixture loads");
 
-    let manifest = sandbox.manifest().expect("manifest reads");
-    let mut modules: Vec<String> = manifest["modules"]
-        .as_array()
-        .expect("modules is an array")
-        .iter()
-        .map(|module| module.as_str().expect("module is a name").to_owned())
-        .collect();
-    modules.sort();
-
-    assert_eq!(modules, ["other", "sdk"]);
+    assert_eq!(
+        sandbox.manifest(),
+        Ok(json!({
+            "name": "safe-push",
+            "needs": [],
+            "modules": ["alpha", "beta", "mu", "omega", "zeta"],
+            "tools": [],
+        }))
+    );
 }
 
 #[test]

@@ -281,6 +281,9 @@ impl Sandbox {
             }
             modules.push(name.to_str()?.to_string());
         }
+        // Entries come out of a Lua table in no fixed order; sort them so every
+        // caller sees the same list.
+        modules.sort();
         Ok(modules)
     }
 
