@@ -96,3 +96,31 @@ set -e
 grep -Fq 'cargo mutants exited 9' "$tmp/f.out"
 grep -Fq 'its outcome cannot be used' "$tmp/f.out"
 printf 'ok: nonzero exit with an existing outcome fails with a named reason\n'
+
+# An empty shard prints cargo-mutants' own warning instead of
+# 'No mutants to filter'; the real output is kept as a fixture.
+fixture="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fixtures/mutants-empty-shard.txt"
+cp -- "$fixture" "$tmp/g.log"
+: > "$tmp/g.list"
+run_script "$tmp/g.out" 0 "$tmp/g.log" "$tmp/g.list" \
+  "$tmp/g/outcomes.json" "$tmp/g.github-output"
+
+[ -f "$tmp/g/outcomes.json" ]
+[ "$(jq -c -S . "$tmp/g/outcomes.json")" = \
+  '{"caught":0,"missed":0,"timeout":0,"total_mutants":0,"unviable":0}' ]
+grep -Fxq 'zero=true' "$tmp/g.github-output"
+printf 'ok: empty-shard fixture writes a zero outcome\n'
+
+# The same recognised line still fails when the independent --list has mutants.
+cp -- "$fixture" "$tmp/h.log"
+printf 'src/lib.rs:3:5: replace > with <\n' > "$tmp/h.list"
+set +e
+run_script "$tmp/h.out" 0 "$tmp/h.log" "$tmp/h.list" \
+  "$tmp/h/outcomes.json" "$tmp/h.github-output"
+h_status=$?
+set -e
+
+[ "$h_status" -ne 0 ]
+[ ! -e "$tmp/h/outcomes.json" ]
+grep -Fq 'cargo mutants --list found mutants but wrote no' "$tmp/h.out"
+printf 'ok: empty-shard line with mutants in list still fails\n'

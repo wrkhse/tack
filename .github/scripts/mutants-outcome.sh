@@ -35,19 +35,28 @@ sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g' "$MUTANTS_LOG" |
   sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^(INFO|WARN|ERROR|DEBUG|TRACE)[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
   > "$normalized"
 
+# An empty shard makes cargo-mutants print its own warning instead of
+# "No mutants to filter". Match it as an exact whole line after the same
+# normalisation; every other log still needs a real outcomes file.
+no_mutants_reported() {
+  grep -Fxq 'No mutants to filter' "$normalized" \
+    || grep -Fxq 'No mutants found under the active filters' "$normalized"
+}
+
 # cargo-mutants --list prints one line per mutant. Blank lines and its own
-# no-mutants diagnostic carry no mutant.
+# no-mutants diagnostics carry no mutant.
 list_has_mutants() {
   awk '
     /^[[:space:]]*$/ { next }
     $0 == "No mutants to filter" { next }
+    $0 == "No mutants found under the active filters" { next }
     { found = 1 }
     END { exit found ? 0 : 1 }
   ' "$MUTANTS_LIST"
 }
 
 if [ "$MUTANTS_STATUS" -eq 0 ] \
-    && grep -Fxq 'No mutants to filter' "$normalized" \
+    && no_mutants_reported \
     && ! list_has_mutants; then
   mkdir -p -- "$(dirname -- "$OUTCOMES")"
   jq -n '{total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0}' > "$OUTCOMES"
@@ -59,8 +68,8 @@ if [ "$MUTANTS_STATUS" -eq 0 ] \
 fi
 
 if [ ! -f "$OUTCOMES" ]; then
-  if ! grep -Fxq 'No mutants to filter' "$normalized"; then
-    echo "::error::cargo mutants did not report 'No mutants to filter' and wrote no $OUTCOMES" >&2
+  if ! no_mutants_reported; then
+    echo "::error::cargo mutants did not report 'No mutants to filter' or the empty-shard 'No mutants found under the active filters' and wrote no $OUTCOMES" >&2
   else
     echo "::error::cargo mutants --list found mutants but wrote no $OUTCOMES" >&2
   fi
