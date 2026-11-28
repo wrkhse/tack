@@ -172,25 +172,36 @@ fn is_call_name(name: &str, rest: &str) -> bool {
         && (rest.starts_with(',') || rest.starts_with(')'))
 }
 
+/// Skip the ASCII whitespace at the start of `text`.
+fn skip_ascii_ws(text: &str) -> &str {
+    text.trim_start_matches(|byte: char| byte.is_ascii_whitespace())
+}
+
 /// Whether the text right after `control` uses it as a quoted index key, as
 /// in `ctx["control"] .call(...)` or `ctx["control"]["call"](...)`. ASCII
 /// whitespace may sit around the brackets, quote and member access tokens, so
 /// spacing the call out is refused rather than skipped.
 fn bracket_indexed_call(after: &str) -> bool {
-    fn space(text: &str) -> &str {
-        text.trim_start_matches(|byte: char| byte.is_ascii_whitespace())
-    }
+    let after = skip_ascii_ws(after);
+    let after = if let Some(rest) = after.strip_prefix(']') {
+        // A long-bracket key closes with `]]`, `]=]`, `]==]`, and so on.
+        let rest = rest.trim_start_matches('=');
+        let Some(rest) = rest.strip_prefix(']') else {
+            return false;
+        };
+        skip_ascii_ws(rest)
+    } else {
+        let Some(after) = after.strip_prefix('"').or_else(|| after.strip_prefix('\'')) else {
+            return false;
+        };
 
-    let after = space(after);
-    let Some(after) = after.strip_prefix('"').or_else(|| after.strip_prefix('\'')) else {
-        return false;
+        let Some(after) = skip_ascii_ws(after).strip_prefix(']') else {
+            return false;
+        };
+
+        skip_ascii_ws(after)
     };
 
-    let Some(after) = space(after).strip_prefix(']') else {
-        return false;
-    };
-
-    let after = space(after);
     after.starts_with('.') || after.starts_with('[')
 }
 
@@ -242,15 +253,14 @@ fn audit_source(source: &str, declared: &[String]) -> Result<(), BuildError> {
             .ok_or(BuildError::DynamicCapability)?;
         let literal = after.strip_prefix(CALL_PREFIX);
 
-        let whitespace_after = after
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_whitespace());
+        let trimmed = skip_ascii_ws(after);
+        let dot = trimmed.strip_prefix('.').map(skip_ascii_ws);
         let call_shaped = after.starts_with(".call(")
             || after.starts_with(":call(")
             || after.starts_with("\"].call(")
             || bracket_indexed_call(after)
-            || whitespace_after;
+            || trimmed.starts_with('[')
+            || dot.is_some_and(|rest| rest.starts_with("call"));
         let has_ctx_qualifier = source
             .get(..at)
             .and_then(|head| head.strip_suffix(CONTROL_QUALIFIER))

@@ -628,6 +628,23 @@ fn a_declared_control_call_builds() {
 }
 
 #[test]
+fn ordinary_control_text_builds() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "plugin.luau",
+        r#"-- control the flow
+local control = 1
+return {
+    name = "control plugin",
+    needs = { "sdk" },
+}"#,
+    );
+    let out = scratch.path().join("dist");
+
+    build(scratch.path(), &out, BuildOptions::default()).expect("ordinary control text builds");
+}
+
+#[test]
 fn a_plugin_cannot_require_a_runtime_client_module() {
     for spec in ["@tack/control", "tack/control"] {
         let scratch = Scratch::new();
@@ -726,6 +743,16 @@ mod audit_tests {
     #[test]
     fn a_bracket_indexed_control_is_dynamic() {
         dynamic(&source("", "ctx[\"control\"].call(\"navigate\", payload)"));
+    }
+
+    #[test]
+    fn a_long_bracket_indexed_control_is_dynamic() {
+        dynamic(&source("", "ctx[[control]].call(\"navigate\", p)"));
+    }
+
+    #[test]
+    fn an_equals_long_bracket_indexed_control_is_dynamic() {
+        dynamic(&source("", "ctx[=[control]=].call(\"navigate\", p)"));
     }
 
     #[test]

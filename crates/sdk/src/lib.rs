@@ -48,25 +48,25 @@ pub const fn check_contract_major(found: u32) -> Result<(), ContractError> {
 mod tests {
     use super::*;
 
-    const WRONG_MAJOR: u32 = 2;
-
     #[test]
     fn the_current_contract_major_is_accepted() {
-        assert_eq!(check_contract_major(SDK_CONTRACT_MAJOR), Ok(()));
+        assert_eq!(check_contract_major(1), Ok(()));
     }
 
     #[test]
     fn a_different_contract_major_is_refused_by_name() {
-        let found = WRONG_MAJOR;
-        let error = check_contract_major(found).expect_err("a different major is refused");
-
+        let two = check_contract_major(2).expect_err("major 2 is refused");
+        assert_eq!(two, ContractError::WrongMajor { found: 2 });
         assert_eq!(
-            check_contract_major(WRONG_MAJOR),
-            Err(ContractError::WrongMajor { found: WRONG_MAJOR })
-        );
-        assert_eq!(
-            error.to_string(),
+            two.to_string(),
             "contract_major_mismatch: found 2, expected 1"
+        );
+
+        let zero = check_contract_major(0).expect_err("major 0 is refused");
+        assert_eq!(zero, ContractError::WrongMajor { found: 0 });
+        assert_eq!(
+            zero.to_string(),
+            "contract_major_mismatch: found 0, expected 1"
         );
     }
 }
