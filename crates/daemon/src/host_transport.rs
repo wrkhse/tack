@@ -1725,6 +1725,9 @@ mod tests {
 
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
 
@@ -1735,10 +1738,35 @@ mod tests {
             reader.read_line(&mut line).unwrap();
             assert_eq!(line.trim_end(), CALL_FRAME);
 
+            let mut answered = true;
+
             for _ in 0..count {
                 writeln!(stream, "{CONTROL_REQUEST}").unwrap();
+
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        answered = false;
+                        break;
+                    }
+                    Ok(_) => assert_eq!(line.trim_end(), CONTROL_REPLY),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                        ) =>
+                    {
+                        answered = false;
+                        break;
+                    }
+                    Err(error) => panic!("reading the control reply failed: {error}"),
+                }
             }
-            writeln!(stream, "{CALL_REPLY}").unwrap();
+
+            if answered {
+                writeln!(stream, "{CALL_REPLY}").unwrap();
+            }
+            thread::sleep(Duration::from_millis(100));
         })
     }
 
