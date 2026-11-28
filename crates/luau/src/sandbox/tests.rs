@@ -991,7 +991,7 @@ fn manifest_limits_the_number_of_modules() {
     let scratch = Scratch::new();
     let mut entries = String::new();
     for index in 0..=MAX_ENTRIES {
-        write!(&mut entries, "m{index} = {{}},\n").expect("format module entry");
+        writeln!(&mut entries, "m{index} = {{}},").expect("format module entry");
     }
     scratch.write(
         "plugin.luau",
