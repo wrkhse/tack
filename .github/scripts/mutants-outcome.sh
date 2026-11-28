@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # A missing outcomes.json is a valid zero only when cargo mutants succeeded,
-# reported the exact no-mutants line, and an independent --list found none.
+# reported an exact zero-mutants line, and an independent --list found none.
 : "${MUTANTS_STATUS:?MUTANTS_STATUS is required}"
 : "${MUTANTS_LOG:?MUTANTS_LOG is required}"
 : "${MUTANTS_LIST:?MUTANTS_LIST is required}"
@@ -30,24 +30,39 @@ done
 # trim each line, then drop a leading log level so the message can be
 # matched exactly as a whole line.
 normalized=$(mktemp)
-trap 'rm -f -- "$normalized"' EXIT
+# Exact whole-line zero-mutants diagnostics: the filter case and cargo-mutants'
+# own empty-shard case (its WARN prefix is stripped during normalization).
+ZERO_MUTANTS_LINES=(
+  'No mutants to filter'
+  'Found 0 mutants to test'
+  'No mutants found under the active filters'
+)
+zero_lines=$(mktemp)
+trap 'rm -f -- "$normalized" "$zero_lines"' EXIT
+printf '%s\n' "${ZERO_MUTANTS_LINES[@]}" > "$zero_lines"
 sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g' "$MUTANTS_LOG" |
   sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^(INFO|WARN|ERROR|DEBUG|TRACE)[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
   > "$normalized"
 
-# cargo-mutants --list prints one line per mutant. Blank lines and its own
-# no-mutants diagnostic carry no mutant.
+# Success iff the normalized log contains any exact zero-mutants diagnostic.
+log_reports_zero_mutants() {
+  grep -Fxf "$zero_lines" "$normalized" > /dev/null
+}
+
+# cargo-mutants --list prints one line per mutant. Blank lines and any exact
+# zero-mutants diagnostic carry no mutant.
 list_has_mutants() {
   awk '
+    NR == FNR { zero[$0] = 1; next }
     /^[[:space:]]*$/ { next }
-    $0 == "No mutants to filter" { next }
+    $0 in zero { next }
     { found = 1 }
     END { exit found ? 0 : 1 }
-  ' "$MUTANTS_LIST"
+  ' "$zero_lines" "$MUTANTS_LIST"
 }
 
 if [ "$MUTANTS_STATUS" -eq 0 ] \
-    && grep -Fxq 'No mutants to filter' "$normalized" \
+    && log_reports_zero_mutants \
     && ! list_has_mutants; then
   mkdir -p -- "$(dirname -- "$OUTCOMES")"
   jq -n '{total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0}' > "$OUTCOMES"
@@ -59,8 +74,8 @@ if [ "$MUTANTS_STATUS" -eq 0 ] \
 fi
 
 if [ ! -f "$OUTCOMES" ]; then
-  if ! grep -Fxq 'No mutants to filter' "$normalized"; then
-    echo "::error::cargo mutants did not report 'No mutants to filter' and wrote no $OUTCOMES" >&2
+  if ! log_reports_zero_mutants; then
+    echo "::error::cargo mutants did not report 'No mutants to filter' or an empty-shard zero-mutants line ('Found 0 mutants to test' / 'No mutants found under the active filters') and wrote no $OUTCOMES" >&2
   else
     echo "::error::cargo mutants --list found mutants but wrote no $OUTCOMES" >&2
   fi
