@@ -142,11 +142,11 @@ if ((${#other_files[@]} > 0)); then
     fail 'tidy extract'
   fi
   if [[ ! -f "$tidy_bin" ]] || ! cmp -s "$extract_dir/tidy" "$tidy_bin"; then
-    if ! mv "$extract_dir/tidy" "$cache_dir/tidy.tmp"; then
+    if ! mv "$extract_dir/tidy" "$cache_dir/tidy.tmp.$$"; then
       fail 'tidy install'
     fi
-    chmod +x "$cache_dir/tidy.tmp"
-    if ! mv "$cache_dir/tidy.tmp" "$tidy_bin"; then
+    chmod +x "$cache_dir/tidy.tmp.$$"
+    if ! mv "$cache_dir/tidy.tmp.$$" "$tidy_bin"; then
       fail 'tidy install'
     fi
   fi
