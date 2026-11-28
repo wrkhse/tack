@@ -40,6 +40,18 @@ impl Drop for TempDir {
     }
 }
 
+fn assert_socket_mismatch(state: &Path, socket: &Path, status: Option<i32>, stderr: &str) {
+    assert_eq!(status, Some(2));
+    assert_eq!(
+        stderr,
+        format!(
+            "tack-daemon: socket_not_in_state_dir: expected {} got {}\n",
+            state.join("tack.sock").display(),
+            socket.display()
+        )
+    );
+}
+
 #[test]
 fn the_state_dir_comes_from_tack_state_dir() -> Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
@@ -61,17 +73,9 @@ fn the_state_dir_comes_from_tack_state_dir() -> Result<(), Box<dyn std::error::E
 
     let out = launched?;
 
-    assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr)?;
 
-    assert_eq!(
-        stderr,
-        format!(
-            "tack-daemon: socket_not_in_state_dir: expected {} got {}\n",
-            state.join("tack.sock").display(),
-            wrong.display()
-        )
-    );
+    assert_socket_mismatch(&state, &wrong, out.status.code(), &stderr);
 
     Ok(())
 }
