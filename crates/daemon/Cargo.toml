@@ -6,9 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+control-conformance = []
+
 [[bin]]
 name = "tack-daemon"
 path = "src/main.rs"
+
+[[test]]
+name = "control_conformance"
+path = "tests/control_conformance.rs"
+required-features = ["control-conformance"]
 
 [dependencies]
 rustix = { version = "1", default-features = false, features = ["process"] }

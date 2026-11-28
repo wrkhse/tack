@@ -3,8 +3,8 @@
 //! Drives the actual daemon binary against the actual barn stall. The plugin
 //! reaches a vendor-neutral harness through a computed control key, so the
 //! frame carries no plugin identity: authorization must come from the daemon's
-//! own launch arguments and the host grants file. Each test is inert unless
-//! `TACK_BARN_BIN` names a barn binary; CI supplies one.
+//! own launch arguments and the host grants file. `TACK_BARN_BIN` must name a
+//! barn binary; a missing value panics with a named message rather than skipping.
 
 #![cfg(test)]
 
@@ -199,6 +199,14 @@ impl Drop for Daemon {
     }
 }
 
+/// The real-stall proof cannot run without a barn binary, so a missing path
+/// fails loudly rather than silently skipping the conformance checks.
+fn barn_bin() -> String {
+    std::env::var("TACK_BARN_BIN").unwrap_or_else(|_| {
+        panic!("TACK_BARN_BIN is required for the real-stall control conformance proof")
+    })
+}
+
 fn start_daemon(barn: &str, sandbox: &Sandbox, plugin: &Path, grants: Option<&Path>) -> Daemon {
     start_daemon_with(barn, sandbox, plugin, grants, true)
 }
@@ -297,10 +305,7 @@ fn tool_reply(socket: &Path) -> Reply {
 
 #[test]
 fn a_denied_control_call_never_reaches_the_harness() {
-    let Ok(barn) = std::env::var("TACK_BARN_BIN") else {
-        println!("skipping: TACK_BARN_BIN is not set");
-        return;
-    };
+    let barn = barn_bin();
 
     let sandbox = Sandbox::new();
     let harness = FakeHarness::start(&sandbox.harness_socket());
@@ -323,10 +328,7 @@ fn a_denied_control_call_never_reaches_the_harness() {
 
 #[test]
 fn a_granted_control_call_returns_the_harness_result() {
-    let Ok(barn) = std::env::var("TACK_BARN_BIN") else {
-        println!("skipping: TACK_BARN_BIN is not set");
-        return;
-    };
+    let barn = barn_bin();
 
     let sandbox = Sandbox::new();
     let harness = FakeHarness::start(&sandbox.harness_socket());
@@ -350,10 +352,7 @@ fn a_granted_control_call_returns_the_harness_result() {
 
 #[test]
 fn a_granted_call_without_a_declared_need_never_reaches_the_harness() {
-    let Ok(barn) = std::env::var("TACK_BARN_BIN") else {
-        println!("skipping: TACK_BARN_BIN is not set");
-        return;
-    };
+    let barn = barn_bin();
 
     let sandbox = Sandbox::new();
     let harness = FakeHarness::start(&sandbox.harness_socket());
