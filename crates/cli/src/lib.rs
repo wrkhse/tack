@@ -120,14 +120,28 @@ fn deny_reasons() -> Vec<&'static str> {
 /// Emit the SDK's typed Luau declarations only when the plugin opts in,
 /// returning the path of the emitted file. When the plugin does not opt in,
 /// remove any declarations left by an earlier build so a reused output
-/// directory cannot keep a stale SDK file, and return `None`.
+/// directory cannot keep a stale SDK file, and return `None`. Symlinked SDK
+/// output paths are refused before any removal or write.
 fn emit_sdk(out: &Path, manifest: &PluginManifest) -> Result<Option<PathBuf>, BuildError> {
     let dest = out.join("sdk");
     let declarations = dest.join("tack.d.luau");
 
+    for path in [&dest, &declarations] {
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return Err(BuildError::Io(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "symlink in SDK output path",
+                )));
+            }
+        }
+    }
+
     if !manifest.needs.iter().any(|need| need == tack_sdk::SDK_NEED) {
-        if declarations.exists() {
-            std::fs::remove_file(&declarations).map_err(BuildError::Io)?;
+        match std::fs::remove_file(&declarations) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(BuildError::Io(err)),
         }
         // A folder holding other files is left alone.
         let _ = std::fs::remove_dir(&dest);

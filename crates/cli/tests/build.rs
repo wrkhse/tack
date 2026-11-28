@@ -309,6 +309,50 @@ fn an_unlisted_build_removes_stale_sdk_output() {
 }
 
 #[test]
+fn build_claude_removes_stale_sdk_output_when_unlisted() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let declarations = out.join("sdk").join("tack.d.luau");
+
+    build_claude(&plugin, &out).expect("sdk plugin builds");
+    assert!(declarations.exists());
+
+    build_claude(&fixture(), &out).expect("fixture builds");
+    assert!(!declarations.exists());
+}
+
+#[test]
+fn build_pi_removes_stale_sdk_output_when_unlisted() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let declarations = out.join("sdk").join("tack.d.luau");
+
+    build_pi(&plugin, &out).expect("sdk plugin builds");
+    assert!(declarations.exists());
+
+    build_pi(&fixture(), &out).expect("fixture builds");
+    assert!(!declarations.exists());
+}
+
+#[test]
+fn build_codex_removes_stale_sdk_output_when_unlisted() {
+    let scratch = Scratch::new();
+    let plugin = sdk_plugin(&scratch);
+    let out = scratch.path().join("dist");
+    let home = scratch.path().join("home");
+    std::fs::create_dir_all(&home).expect("codex home folder");
+    let declarations = out.join("sdk").join("tack.d.luau");
+
+    build_codex(&plugin, &out, &home).expect("sdk plugin builds");
+    assert!(declarations.exists());
+
+    build_codex(&fixture(), &out, &home).expect("fixture builds");
+    assert!(!declarations.exists());
+}
+
+#[test]
 fn build_claude_emits_sdk_declarations() {
     let scratch = Scratch::new();
     let plugin = sdk_plugin(&scratch);
