@@ -9,6 +9,10 @@
 - [Slice 4: one tack plugin as a Codex adapter](slices/slice-4.md) —
   **Implemented (v0.1.0-rc.5)**.
 
+## Other plans
+
+- [Source SDK: a source stall behind tack's framed hook](source-sdk.md).
+
 [Release: v0.1.0-rc.2](https://github.com/wrkhse/tack/releases/tag/v0.1.0-rc.2).
 
 [Release: v0.1.0-rc.3](https://github.com/wrkhse/tack/releases/tag/v0.1.0-rc.3).
