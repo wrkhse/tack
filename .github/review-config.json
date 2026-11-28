@@ -1,0 +1,15 @@
+{
+  "governance_names": [
+    "agents.md",
+    "claude.md",
+    "contributing.md"
+  ],
+  "governance_paths": [],
+  "non_docs_globs": [
+    ".github/**",
+    ".claude/**",
+    ".agents/**",
+    ".opencode/**"
+  ],
+  "include_roots": ["crates"]
+}

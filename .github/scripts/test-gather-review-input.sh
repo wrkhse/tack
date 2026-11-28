@@ -247,33 +247,54 @@ BASE="$base" HEAD="$head" PR_JSON="$tmp/pr.json" REPO=o/r PR=1 \
 [ "$(cat -- "$out/docs-only.txt")" = "false" ]
 printf 'ok: docs-only unreadable\n'
 
-# Nested mixed-case governance basenames must stay blocking.
+# Instruction files are governance at any depth, whatever their case.
 cat > "$tmp/nested-governance.json" <<'JSON'
-{"title":"Nested governance","body":"","files":[{"path":"docs/Claude.md"},{"path":"src/Agents.MD"},{"path":"notes/CONTRIBUTING.md"}]}
+{"title":"Nested governance","body":"","files":[{"path":"docs/CLAUDE.md"},{"path":"crates/x/AGENTS.md"},{"path":"site/CONTRIBUTING.md"}]}
 JSON
 cat > "$tmp/nested-governance-files.json" <<'JSON'
-[{"filename":"docs/Claude.md","previous_filename":null,"status":"modified"},{"filename":"src/Agents.MD","previous_filename":null,"status":"modified"},{"filename":"notes/CONTRIBUTING.md","previous_filename":null,"status":"modified"}]
+[{"filename":"docs/CLAUDE.md","previous_filename":null,"status":"modified"},{"filename":"crates/x/AGENTS.md","previous_filename":null,"status":"modified"},{"filename":"site/CONTRIBUTING.md","previous_filename":null,"status":"modified"}]
 JSON
 run_docs_case nested-governance "$tmp/nested-governance.json" "$tmp/nested-governance-files.json" 3 false
 
-# .claude/ and .agents/ paths are configuration, never docs.
-cat > "$tmp/agent-config.json" <<'JSON'
-{"title":"Agent config","body":"","files":[{"path":".claude/settings.md"},{"path":".agents/notes.md"}]}
+# Agent and assistant configuration directories are never docs-only.
+cat > "$tmp/agent-dirs.json" <<'JSON'
+{"title":"Agent dirs","body":"","files":[{"path":".claude/notes.md"},{"path":".agents/notes.md"}]}
 JSON
-cat > "$tmp/agent-config-files.json" <<'JSON'
-[{"filename":".claude/settings.md","previous_filename":null,"status":"modified"},{"filename":".agents/notes.md","previous_filename":null,"status":"modified"}]
+cat > "$tmp/agent-dirs-files.json" <<'JSON'
+[{"filename":".claude/notes.md","previous_filename":null,"status":"modified"},{"filename":".agents/notes.md","previous_filename":null,"status":"modified"}]
 JSON
-run_docs_case agent-config "$tmp/agent-config.json" "$tmp/agent-config-files.json" 2 false
+run_docs_case agent-dirs "$tmp/agent-dirs.json" "$tmp/agent-dirs-files.json" 2 false
 
-# A Markdown file consumed by include_str! is code. Keep this case last: the
-# Rust file stays in the checkout for the scan.
-printf '%s\n' 'pub const DOC: &str = include_str!("README.md");' > include_doc.rs
+# A crate-root doc include resolves ../README.md from a nested .rs file.
 cat > "$tmp/include-str.json" <<'JSON'
-{"title":"Include","body":"","files":[{"path":"README.md"}]}
+{"title":"Included doc","body":"","files":[{"path":"crates/x/README.md"}]}
 JSON
 cat > "$tmp/include-str-files.json" <<'JSON'
+[{"filename":"crates/x/README.md","previous_filename":null,"status":"modified"}]
+JSON
+mkdir -p "$tmp/crates/x/src"
+printf '%s\n' '#![doc = include_str!("../README.md")];' > "$tmp/crates/x/src/lib.rs"
+run_docs_case include-str "$tmp/include-str.json" "$tmp/include-str-files.json" 1 false
+grep -Fq 'Markdown crates/x/README.md is included by include_str! in Rust; reviewing as code.' \
+  "$tmp/docs-include-str/NOTES.txt"
+printf 'ok: docs-only include-str note\n'
+
+# Without rg the include check cannot run, so classification must fail closed.
+cat > "$tmp/no-rg.json" <<'JSON'
+{"title":"No rg","body":"","files":[{"path":"README.md"}]}
+JSON
+cat > "$tmp/no-rg-files.json" <<'JSON'
 [{"filename":"README.md","previous_filename":null,"status":"modified"}]
 JSON
-run_docs_case include-str "$tmp/include-str.json" "$tmp/include-str-files.json" 1 false
-grep -Fq 'include_str!' "$tmp/docs-include-str/NOTES.txt"
-printf 'ok: docs-only include_str!\n'
+out="$tmp/docs-no-rg"
+printf '%s\n' 1 > "$tmp/changed-files.txt"
+PR_FIXTURE="$tmp/no-rg.json" "$tmp/gh-pr-files" pr view 1 -R o/r \
+  --json title,body,files > "$tmp/pr.json"
+BASE="$base" HEAD="$head" PR_JSON="$tmp/pr.json" REPO=o/r PR=1 \
+  CHANGED_FILES="$tmp/changed-files.txt" \
+  API_FILES_FIXTURE="$tmp/no-rg-files.json" GH="$tmp/gh" RG="$tmp/no-such-rg" \
+  OUT="$out" MAX_BYTES=1000 MAX_COMMITS=100 "$gather"
+
+[ "$(cat -- "$out/docs-only.txt")" = "false" ]
+grep -Fq 'cannot check include_str! references; reviewing as code.' "$out/NOTES.txt"
+printf 'ok: docs-only missing rg fails closed\n'

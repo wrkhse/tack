@@ -2,33 +2,76 @@
 set -euo pipefail
 
 # Carry a verdict forward only for a title-only edit whose newest marker
-# comment came from github-actions[bot] on this exact head and base with
-# MERGE AS IS. A miss reviews fresh; it never fails the job.
+# comment came from github-actions[bot] on this exact head, base and PR body
+# with MERGE AS IS. A miss reviews fresh; lookup failures are reported and
+# never fail the job.
 : "${REPO:?REPO is required}" \
   "${PR:?PR is required}" \
   "${HEAD_SHA:?HEAD_SHA is required}" \
-  "${BASE_SHA:?BASE_SHA is required}"
+  "${BASE_SHA:?BASE_SHA is required}" \
+  "${BODY_HASH:?BODY_HASH is required}"
 
 marker='<!-- opencode-review -->'
 author_id=41898282
+prefix='<!-- opencode-review-meta '
+suffix=' -->'
 carried=false
+err=$(mktemp "${TMPDIR:-/tmp}/carry-forward-err.XXXXXX")
+trap 'rm -f -- "$err"' EXIT
 
-comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" 2>/dev/null || printf '[]\n')
+lookup_failed() {
+  local message
+  message=$(tr '\n' ' ' < "$err" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//') || message='unknown error'
+  printf '::error::Carry-forward lookup failed: %s\n' "${message:-unknown error}" >&2
+}
 
-body=$(printf '%s' "$comments" | jq -rs --arg marker "$marker" --argjson author "$author_id" '
-  [ .[] | select(.id | numbers)
-    | select(.user.id == $author)
-    | select(.body // "" | startswith($marker)) ]
-  | if length == 0 then "" else (sort_by(.id) | last | .body) end
-' 2>/dev/null || printf '')
+comments=''
+if ! comments=$(gh api --paginate --jq '.[] | {id, user: {id: .user.id}, body}' \
+    "repos/$REPO/issues/$PR/comments" 2> "$err"); then
+  lookup_failed
+  comments=''
+fi
 
-if [ -n "$body" ]; then
-  meta=$(printf '%s\n' "$body" | sed -n 's/^<!-- opencode-review-meta \({.*}\) -->$/\1/p' | tail -n 1)
-  if [ -n "$meta" ] && printf '%s' "$meta" | jq -e \
-      --arg head "$HEAD_SHA" --arg base "$BASE_SHA" '
-        .head == $head and .base == $base and .verdict == "MERGE AS IS"
-      ' > /dev/null 2>&1; then
-    carried=true
+if [ -n "$comments" ]; then
+  body=''
+  if ! body=$(printf '%s\n' "$comments" | jq -rs \
+      --arg marker "$marker" --argjson author "$author_id" '
+        if any(.[]; (.id | type) != "number"
+               or (.user.id? | type) != "number"
+               or ((.body? // "") | type) != "string") then
+          error("unexpected comment shape")
+        else . end
+        | [ .[]
+            | select(.user.id == $author)
+            | select(.body | startswith($marker)) ]
+        | if length == 0 then "" else (sort_by(.id) | last | .body) end
+      ' 2> "$err"); then
+    lookup_failed
+    body=''
+  fi
+
+  if [ -n "$body" ]; then
+    # Meta is fixed at line 4: marker, verdict, reviewer-or-blank, meta.
+    meta=$(printf '%s\n' "$body" | sed -n '4p')
+    case "$meta" in
+      "$prefix"*"$suffix")
+        json=${meta#"$prefix"}
+        json=${json%"$suffix"}
+        verdict_ok=''
+        if ! verdict_ok=$(printf '%s' "$json" | jq -r \
+            --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+            --arg body "$BODY_HASH" '
+              if (.head == $head and .base == $base and .body == $body
+                  and .verdict == "MERGE AS IS") then "true" else "false" end
+            ' 2> "$err"); then
+          lookup_failed
+          verdict_ok=''
+        fi
+        if [ "$verdict_ok" = true ]; then
+          carried=true
+        fi
+        ;;
+    esac
   fi
 fi
 

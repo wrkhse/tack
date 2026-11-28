@@ -63,7 +63,6 @@ jobs:
     permissions:
       id-token: write
       contents: read
-      checks: read
       # Commenting and reacting on a pull request needs pull-requests: write.
       pull-requests: write
       issues: write
@@ -120,6 +119,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BODY_HASH: ${{ env.PR_BODY_HASH }}
         shell: bash
         run: bash .github/scripts/carry-forward.sh
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -177,12 +177,14 @@ jobs:
         run: |
           set -euo pipefail
           gh pr view "$PR" -R "$REPO" --json title,body,files > "$PR_JSON"
+          body_hash=$(jq -r '.body // ""' "$PR_JSON" | sha256sum | cut -d' ' -f1)
+          echo "PR_BODY_HASH=$body_hash" >> "$GITHUB_ENV"
           gh api "repos/$REPO/pulls/$PR" --jq .changed_files > "$CHANGED_FILES"
           # Keep it out of git status, so the run never sees it as a change.
           echo "/review-input/" >> .git/info/exclude
           CHANGED_FILES="$CHANGED_FILES" bash .github/scripts/gather-review-input.sh
-      # One run, no GitHub access. The JSONL event stream is the reviewer's
-      # whole output; post-review.sh reads the review from it.
+      # Both attempts are bounded; the model has no GitHub access. The JSONL
+      # event stream is the reviewer's whole output; post-review.sh reads it.
       - name: Review (primary)
         id: review_primary
         timeout-minutes: 8
@@ -342,6 +344,7 @@ jobs:
           PR: ${{ github.event.pull_request.number || inputs.pr_number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BODY_HASH: ${{ env.PR_BODY_HASH }}
           DIFF: review-input/diff.patch
           EVENTS: ${{ runner.temp }}/review-events.jsonl
         shell: bash

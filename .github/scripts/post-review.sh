@@ -214,7 +214,9 @@ validate_findings() {
       | first) as $bad
     | if $bad then error($bad)
       else map(.side = side | if .line == null then . else .line |= floor end
-        | normalize_commit)
+        | normalize_commit
+        | if (.path | type) == "string" then .path |= gsub("\\p{Cc}"; " ") else . end
+        | if (.commit | type) == "string" then .commit |= gsub("\\p{Cc}"; " ") else . end)
       end
   '
 }
@@ -229,6 +231,7 @@ marker_comment() {
 
   jq -n --arg marker "$review_marker" --arg verdict "$verdict" \
     --arg head "${HEAD_SHA:-}" --arg base "${BASE_SHA:-}" \
+    --arg bodyhash "${BODY_HASH:-}" \
     --arg model "${MODEL:-}" --argjson limit "$marker_comment_limit" \
     --rawfile summary "$summary" --slurpfile findings "$findings" '
     def bullet:
@@ -244,10 +247,16 @@ marker_comment() {
     ($limit - 100) as $budget
     | "\n\n(Summary truncated.)" as $cut
     | ($summary | rtrimstr("\n")) as $text
+    | ($verdict
+        | if startswith("**Verdict: ") then .[11:] else . end
+        | if endswith("**") then .[:-2] else . end) as $bare_verdict
     | ([$marker, $verdict]
         + (if $model == "" then [] else ["Reviewer: \($model)"] end)
-        + (if $head == "" or $base == "" then [] else
-             ["<!-- opencode-review-meta " + ({"head":$head,"base":$base,"verdict":$verdict}|tojson) + " -->"] end)
+        + (if $head == "" or $base == "" or $bodyhash == "" then []
+           else (if $model == "" then [""] else [] end)
+             + ["<!-- opencode-review-meta "
+                 + ({"head":$head,"base":$base,"verdict":$bare_verdict,
+                     "body":$bodyhash}|tojson) + " -->"] end)
         | join("\n")) as $top
     | ($top + (if $text == "" then "" else "\n" + $text end)) as $head
     | ($findings[0] | map(select(.severity == "MUST"))

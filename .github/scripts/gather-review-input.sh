@@ -8,6 +8,9 @@ OUT="${OUT:-review-input}"
 GH="${GH:-gh}"
 MAX_BYTES="${MAX_BYTES:-2000000}"
 MAX_COMMITS="${MAX_COMMITS:-100}"
+RG="${RG:-rg}"
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+config="$script_dir/../review-config.json"
 
 if [[ ! "$MAX_BYTES" =~ ^[0-9]{1,18}$ || ! "$MAX_COMMITS" =~ ^[0-9]{1,18}$ ]]; then
   echo 'MAX_BYTES and MAX_COMMITS must be nonnegative integers of at most 18 digits.' >&2
@@ -118,10 +121,19 @@ changed=""
 if [ -n "${CHANGED_FILES-}" ] && [ -f "$CHANGED_FILES" ]; then
   changed=$(cat -- "$CHANGED_FILES" | tr -d '[:space:]') || changed=""
 fi
-if [[ "$changed" =~ ^[0-9]+$ ]] &&
+config_ok=false
+if [ -r "$config" ] &&
+   jq -e 'has("governance_names") and has("governance_paths") and
+          has("non_docs_globs") and has("include_roots")' \
+     "$config" > /dev/null 2>&1; then
+  config_ok=true
+else
+  printf 'Review config %s is missing or invalid; reviewing as code.\n' "$config" >> "$notes"
+fi
+if [ "$config_ok" = true ] && [[ "$changed" =~ ^[0-9]+$ ]] &&
    api_files=$("$GH" api --paginate "repos/$REPO/pulls/${PR-}/files" 2>/dev/null); then
   docs_only=$(printf '%s' "$api_files" | jq -rs \
-    --argjson changed "$changed" '
+    --slurpfile cfg "$config" --argjson changed "$changed" '
     def image:
       endswith(".png") or endswith(".jpg") or endswith(".gif");
 
@@ -132,26 +144,17 @@ if [[ "$changed" =~ ^[0-9]+$ ]] &&
           or ((($p | startswith("docs/")) or ($p | startswith("site/")))
               and ($p | image)));
 
-    # Governance files are never docs-only, on the old and new path of a
-    # rename alike. Compare case-insensitively at any depth.
-    def governance:
+    # Governance names and paths come from review-config.json. Matching is
+    # case-insensitive at any depth on the final path segment, on both sides
+    # of a rename. Configured non-docs globs are never docs-only either.
+    def governance($c):
       ascii_downcase as $p
-      | ($p | split("/") | last) as $name
-      | ($p == "agents.md"
-        or $p == "claude.md"
-        or $p == "contributing.md"
-        or $p == "philosophy.md"
-        or $p == "security.md"
-        or $p == "docs/repository-standards.md"
-        or $p == "docs/issues-and-pull-requests.md"
-        or $name == "agents.md"
-        or $name == "claude.md"
-        or $name == "contributing.md"
-        or ($name | endswith("agents.md"))
-        or ($p | startswith(".opencode/"))
-        or ($p | startswith(".github/"))
-        or ($p | startswith(".claude/"))
-        or ($p | startswith(".agents/")));
+      | ($p | split("/") | last) as $last
+      | any($c.governance_names[]; . as $n | ($n | ascii_downcase) == $last)
+        or any($c.governance_paths[]; . as $g | ($g | ascii_downcase) == $p)
+        or any($c.non_docs_globs[]; . as $g
+            | ($g | ascii_downcase | rtrimstr("**") | rtrimstr("*")) as $prefix
+            | ($p | startswith($prefix)));
 
     if (length == 0 or any(.[]; type != "array")) then
       false
@@ -164,42 +167,67 @@ if [[ "$changed" =~ ^[0-9]+$ ]] &&
           ($files | all(
             (.filename? // "") as $filename
             | (.previous_filename? // "") as $previous
-            | ($filename | type == "string" and allowed and (governance | not))
+            | ($filename | type == "string" and allowed and (governance($cfg[0]) | not))
               and (if (.status? // "") == "renamed" or (.previous_filename? != null) then
-                     ($previous | type == "string" and allowed and (governance | not))
+                     ($previous | type == "string" and allowed and (governance($cfg[0]) | not))
                    else true end)
           ))
         end
     end
   ') || docs_only=false
 fi
+# A Markdown file compiled into Rust through include_str! is code, not docs.
+# Only Rust sources are scanned, with a bounded number of matches; each include
+# is resolved against the directory of its .rs file. A missing rg fails closed.
+normalize_path() {
+  local raw="$1" part
+  local -a parts=() out=()
+  IFS='/' read -r -a parts <<< "$raw"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) continue ;;
+      ..) if [ "${#out[@]}" -gt 0 ]; then
+             unset "out[${#out[@]}-1]"
+             out=("${out[@]}")
+           fi ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  (IFS=/; printf '%s' "${out[*]}")
+}
 
-# A Markdown file pulled into Rust with include_str! is code, not docs. Keep
-# the scan bounded: at most 100 changed Markdown paths, .rs files no larger
-# than 1 MiB, and the first match per file.
 if [ "$docs_only" = true ]; then
-  md_paths=$(printf '%s' "${api_files:-}" | jq -rs '
-    [ .[][] | .filename? // empty
-      | select(type == "string")
-      | select(ascii_downcase | endswith(".md")) ]
-    | .[0:100] | unique | .[]
-  ' 2>/dev/null || printf '')
-  if [ -n "$md_paths" ]; then
-    patterns="$OUT/.include-str-patterns"
-    : > "$patterns"
+  if ! command -v "$RG" > /dev/null 2>&1; then
+    printf '%s is unavailable; cannot check include_str! references; reviewing as code.\n' "$RG" >> "$notes"
+    docs_only=false
+  else
+    md_paths=$(printf '%s' "$api_files" | jq -rs '
+      [ .[].[]? | ((.filename? // empty), (.previous_filename? // empty))
+        | select(type == "string" and endswith(".md")) ] | unique | .[]' 2> /dev/null || true)
+    mapfile -t roots < <(jq -r '.include_roots[]?' "$config" 2> /dev/null)
+    [ "${#roots[@]}" -gt 0 ] || roots=(.)
+    includes=$("$RG" -n --no-heading --max-count 1 --max-filesize 2000000 \
+      --glob '*.rs' --glob '!target/**' 'include_str!.*"[^"]+"' \
+      "${roots[@]}" 2> /dev/null | head -n 200 || true)
     while IFS= read -r md; do
       [ -n "$md" ] || continue
-      printf 'include_str!("%s")\n' "$md" >> "$patterns"
-      printf 'include_str!("../%s")\n' "$md" >> "$patterns"
-      printf 'include_str!(r#"%s"#)\n' "$md" >> "$patterns"
+      target=$(normalize_path "$md")
+      while IFS= read -r hit; do
+        [ -n "$hit" ] || continue
+        file=${hit%%:*}
+        inc=$(printf '%s\n' "$hit" | sed -n 's/.*include_str!.*"\([^"]*\)".*/\1/p')
+        [ -n "$inc" ] || continue
+        dir=${file%/*}
+        if [ "$dir" = "$file" ]; then dir='.'; fi
+        resolved=$(normalize_path "$dir/$inc")
+        if [ "$resolved" = "$target" ]; then
+          docs_only=false
+          printf 'Markdown %s is included by include_str! in Rust; reviewing as code.\n' "$md" >> "$notes"
+          break
+        fi
+      done <<< "$includes"
+      if [ "$docs_only" = false ]; then break; fi
     done <<< "$md_paths"
-    out_base=${OUT##*/}
-    if rg -q -F -f "$patterns" --max-count 1 --max-filesize 1048576 \
-        -g '*.rs' -g "!$out_base/**" . > /dev/null 2>&1; then
-      docs_only=false
-      printf 'A changed Markdown file is pulled in by include_str!; classified as code.\n' >> "$notes"
-    fi
-    rm -f -- "$patterns"
   fi
 fi
 
