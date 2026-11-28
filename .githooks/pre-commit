@@ -82,7 +82,7 @@ if ((${#rust_files[@]} > 0)); then
     if [[ "$staged_mode" == "120000" || -L "$file" || ! -f "$file" ]]; then
       fail 'staged path'
     fi
-    parent="$(dirname "$file")"
+    parent="$(dirname "./$file")"
     resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)"
     case "$resolved_parent/" in
       "$repo_root"/*) ;;
@@ -175,7 +175,7 @@ if ((${#other_files[@]} > 0)); then
     if [[ "$staged_mode" == "120000" || -L "$file" || ! -f "$file" ]]; then
       fail 'staged path'
     fi
-    parent="$(dirname "$file")"
+    parent="$(dirname "./$file")"
     resolved_parent="$(cd "$parent" 2>/dev/null && pwd -P)"
     case "$resolved_parent/" in
       "$repo_root"/*) ;;
