@@ -107,48 +107,28 @@ jobs:
           echo "pr_base=$base" >> "$GITHUB_OUTPUT"
       # A title/body-only edit has no new commits. Reuse the most recent
       # completed review verdict for this exact head SHA; never run the model.
-      - name: Carry forward review on title/body edit
+      - name: Carry forward review on title edit
         id: carry_forward
         if: >-
           github.event.action == 'edited' &&
+          github.event.changes.title &&
+          !github.event.changes.body &&
           !github.event.changes.base
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         shell: bash
-        run: |
-          set -euo pipefail
-
-          checks=$(gh api --paginate \
-            "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100") || exit 1
-          verdict=$(printf '%s' "$checks" | jq -rs --argjson pr "$PR" '
-            [ .[].check_runs[]
-              | select(.name == "review")
-              | select(.status == "completed")
-              | select(.conclusion == "success" or .conclusion == "failure")
-              | select(.app.id == 15368)
-              | select(any(.pull_requests[]?; .number == $pr))
-            ] as $matches
-            | if ($matches | length) == 0 then error("No review check-run for PR \($pr)")
-              else ($matches | sort_by(.completed_at) | reverse | .[0].conclusion)
-              end
-          ') || exit 1
-
-          if [ "$verdict" = success ]; then
-            echo "Carried forward review verdict: success."
-            exit 0
-          fi
-          echo "::error::No review verdict to carry forward (got ${verdict:-none})."
-          exit 1
+        run: bash .github/scripts/carry-forward.sh
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: steps.carry_forward.outcome == 'skipped'
+        if: steps.carry_forward.outputs.carried != 'true'
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Sign in to OpenCode
-        if: steps.carry_forward.outcome == 'skipped'
+        if: steps.carry_forward.outputs.carried != 'true'
         env:
           AUDIENCE: https://opencode.ai/console
           CLIENT_ID: ${{ secrets.OPENCODE_CLIENT_ID }}
@@ -165,7 +145,7 @@ jobs:
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
       - name: Install opencode v1.19.6
-        if: steps.carry_forward.outcome == 'skipped'
+        if: steps.carry_forward.outputs.carried != 'true'
         env:
           SHA256: 47734e08968b30cc22a0bffb6d9feeed76ad4aa743213a12122040392d09a057
         shell: bash
@@ -184,7 +164,7 @@ jobs:
       # capping each file at 2 MB and including at most 100 commits.
       # Every cut is noted in NOTES.txt.
       - name: Gather review material
-        if: steps.carry_forward.outcome == 'skipped'
+        if: steps.carry_forward.outputs.carried != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -192,21 +172,19 @@ jobs:
           BASE: ${{ github.event_name == 'workflow_dispatch' && steps.dispatch.outputs.pr_base || github.event.pull_request.base.sha }}
           HEAD: ${{ github.event_name == 'workflow_dispatch' && steps.dispatch.outputs.pr_head || github.event.pull_request.head.sha }}
           PR_JSON: ${{ runner.temp }}/pr.json
-          CHANGED_FILES: ${{ runner.temp }}/changed-files.txt
         shell: bash
         run: |
           set -euo pipefail
-          gh pr view "$PR" -R "$REPO" --json title,body,files > "$PR_JSON"
-          gh api "repos/$REPO/pulls/$PR" --jq .changed_files > "$CHANGED_FILES"
+          gh pr view "$PR" -R "$REPO" --json title,body > "$PR_JSON"
           # Keep it out of git status, so the run never sees it as a change.
           echo "/review-input/" >> .git/info/exclude
-          CHANGED_FILES="$CHANGED_FILES" bash .github/scripts/gather-review-input.sh
+          bash .github/scripts/gather-review-input.sh
       # One run, no GitHub access. The JSONL event stream is the reviewer's
       # whole output; post-review.sh reads the review from it.
       - name: Review (primary)
         id: review_primary
         timeout-minutes: 8
-        if: steps.carry_forward.outcome == 'skipped'
+        if: steps.carry_forward.outputs.carried != 'true'
         env:
           MODEL: ${{ steps.dispatch.outputs.primary_model || env.PRIMARY_MODEL }}
           PROMPT: |
@@ -322,8 +300,8 @@ jobs:
       - name: Review (fallback)
         id: review_fallback
         if: >-
-          always() && steps.carry_forward.outcome == 'skipped' &&
-          (steps.review_primary.outcome == 'failure' ||
+          always() && steps.carry_forward.outputs.carried != 'true' &&
+          (steps.review_primary.outcome != 'success' ||
            steps.review_primary.outputs.failed == 'true')
         timeout-minutes: 8
         env:
@@ -350,7 +328,7 @@ jobs:
       # minimizes earlier ones.
       - name: Post review
         if: >-
-          steps.carry_forward.outcome == 'skipped' &&
+          always() && steps.carry_forward.outputs.carried != 'true' &&
           ((steps.review_primary.outcome == 'success' &&
             steps.review_primary.outputs.failed == 'false') ||
            (steps.review_fallback.outcome == 'success' &&
@@ -360,6 +338,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr_number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DIFF: review-input/diff.patch
           EVENTS: ${{ runner.temp }}/review-events.jsonl
         shell: bash
