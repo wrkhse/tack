@@ -918,13 +918,13 @@ mod audit_tests {
     #[test]
     fn a_multibyte_character_after_a_granted_call_does_not_hide_a_later_call() {
         let scratch = Scratch::new();
-        // The audit is a text scan: this comment holds a granted call whose
-        // closing quote is immediately followed by a multibyte character.
+        // The audit is a text scan; a granted call, then a multibyte character
+        // in an intervening comment, then an undeclared call must still be seen.
         let error = refused(
             &scratch,
             &source(
                 "\"control.call.first\"",
-                "-- ctx.control.call(\"first\"é ctx.control.call(\"navigate\", payload)",
+                "-- ctx.control.call(\"first\", p) -- é\n        ctx.control.call(\"navigate\", payload)",
             ),
         );
 
